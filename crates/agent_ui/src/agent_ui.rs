@@ -23,7 +23,6 @@ mod mode_selector;
 mod model_selector;
 mod model_selector_popover;
 mod profile_selector;
-pub mod sidebar;
 mod slash_command;
 mod slash_command_picker;
 mod terminal_codegen;
@@ -35,6 +34,7 @@ mod text_thread_history;
 mod thread_history;
 mod thread_history_view;
 mod threads_archive_view;
+mod threads_panel;
 mod ui;
 
 use std::rc::Rc;
@@ -78,6 +78,7 @@ pub(crate) use model_selector_popover::ModelSelectorPopover;
 pub use text_thread_editor::{AgentPanelDelegate, TextThreadEditor};
 pub(crate) use thread_history::ThreadHistory;
 pub(crate) use thread_history_view::*;
+pub use threads_panel::ThreadsPanel;
 use zed_actions;
 
 actions!(

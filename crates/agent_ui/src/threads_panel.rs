@@ -10,9 +10,9 @@ use db::kvp::KEY_VALUE_STORE;
 use editor::Editor;
 use feature_flags::{AgentV2FeatureFlag, FeatureFlagViewExt as _};
 use gpui::{
-    Action, AnyElement, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, ListState, Pixels, Render, SharedString, Task, WeakEntity, Window, actions, list,
-    prelude::*, px,
+    AnyElement, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    ListState, Pixels, Render, SharedString, Task, WeakEntity, Window, actions, list, prelude::*,
+    px,
 };
 use menu::{Cancel, Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
 use project::Event as ProjectEvent;
@@ -232,7 +232,7 @@ fn workspace_label_from_path_list(path_list: &PathList) -> SharedString {
     }
 }
 
-pub struct Sidebar {
+pub struct ThreadsPanel {
     multi_workspace: WeakEntity<MultiWorkspace>,
     persistence_key: Option<u64>,
     is_open: bool,
@@ -254,7 +254,7 @@ pub struct Sidebar {
     _subscriptions: Vec<gpui::Subscription>,
 }
 
-impl Sidebar {
+impl ThreadsPanel {
     pub fn load(
         _workspace: WeakEntity<Workspace>,
         mut cx: AsyncWindowContext,
@@ -1856,7 +1856,7 @@ impl Sidebar {
     }
 }
 
-impl Sidebar {
+impl ThreadsPanel {
     pub fn is_open(&self) -> bool {
         self.is_open
     }
@@ -1984,15 +1984,15 @@ impl Sidebar {
     }
 }
 
-impl Focusable for Sidebar {
+impl Focusable for ThreadsPanel {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.filter_editor.focus_handle(cx)
     }
 }
 
-impl EventEmitter<PanelEvent> for Sidebar {}
+impl EventEmitter<PanelEvent> for ThreadsPanel {}
 
-impl Panel for Sidebar {
+impl Panel for ThreadsPanel {
     fn persistent_name() -> &'static str {
         "ThreadsSidebar"
     }
@@ -2056,7 +2056,7 @@ impl Panel for Sidebar {
     }
 }
 
-impl Render for Sidebar {
+impl Render for ThreadsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui_font = theme::setup_ui_font(window, cx);
         let docked_right = AgentSettings::get_global(cx).dock == settings::DockPosition::Right;
@@ -2170,7 +2170,7 @@ mod tests {
     fn setup_sidebar(
         multi_workspace: &Entity<MultiWorkspace>,
         cx: &mut gpui::VisualTestContext,
-    ) -> Entity<Sidebar> {
+    ) -> Entity<ThreadsPanel> {
         let (sidebar, _panel) = setup_sidebar_with_agent_panel(multi_workspace, cx);
         sidebar
     }
@@ -2178,22 +2178,17 @@ mod tests {
     fn setup_sidebar_with_agent_panel(
         multi_workspace: &Entity<MultiWorkspace>,
         cx: &mut gpui::VisualTestContext,
-    ) -> (Entity<Sidebar>, Entity<AgentPanel>) {
+    ) -> (Entity<ThreadsPanel>, Entity<AgentPanel>) {
         let workspace = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
         let project = workspace.read_with(cx, |ws, _cx| ws.project().clone());
         let panel = add_agent_panel(&workspace, &project, cx);
         workspace.update_in(cx, |workspace, window, cx| {
-            workspace.right_dock().update(cx, |dock, cx| {
-                if let Some(panel_ix) = dock.panel_index_for_type::<AgentPanel>() {
-                    dock.activate_panel(panel_ix, window, cx);
-                }
-                dock.set_open(true, window, cx);
-            });
+            workspace.focus_drawer::<AgentPanel>(window, cx);
         });
         cx.run_until_parked();
         let multi_workspace_entity = multi_workspace.clone();
         let sidebar = workspace.update_in(cx, |_, window, cx| {
-            cx.new(|cx| Sidebar::new(multi_workspace_entity, window, cx))
+            cx.new(|cx| ThreadsPanel::new(multi_workspace_entity, window, cx))
         });
         (sidebar, panel)
     }
@@ -2242,7 +2237,7 @@ mod tests {
         cx.run_until_parked();
     }
 
-    fn open_and_focus_sidebar(sidebar: &Entity<Sidebar>, cx: &mut gpui::VisualTestContext) {
+    fn open_and_focus_sidebar(sidebar: &Entity<ThreadsPanel>, cx: &mut gpui::VisualTestContext) {
         cx.run_until_parked();
         sidebar.update_in(cx, |sidebar, window, cx| {
             sidebar.set_open(true, cx);
@@ -2252,7 +2247,7 @@ mod tests {
     }
 
     fn visible_entries_as_strings(
-        sidebar: &Entity<Sidebar>,
+        sidebar: &Entity<ThreadsPanel>,
         cx: &mut gpui::VisualTestContext,
     ) -> Vec<String> {
         sidebar.read_with(cx, |sidebar, _cx| {
@@ -3154,7 +3149,7 @@ mod tests {
         workspace.update_in(cx, |workspace, window, cx| {
             let text_thread_store = cx.new(|cx| TextThreadStore::fake(project.clone(), cx));
             let panel = cx.new(|cx| AgentPanel::test_new(workspace, text_thread_store, window, cx));
-            workspace.add_panel(panel.clone(), window, cx);
+            workspace.set_left_drawer(panel.clone().into(), cx);
             panel
         })
     }
@@ -3266,7 +3261,11 @@ mod tests {
         );
     }
 
-    fn type_in_search(sidebar: &Entity<Sidebar>, query: &str, cx: &mut gpui::VisualTestContext) {
+    fn type_in_search(
+        sidebar: &Entity<ThreadsPanel>,
+        query: &str,
+        cx: &mut gpui::VisualTestContext,
+    ) {
         sidebar.update_in(cx, |sidebar, window, cx| {
             window.focus(&sidebar.filter_editor.focus_handle(cx), cx);
             sidebar.filter_editor.update(cx, |editor, cx| {

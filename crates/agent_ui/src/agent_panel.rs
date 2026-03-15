@@ -430,14 +430,14 @@ pub fn init(cx: &mut App) {
                             if workspace.right_drawer_view().is_none() {
                                 workspace.set_right_drawer(panel_view, cx);
                             } else {
-                                workspace.toggle_right_drawer(cx);
+                                workspace.toggle_drawer::<AgentPanel>(cx);
                             }
                         }
                         DockPosition::Left | DockPosition::Bottom => {
                             if workspace.left_drawer_view().is_none() {
                                 workspace.set_left_drawer(panel_view, cx);
                             } else {
-                                workspace.toggle_left_drawer(cx);
+                                workspace.toggle_drawer::<AgentPanel>(cx);
                             }
                         }
                     }
@@ -822,7 +822,6 @@ pub struct AgentPanel {
     agent_navigation_menu: Option<Entity<ContextMenu>>,
     _extension_subscription: Option<Subscription>,
     width: Option<Pixels>,
-    height: Option<Pixels>,
     zoomed: bool,
     pending_serialization: Option<Task<Result<()>>>,
     onboarding: Entity<AgentPanelOnboarding>,
@@ -1159,7 +1158,6 @@ impl AgentPanel {
             agent_navigation_menu: None,
             _extension_subscription: extension_subscription,
             width: None,
-            height: None,
             zoomed: false,
             pending_serialization: None,
             onboarding,
@@ -1250,20 +1248,7 @@ impl AgentPanel {
     }
 
     pub fn is_visible(workspace: &Entity<Workspace>, cx: &App) -> bool {
-        let workspace_read = workspace.read(cx);
-
-        workspace_read
-            .drawer::<AgentPanel>()
-            .map(|panel| {
-                let panel_id = Entity::entity_id(&panel);
-
-                workspace_read.all_docks().iter().any(|dock| {
-                    dock.read(cx)
-                        .visible_panel()
-                        .is_some_and(|visible_panel| visible_panel.panel_id() == panel_id)
-                })
-            })
-            .unwrap_or(false)
+        workspace.read(cx).drawer_is_open::<Self>()
     }
 
     pub fn active_connection_view(&self) -> Option<&Entity<ConnectionView>> {
@@ -3069,11 +3054,6 @@ impl AgentPanel {
 
     fn is_zoomed(&self, _window: &Window, _cx: &App) -> bool {
         self.zoomed
-    }
-
-    fn set_zoomed(&mut self, zoomed: bool, _window: &mut Window, cx: &mut Context<Self>) {
-        self.zoomed = zoomed;
-        cx.notify();
     }
 }
 
@@ -5159,7 +5139,7 @@ mod tests {
             let text_thread_store = cx.new(|cx| TextThreadStore::fake(project.clone(), cx));
             let panel =
                 cx.new(|cx| AgentPanel::new(workspace, text_thread_store, None, window, cx));
-            workspace.add_panel(panel, window, cx);
+            workspace.set_left_drawer(panel.clone().into(), cx);
         });
 
         cx.run_until_parked();
@@ -5671,7 +5651,7 @@ mod tests {
             let text_thread_store = cx.new(|cx| TextThreadStore::fake(project.clone(), cx));
             let panel =
                 cx.new(|cx| AgentPanel::new(workspace, text_thread_store, None, window, cx));
-            workspace.add_panel(panel.clone(), window, cx);
+            workspace.set_left_drawer(panel.clone().into(), cx);
             panel
         });
 
@@ -5781,7 +5761,7 @@ mod tests {
             let text_thread_store = cx.new(|cx| TextThreadStore::fake(project.clone(), cx));
             let panel =
                 cx.new(|cx| AgentPanel::new(workspace, text_thread_store, None, window, cx));
-            workspace.add_panel(panel.clone(), window, cx);
+            workspace.set_left_drawer(panel.clone().into(), cx);
             panel
         });
 
@@ -5866,17 +5846,17 @@ mod tests {
             let text_thread_store = cx.new(|cx| TextThreadStore::fake(project.clone(), cx));
             let panel =
                 cx.new(|cx| AgentPanel::new(workspace, text_thread_store, None, window, cx));
-            workspace.add_panel(panel.clone(), window, cx);
+            workspace.set_left_drawer(panel.clone().into(), cx);
+            workspace.focus_drawer::<AgentPanel>(window, cx);
             panel
         });
 
         cx.run_until_parked();
 
         // Simulate worktree creation in progress and reset to Uninitialized
-        panel.update_in(cx, |panel, window, cx| {
+        panel.update(cx, |panel, _cx| {
             panel.worktree_creation_status = Some(WorktreeCreationStatus::Creating);
             panel.active_view = ActiveView::Uninitialized;
-            Panel::set_active(panel, true, window, cx);
             assert!(
                 matches!(panel.active_view, ActiveView::Uninitialized),
                 "set_active should not create a thread while worktree is being created"

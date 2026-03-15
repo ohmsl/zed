@@ -7017,6 +7017,34 @@ impl Workspace {
         cx.notify();
     }
 
+    fn drawer_mut<T: 'static>(&mut self) -> Option<(Entity<T>, &mut Drawer)> {
+        if let Some(left) = self.left_drawer.as_mut() {
+            if let Some(drawer) = left.view.clone().downcast().ok() {
+                return Some((drawer, left));
+            }
+        }
+        if let Some(right) = self.right_drawer.as_mut() {
+            if let Some(drawer) = right.view.clone().downcast().ok() {
+                return Some((drawer, right));
+            }
+        }
+        None
+    }
+
+    fn drawer_ref<T: 'static>(&self) -> Option<(Entity<T>, &Drawer)> {
+        if let Some(left) = self.left_drawer.as_ref() {
+            if let Some(drawer) = left.view.clone().downcast().ok() {
+                return Some((drawer, left));
+            }
+        }
+        if let Some(right) = self.right_drawer.as_ref() {
+            if let Some(drawer) = right.view.clone().downcast().ok() {
+                return Some((drawer, right));
+            }
+        }
+        None
+    }
+
     pub fn drawer<T: 'static>(&self) -> Option<Entity<T>> {
         if let Some(left) = self.left_drawer.as_ref() {
             if let Some(drawer) = left.view.clone().downcast().ok() {
@@ -7036,18 +7064,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Entity<T>> {
-        if let Some(drawer) = self.left_drawer.as_mut() {
-            if let Some(view) = drawer.view.clone().downcast::<T>().ok() {
-                drawer.open = true;
-                view.focus_handle(cx).focus(window, cx);
-                return Some(view);
-            }
-        }
-        if let Some(drawer) = self.right_drawer.as_mut() {
-            if let Some(view) = drawer.view.clone().downcast::<T>().ok() {
-                drawer.open = true;
-                return Some(view);
-            }
+        if let Some((view, drawer)) = self.drawer_mut::<T>() {
+            drawer.open = true;
+            view.focus_handle(cx).focus(window, cx);
+            return Some(view);
         }
         None
     }
@@ -7057,12 +7077,30 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if let Some(drawer) = self.drawer::<T>() {
-            if drawer.focus_handle(cx).contains_focused(window, cx) {
+        if let Some((view, drawer)) = self.drawer_mut::<T>() {
+            if view.focus_handle(cx).contains_focused(window, cx) {
                 // todo! focus the center?
                 false
             } else {
-                drawer.focus_handle(cx).focus(window, cx);
+                drawer.open = true;
+                view.focus_handle(cx).focus(window, cx);
+                cx.notify();
+                true
+            }
+        } else {
+            false
+        }
+    }
+
+    pub fn toggle_drawer<T: Focusable>(&mut self, cx: &mut Context<Self>) -> bool {
+        if let Some((_, drawer)) = self.drawer_mut::<T>() {
+            if drawer.open {
+                drawer.open = false;
+                cx.notify();
+                false
+            } else {
+                drawer.open = true;
+                cx.notify();
                 true
             }
         } else {
@@ -7071,36 +7109,24 @@ impl Workspace {
     }
 
     pub fn open_drawer<T: Focusable>(&mut self, cx: &mut Context<Self>) {
-        if let Some(left) = self.left_drawer.as_mut() {
-            if left.view.clone().downcast::<T>().is_ok() {
-                left.open = true;
-                cx.notify();
-                return;
-            }
-        }
-        if let Some(right) = self.right_drawer.as_mut() {
-            if right.view.clone().downcast::<T>().is_ok() {
-                right.open = true;
-                cx.notify();
-                return;
-            }
+        if let Some((_, drawer)) = self.drawer_mut::<T>() {
+            drawer.open = true;
+            cx.notify();
         }
     }
 
     pub fn close_drawer<T: Focusable>(&mut self, cx: &mut Context<Self>) {
-        if let Some(left) = self.left_drawer.as_mut() {
-            if left.view.clone().downcast::<T>().is_ok() {
-                left.open = false;
-                cx.notify();
-                return;
-            }
+        if let Some((_, drawer)) = self.drawer_mut::<T>() {
+            drawer.open = false;
+            cx.notify();
         }
-        if let Some(right) = self.right_drawer.as_mut() {
-            if right.view.clone().downcast::<T>().is_ok() {
-                right.open = false;
-                cx.notify();
-                return;
-            }
+    }
+
+    pub fn drawer_is_open<T: 'static>(&self) -> bool {
+        if let Some((_, drawer)) = self.drawer_ref::<T>() {
+            drawer.open
+        } else {
+            false
         }
     }
 
@@ -7135,48 +7161,6 @@ impl Workspace {
 
     pub fn is_right_drawer_open(&self) -> bool {
         self.right_drawer.as_ref().is_some_and(|d| d.open)
-    }
-
-    pub fn open_left_drawer(&mut self, cx: &mut Context<Self>) {
-        if let Some(drawer) = &mut self.left_drawer {
-            drawer.open = true;
-            cx.notify();
-        }
-    }
-
-    pub fn open_right_drawer(&mut self, cx: &mut Context<Self>) {
-        if let Some(drawer) = &mut self.right_drawer {
-            drawer.open = true;
-            cx.notify();
-        }
-    }
-
-    pub fn close_left_drawer(&mut self, cx: &mut Context<Self>) {
-        if let Some(drawer) = &mut self.left_drawer {
-            drawer.open = false;
-            cx.notify();
-        }
-    }
-
-    pub fn close_right_drawer(&mut self, cx: &mut Context<Self>) {
-        if let Some(drawer) = &mut self.right_drawer {
-            drawer.open = false;
-            cx.notify();
-        }
-    }
-
-    pub fn toggle_left_drawer(&mut self, cx: &mut Context<Self>) {
-        if let Some(drawer) = &mut self.left_drawer {
-            drawer.open = !drawer.open;
-            cx.notify();
-        }
-    }
-
-    pub fn toggle_right_drawer(&mut self, cx: &mut Context<Self>) {
-        if let Some(drawer) = &mut self.right_drawer {
-            drawer.open = !drawer.open;
-            cx.notify();
-        }
     }
 
     pub fn remove_left_drawer(&mut self, cx: &mut Context<Self>) {
