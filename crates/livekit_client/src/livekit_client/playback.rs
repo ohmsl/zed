@@ -3,7 +3,7 @@ use anyhow::{Context as _, Result};
 use audio::{AudioSettings, CHANNEL_COUNT, LEGACY_CHANNEL_COUNT, LEGACY_SAMPLE_RATE, SAMPLE_RATE};
 use cpal::DeviceId;
 use cpal::traits::{DeviceTrait, StreamTrait as _};
-use futures::channel::mpsc::UnboundedSender;
+use futures::channel::mpsc::Sender;
 use futures::{Stream, StreamExt as _};
 use gpui::{
     AsyncApp, BackgroundExecutor, Priority, ScreenCaptureFrame, ScreenCaptureSource,
@@ -111,7 +111,7 @@ impl AudioStack {
             source.num_channels as i32,
         );
 
-        let receive_task = self.executor.spawn({
+        let receive_task = self.executor.spawn_with_priority(Priority::RealtimeAudio, {
             let source = source.clone();
             async move {
                 while let Some(frame) = stream.next().await {
@@ -201,8 +201,8 @@ impl AudioStack {
 
         let apm = self.apm.clone();
 
-        let (frame_tx, mut frame_rx) = futures::channel::mpsc::unbounded();
-        let transmit_task = self.executor.spawn({
+        let (frame_tx, mut frame_rx) = futures::channel::mpsc::channel(1);
+        let transmit_task = self.executor.spawn_with_priority(Priority::RealtimeAudio, {
             async move {
                 while let Some(frame) = frame_rx.next().await {
                     source.capture_frame(&frame).await.log_err();
@@ -258,7 +258,7 @@ impl AudioStack {
         apm: Arc<Mutex<apm::AudioProcessingModule>>,
         mixer: Arc<Mutex<audio_mixer::AudioMixer>>,
         sample_rate: u32,
-        num_channels: u32,
+        _num_channels: u32,
         output_audio_device: Option<DeviceId>,
     ) -> Result<()> {
         // Prevent App Nap from throttling audio playback on macOS.
@@ -270,6 +270,7 @@ impl AudioStack {
             let mut device_change_listener = DeviceChangeListener::new(false)?;
             let (output_device, output_config) =
                 crate::default_device(false, output_audio_device.as_ref())?;
+            info!("Output config: {output_config:?}");
             let (end_on_drop_tx, end_on_drop_rx) = std::sync::mpsc::channel::<()>();
             let mixer = mixer.clone();
             let apm = apm.clone();
@@ -300,7 +301,12 @@ impl AudioStack {
                                     let sampled = resampler.remix_and_resample(
                                         mixed,
                                         sample_rate / 100,
-                                        num_channels,
+                                        // We need to assume output number of channels as otherwise we will
+                                        // crash in process_reverse_stream otherwise as livekit's audio resampler
+                                        // does not seem to support non-matching channel counts.
+                                        // NOTE: you can verify this by debug printing buf.len() after this stage.
+                                        // For 2->4 channel upmix, we should see buf.len=1920, buf we get only 960.
+                                        output_config.channels() as u32,
                                         sample_rate,
                                         output_config.channels() as u32,
                                         output_config.sample_rate(),
@@ -338,7 +344,7 @@ impl AudioStack {
     async fn capture_input(
         executor: BackgroundExecutor,
         apm: Arc<Mutex<apm::AudioProcessingModule>>,
-        frame_tx: UnboundedSender<AudioFrame<'static>>,
+        frame_tx: Sender<AudioFrame<'static>>,
         sample_rate: u32,
         num_channels: u32,
         input_audio_device: Option<DeviceId>,
@@ -348,7 +354,7 @@ impl AudioStack {
             let (device, config) = crate::default_device(true, input_audio_device.as_ref())?;
             let (end_on_drop_tx, end_on_drop_rx) = std::sync::mpsc::channel::<()>();
             let apm = apm.clone();
-            let frame_tx = frame_tx.clone();
+            let mut frame_tx = frame_tx.clone();
             let mut resampler = audio_resampler::AudioResampler::default();
 
             executor
@@ -402,7 +408,7 @@ impl AudioStack {
                                                 .log_err();
                                             buf.clear();
                                             frame_tx
-                                                .unbounded_send(AudioFrame {
+                                                .try_send(AudioFrame {
                                                     data: Cow::Owned(sampled),
                                                     sample_rate,
                                                     num_channels,
@@ -439,7 +445,7 @@ pub struct Speaker {
     pub sends_legacy_audio: bool,
 }
 
-fn send_to_livekit(frame_tx: UnboundedSender<AudioFrame<'static>>, mut microphone: impl Source) {
+fn send_to_livekit(mut frame_tx: Sender<AudioFrame<'static>>, mut microphone: impl Source) {
     use cpal::Sample;
     let sample_rate = microphone.sample_rate().get();
     let num_channels = microphone.channels().get() as u32;
@@ -452,17 +458,19 @@ fn send_to_livekit(frame_tx: UnboundedSender<AudioFrame<'static>>, mut microphon
             .map(|s| s.to_sample())
             .collect();
 
-        if frame_tx
-            .unbounded_send(AudioFrame {
-                sample_rate,
-                num_channels,
-                samples_per_channel: sampled.len() as u32 / num_channels,
-                data: Cow::Owned(sampled),
-            })
-            .is_err()
-        {
-            // must rx has dropped or is not consuming
-            break;
+        match frame_tx.try_send(AudioFrame {
+            sample_rate,
+            num_channels,
+            samples_per_channel: sampled.len() as u32 / num_channels,
+            data: Cow::Owned(sampled),
+        }) {
+            Ok(_) => {}
+            Err(err) => {
+                if !err.is_full() {
+                    // must rx has dropped or is not consuming
+                    break;
+                }
+            }
         }
     }
 }
