@@ -342,9 +342,19 @@ impl RenderOnce for ThreadItem {
 
                 this.child(
                     h_flex()
+                        .id("worktree-tooltip-area")
                         .min_w_0()
                         .gap_1p5()
                         .child(icon_container()) // Icon Spacing
+                        .when_some(worktree_path, |this, path| {
+                            this.child(
+                                div().child(
+                                    Icon::new(IconName::GitBranch)
+                                        .size(IconSize::XSmall)
+                                        .color(Color::Muted),
+                                ),
+                            )
+                        })
                         .child(worktree_label)
                         .when(has_diff_stats || has_timestamp, |this| {
                             this.child(dot_separator())
@@ -364,7 +374,8 @@ impl RenderOnce for ThreadItem {
                                     .size(LabelSize::Small)
                                     .color(Color::Muted),
                             )
-                        }),
+                        })
+                        .tooltip(Tooltip::text(format!("Worktree: {}", path))),
                 )
             })
             .when(!has_worktree && (has_diff_stats || has_timestamp), |this| {
