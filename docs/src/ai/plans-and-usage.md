@@ -1,25 +1,51 @@
 ---
-title: Plans and Usage - Zed AI
-description: Understand Zed's AI plans, token-based usage metering, spend limits, and trial details.
+title: Plans & Pricing
+description: Compare Zed's Free, Pro, and Business plans, and understand token-based usage metering, spend limits, and trial details.
 ---
 
-# Plans and Usage
-
-## Available Plans {#plans}
+# Plans & Pricing
 
 For costs and more information on pricing, visit [Zed's pricing page](https://zed.dev/pricing).
 
 Zed works without AI features or a subscription. No [authentication](../authentication.md) is required for the editor itself.
 
+## Plans {#plans}
+
+|                         | Free | Pro | Business |
+| ----------------------- | ---- | --- | -------- |
+| Hosted AI models        | —    | ✓   | ✓        |
+| Edit Predictions        | —    | ✓   | ✓        |
+| Enforced data controls  | —    | —   | ✓        |
+| RBAC and permissions    | —    | —   | ✓        |
+| Consolidated billing    | —    | —   | ✓        |
+
+## Zed Free {#free}
+
+The editor is free with no time limit. AI features (hosted models and Edit Predictions) are not included in the Free plan.
+
+## Zed Pro {#pro}
+
+Zed Pro includes access to all hosted AI models and Edit Predictions. The plan includes $5 of monthly token credit. A trial of Zed Pro includes $20 of credit, usable for 14 days.
+
+For details on billing and payment, see [Individual Billing](./billing.md).
+
+## Zed Business {#business}
+
+<!-- TODO: confirm per-seat pricing before launch -->
+
+Zed Business gives every member full Zed Pro access, plus org-wide controls for administrators: which AI features are available, what data leaves your organization, and how AI spend is tracked. All seats and AI usage are consolidated into a single invoice.
+
+For a full feature overview, see [Zed Business](../business/overview.md). For billing details, see [Organization Billing](../business/org-billing.md).
+
+## Student Plan {#student}
+
+The [Zed Student plan](https://zed.dev/education) includes $10/month in token credits, available free for one year to verified university students.
+
 ## Usage {#usage}
 
-Usage of Zed's hosted models is measured on a token basis, converted to dollars at the rates lists on [the Models page](./models.md) (list price from the provider, +10%).
+Usage of Zed's hosted models is measured on a token basis, converted to dollars at the rates listed on [the Models page](./models.md) (list price from the provider, +10%).
 
-Zed Pro comes with $5 of monthly dollar credit. A trial of Zed Pro includes $20 of credit, usable for 14 days. Monthly included credit resets on your monthly billing date.
-
-The [Zed Student plan](https://zed.dev/education) includes $10/month in token credits. The Student plan is available free for one year to verified university students.
-
-To view your current usage, you can visit your account at [dashboard.zed.dev/account](https://dashboard.zed.dev/account). Information from our metering and billing provider, Orb, is embedded on that page.
+Monthly included credit resets on your monthly billing date. To view your current usage, visit your account at [dashboard.zed.dev/account](https://dashboard.zed.dev/account). Usage data from our metering provider, Orb, is embedded on that page.
 
 ## Spend Limits {#usage-spend-limits}
 
@@ -31,10 +57,6 @@ Once the spend limit is hit, we'll stop any further usage until your token spend
 
 > **Note:** Spend limits are a Zed Pro feature. Student plan users do not currently have the ability to configure spend limits; usage is capped at the $10/month included credit.
 
-## Business Usage {#business-usage}
-
-Email [sales@zed.dev](mailto:sales@zed.dev) with any questions on business plans.
-
 ## Trials {#trials}
 
-Note that trials will automatically convert to Zed Free plans on termination, and no cancellation is needed to prevent conversion to Zed Pro.
+Trials automatically convert to Zed Free when they end. No cancellation is needed to prevent conversion to Zed Pro.
