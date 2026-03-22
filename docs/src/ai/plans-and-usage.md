@@ -11,15 +11,15 @@ Zed works without AI features or a subscription. No [authentication](../authenti
 
 ## Plans {#plans}
 
-|                                                          | Free    | Pro       | Business  |
-| -------------------------------------------------------- | ------- | --------- | --------- |
-| Zed-hosted AI models                                     | —       | ✓         | ✓         |
-| [AI via own API keys](./llm-providers.md)                | ✓       | ✓         | ✓         |
-| [External agents](./external-agents.md)                  | ✓       | ✓         | ✓         |
-| Edit Predictions                                         | Limited | Unlimited | Unlimited |
-| Admin-enforced data controls                             | —       | —         | ✓         |
-| RBAC and permissions                                     | —       | —         | ✓         |
-| Consolidated billing                                     | —       | —         | ✓         |
+|                                           | Free    | Pro       | Business  |
+| ----------------------------------------- | ------- | --------- | --------- |
+| Zed-hosted AI models                      | —       | ✓         | ✓         |
+| [AI via own API keys](./llm-providers.md) | ✓       | ✓         | ✓         |
+| [External agents](./external-agents.md)   | ✓       | ✓         | ✓         |
+| Edit Predictions                          | Limited | Unlimited | Unlimited |
+| Admin-enforced data controls              | —       | —         | ✓         |
+| RBAC and permissions                      | —       | —         | ✓         |
+| Consolidated billing                      | —       | —         | ✓         |
 
 ## Zed Free {#free}
 
