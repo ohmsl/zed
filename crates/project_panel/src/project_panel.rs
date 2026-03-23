@@ -1949,8 +1949,8 @@ impl ProjectPanel {
                 if new_entry.is_ok() {
                     let operation = if let Some(old_entry) = edited_entry {
                         ProjectPanelOperation::Rename {
-                            old_path: (worktree_id, old_entry.path).into(),
-                            new_path: new_project_path,
+                            from: (worktree_id, old_entry.path).into(),
+                            to: new_project_path,
                         }
                     } else {
                         ProjectPanelOperation::Create {
@@ -3149,8 +3149,8 @@ impl ProjectPanel {
             enum PasteTask {
                 Rename {
                     task: Task<Result<CreatedEntry>>,
-                    old_path: ProjectPath,
-                    new_path: ProjectPath,
+                    from: ProjectPath,
+                    to: ProjectPath,
                 },
                 Copy {
                     task: Task<Result<Option<Entry>>>,
@@ -3167,14 +3167,14 @@ impl ProjectPanel {
                 let clip_entry_id = clipboard_entry.entry_id;
                 let destination: ProjectPath = (worktree_id, new_path).into();
                 let task = if clipboard_entries.is_cut() {
-                    let old_path = self.project.read(cx).path_for_entry(clip_entry_id, cx)?;
+                    let original_path = self.project.read(cx).path_for_entry(clip_entry_id, cx)?;
                     let task = self.project.update(cx, |project, cx| {
                         project.rename_entry(clip_entry_id, destination.clone(), cx)
                     });
                     PasteTask::Rename {
                         task,
-                        old_path,
-                        new_path: destination,
+                        from: original_path,
+                        to: destination,
                     }
                 } else {
                     let task = self.project.update(cx, |project, cx| {
@@ -3195,17 +3195,12 @@ impl ProjectPanel {
 
                 for task in paste_tasks {
                     match task {
-                        PasteTask::Rename {
-                            task,
-                            old_path,
-                            new_path,
-                        } => {
+                        PasteTask::Rename { task, from, to } => {
                             if let Some(CreatedEntry::Included(entry)) = task
                                 .await
                                 .notify_workspace_async_err(workspace.clone(), &mut cx)
                             {
-                                operations
-                                    .push(ProjectPanelOperation::Rename { old_path, new_path });
+                                operations.push(ProjectPanelOperation::Rename { from, to });
                                 last_succeed = Some(entry);
                             }
                         }
@@ -4637,8 +4632,8 @@ impl ProjectPanel {
                                 (old_paths.get(&entry_id), destination_worktree_id)
                             {
                                 operations.push(ProjectPanelOperation::Rename {
-                                    old_path: old_path.clone(),
-                                    new_path: (worktree_id, new_entry.path).into(),
+                                    from: old_path.clone(),
+                                    to: (worktree_id, new_entry.path).into(),
                                 });
                             }
                         }
@@ -4664,8 +4659,8 @@ impl ProjectPanel {
                                 (old_paths.get(&entry_id), destination_worktree_id)
                             {
                                 operations.push(ProjectPanelOperation::Rename {
-                                    old_path: old_path.clone(),
-                                    new_path: (worktree_id, new_entry.path.clone()).into(),
+                                    from: old_path.clone(),
+                                    to: (worktree_id, new_entry.path.clone()).into(),
                                 });
                             }
                             move_results.push((entry_id, new_entry));

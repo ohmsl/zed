@@ -13,13 +13,8 @@ const MAX_UNDO_OPERATIONS: usize = 10_000;
 #[derive(Clone, Debug, PartialEq)]
 pub enum ProjectPanelOperation {
     Batch(Vec<ProjectPanelOperation>),
-    Create {
-        project_path: ProjectPath,
-    },
-    Rename {
-        old_path: ProjectPath,
-        new_path: ProjectPath,
-    },
+    Create { project_path: ProjectPath },
+    Rename { from: ProjectPath, to: ProjectPath },
 }
 
 pub struct UndoManager {
@@ -132,9 +127,10 @@ impl UndoManager {
         cx: &mut App,
     ) -> Task<Vec<anyhow::Error>> {
         match operation {
-            ProjectPanelOperation::Rename { old_path, new_path } => {
-                self.rename(old_path, new_path, cx)
-            }
+            ProjectPanelOperation::Rename {
+                from: old_path,
+                to: new_path,
+            } => self.rename(old_path, new_path, cx),
             ProjectPanelOperation::Batch(operations) => {
                 // Ensure that, when redoing a batch of operations, we do these
                 // in the same order as they were passed to the batch, as there
@@ -233,9 +229,10 @@ impl UndoManager {
                     Err(err) => vec![err],
                 })
             }
-            ProjectPanelOperation::Rename { old_path, new_path } => {
-                self.rename(new_path, old_path, cx)
-            }
+            ProjectPanelOperation::Rename {
+                from: old_path,
+                to: new_path,
+            } => self.rename(new_path, old_path, cx),
             ProjectPanelOperation::Batch(operations) => {
                 // When reverting operations in a batch, we reverse the order of
                 // operations to handle dependencies between them. For example,
@@ -406,11 +403,11 @@ pub(crate) mod test {
         let to_path = Arc::from(rel_path(to));
 
         ProjectPanelOperation::Rename {
-            old_path: ProjectPath {
+            from: ProjectPath {
                 worktree_id,
                 path: from_path,
             },
-            new_path: ProjectPath {
+            to: ProjectPath {
                 worktree_id,
                 path: to_path,
             },
