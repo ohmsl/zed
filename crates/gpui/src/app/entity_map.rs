@@ -1016,7 +1016,7 @@ impl LeakDetector {
                     .unwrap();
                 }
             }
-            panic!("{out}");
+            panic!("Handles for {} leaked:\n{out}", data.type_name);
         }
     }
 
