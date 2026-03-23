@@ -316,7 +316,7 @@ pub struct LocalLspStore {
         >,
     >,
     buffer_snapshots: HashMap<BufferId, HashMap<LanguageServerId, Vec<LspBufferSnapshot>>>, // buffer_id -> server_id -> vec of snapshots
-    _subscription: gpui::Subscription,
+    _subscriptions: Vec<gpui::Subscription>,
     lsp_tree: LanguageServerTree,
     registered_buffers: HashMap<BufferId, usize>,
     buffers_opened_in_servers: HashMap<BufferId, HashSet<LanguageServerId>>,
@@ -4160,6 +4160,28 @@ impl LspStore {
         }
     }
 
+    fn shutdown_language_servers(&mut self, cx: &mut App) {
+        if let Some(local) = self.as_local_mut() {
+            let shutdown_futures: Vec<_> = local
+                .language_servers
+                .drain()
+                .map(|(_, server_state)| LocalLspStore::shutdown_server(server_state))
+                .collect();
+
+            let supplementary_shutdown_futures: Vec<_> = local
+                .supplementary_language_servers
+                .drain()
+                .filter_map(|(_, (_, server))| server.shutdown())
+                .collect();
+
+            cx.background_spawn(async move {
+                join_all(shutdown_futures).await;
+                join_all(supplementary_shutdown_futures).await;
+            })
+            .detach();
+        }
+    }
+
     pub fn new_local(
         buffer_store: Entity<BufferStore>,
         worktree_store: Entity<WorktreeStore>,
@@ -4215,11 +4237,14 @@ impl LspStore {
                 yarn,
                 next_diagnostic_group_id: Default::default(),
                 diagnostics: Default::default(),
-                _subscription: cx.on_app_quit(|this, _| {
-                    this.as_local_mut()
-                        .unwrap()
-                        .shutdown_language_servers_on_quit()
-                }),
+                _subscriptions: vec![
+                    cx.on_app_quit(|this, _| {
+                        this.as_local_mut()
+                            .unwrap()
+                            .shutdown_language_servers_on_quit()
+                    }),
+                    cx.on_release(Self::shutdown_language_servers),
+                ],
                 lsp_tree: LanguageServerTree::new(
                     manifest_tree,
                     languages.clone(),
