@@ -9637,7 +9637,7 @@ async fn test_hide_hidden_entries(cx: &mut gpui::TestAppContext) {
     );
 }
 
-fn select_path(panel: &Entity<ProjectPanel>, path: &str, cx: &mut VisualTestContext) {
+pub(crate) fn select_path(panel: &Entity<ProjectPanel>, path: &str, cx: &mut VisualTestContext) {
     let path = rel_path(path);
     panel.update_in(cx, |panel, window, cx| {
         for worktree in panel.project.read(cx).worktrees(cx).collect::<Vec<_>>() {
