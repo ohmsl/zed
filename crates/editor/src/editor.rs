@@ -11115,7 +11115,7 @@ impl Editor {
         }
 
         let mut delta_for_end_row = 0;
-        let mut next_ordered_list_number = 1;
+        let mut next_ordered_list_number: Option<u32> = None;
         let has_multiple_rows = start_row + 1 != end_row;
         let mut trailing_renumber_anchor_row: Option<u32> = None;
         let mut trailing_renumber_indent_len: Option<u32> = None;
@@ -11144,11 +11144,15 @@ impl Editor {
 
             if let Some(language) = snapshot.language_scope_at(Point::new(row, current_indent.len))
             {
-                let renumber_to = if has_multiple_rows {
-                    next_ordered_list_number
-                } else {
-                    1
-                };
+                let renumber_to = *next_ordered_list_number.get_or_insert_with(|| {
+                    let target_indent_len = current_indent.len + indent_delta.len;
+                    previous_ordered_list_number_at_indent(
+                        row,
+                        target_indent_len,
+                        snapshot,
+                        &language,
+                    ) + 1
+                });
                 if let Some((marker_start_col, marker_end_col, marker_text)) =
                     ordered_list_indent_renumber(
                         row,
@@ -11162,7 +11166,10 @@ impl Editor {
                         Point::new(row, marker_start_col)..Point::new(row, marker_end_col),
                         marker_text,
                     ));
-                    next_ordered_list_number += 1;
+                    if has_multiple_rows {
+                        next_ordered_list_number =
+                            Some(renumber_to.saturating_add(1));
+                    }
 
                     if let Some(indent_len) = trailing_renumber_indent_len {
                         if current_indent.len == indent_len {

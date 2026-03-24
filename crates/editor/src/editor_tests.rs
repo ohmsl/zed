@@ -31468,7 +31468,7 @@ async fn test_tab_ordered_list_single_line_renumbering(cx: &mut TestAppContext) 
     "};
     cx.assert_editor_state(expected.replace("$", " ").as_str());
 
-    // Case 4: Multi-row indent of 5/6 after an existing nested list also resets to 1/2.
+    // Case 4: Multi-row indent of 5/6 after an existing nested list continues from 3/4.
     cx.set_state(indoc! {"
         1. list
         2. list
@@ -31484,8 +31484,8 @@ async fn test_tab_ordered_list_single_line_renumbering(cx: &mut TestAppContext) 
         2. list
           1. list
           2. list
-          «1. list
-          2. listˇ»
+          «3. list
+          4. listˇ»
     "};
     cx.assert_editor_state(expected);
 
@@ -31502,8 +31502,8 @@ async fn test_tab_ordered_list_single_line_renumbering(cx: &mut TestAppContext) 
     let expected = indoc! {"
         1. top
           1. child
-          «1. moved a
-          2. moved bˇ»
+          «2. moved a
+          3. moved bˇ»
         2. trailing
     "};
     cx.assert_editor_state(expected);
@@ -31522,7 +31522,7 @@ async fn test_tab_ordered_list_single_line_renumbering(cx: &mut TestAppContext) 
     let expected = indoc! {"
         1. top
           intro
-        «    helper
+          «  helper
           1. moved a
           2. moved bˇ»
         2. trailing
@@ -31634,7 +31634,7 @@ async fn test_tab_list_outdent(cx: &mut TestAppContext) {
     cx.update_editor(|e, window, cx| e.outdent(&Outdent, window, cx));
     let expected = indoc! {"
         1. parent
-        «2. child a
+        2. «child a
         3. child bˇ»
     "};
     cx.assert_editor_state(expected);
