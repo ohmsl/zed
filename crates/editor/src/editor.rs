@@ -11167,8 +11167,7 @@ impl Editor {
                         marker_text,
                     ));
                     if has_multiple_rows {
-                        next_ordered_list_number =
-                            Some(renumber_to.saturating_add(1));
+                        next_ordered_list_number = Some(renumber_to.saturating_add(1));
                     }
 
                     if let Some(indent_len) = trailing_renumber_indent_len {
@@ -11197,14 +11196,12 @@ impl Editor {
             if let (Some(anchor_row), Some(indent_len)) =
                 (trailing_renumber_anchor_row, trailing_renumber_indent_len)
             {
-                if let Some(language) = snapshot.language_scope_at(Point::new(anchor_row, indent_len))
+                if let Some(language) =
+                    snapshot.language_scope_at(Point::new(anchor_row, indent_len))
                 {
                     renumber_following_ordered_list_siblings_after_indent(
                         previous_ordered_list_number_at_indent(
-                            anchor_row,
-                            indent_len,
-                            snapshot,
-                            &language,
+                            anchor_row, indent_len, snapshot, &language,
                         ) + 1,
                         end_row,
                         indent_len,
@@ -11254,8 +11251,7 @@ impl Editor {
                 }
 
                 let has_multiple_rows = rows.len() > 1;
-                let original_indent_len =
-                    snapshot.indent_size_for_line(rows.start).len;
+                let original_indent_len = snapshot.indent_size_for_line(rows.start).len;
 
                 let mut next_outdent_number = 0u32;
                 let mut moved_ordered_items_at_original_indent = 0u32;
@@ -11290,25 +11286,20 @@ impl Editor {
                         if let Some(language) =
                             snapshot.language_scope_at(Point::new(row.0, indent_size.len))
                         {
-                            if let Some(marker) = ordered_list_marker(
-                                row.0,
-                                indent_size.len,
-                                &snapshot,
-                                &language,
-                            ) {
-                                let target_indent =
-                                    indent_size.len.saturating_sub(deletion_len);
+                            if let Some(marker) =
+                                ordered_list_marker(row.0, indent_size.len, &snapshot, &language)
+                            {
+                                let target_indent = indent_size.len.saturating_sub(deletion_len);
 
                                 // Lazy-initialize the counter on the first ordered item
                                 // we encounter in this selection.
                                 if next_outdent_number == 0 {
-                                    next_outdent_number =
-                                        previous_ordered_list_number_at_indent(
-                                            row.0,
-                                            target_indent,
-                                            &snapshot,
-                                            &language,
-                                        ) + 1;
+                                    next_outdent_number = previous_ordered_list_number_at_indent(
+                                        row.0,
+                                        target_indent,
+                                        &snapshot,
+                                        &language,
+                                    ) + 1;
                                     first_target_indent = Some(target_indent);
                                 }
 
@@ -11337,10 +11328,9 @@ impl Editor {
                 // Renumber the siblings that were left behind at the original (deeper)
                 // indent level to fill the gap created by the outdented items.
                 if moved_ordered_items_at_original_indent > 0 {
-                    let following_row =
-                        last_outdent.map_or(rows.start.0, |r| r.next_row().0);
-                    if let Some(language) = snapshot
-                        .language_scope_at(Point::new(rows.start.0, original_indent_len))
+                    let following_row = last_outdent.map_or(rows.start.0, |r| r.next_row().0);
+                    if let Some(language) =
+                        snapshot.language_scope_at(Point::new(rows.start.0, original_indent_len))
                     {
                         renumber_following_ordered_list_siblings_after_indent(
                             previous_ordered_list_number_at_indent(
@@ -11362,10 +11352,9 @@ impl Editor {
                 // after the outdented block — they are displaced forward since new
                 // items were inserted before them at that level.
                 if let Some(target_indent) = first_target_indent {
-                    let following_row =
-                        last_outdent.map_or(rows.start.0, |r| r.next_row().0);
-                    if let Some(language) = snapshot
-                        .language_scope_at(Point::new(rows.start.0, target_indent))
+                    let following_row = last_outdent.map_or(rows.start.0, |r| r.next_row().0);
+                    if let Some(language) =
+                        snapshot.language_scope_at(Point::new(rows.start.0, target_indent))
                     {
                         renumber_following_ordered_list_siblings_after_indent(
                             next_outdent_number,
