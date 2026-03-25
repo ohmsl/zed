@@ -16,6 +16,7 @@ mod security_modal;
 pub mod shared_screen;
 use db::smol::future::yield_now;
 pub use shared_screen::SharedScreen;
+pub mod focus_follows_mouse;
 mod status_bar;
 pub mod tasks;
 mod theme_preview;
