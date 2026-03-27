@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use ui::prelude::*;
 use util::ResultExt;
+use util::path_list::SerializedPathList;
 use zed_actions::agents_sidebar::MoveWorkspaceToNewWindow;
 
 use agent_settings::AgentSettings;
@@ -89,6 +90,7 @@ pub enum MultiWorkspaceEvent {
     ActiveWorkspaceChanged,
     WorkspaceAdded(Entity<Workspace>),
     WorkspaceRemoved(EntityId),
+    SidebarCollapsedGroupsChanged,
 }
 
 pub trait Sidebar: Focusable + Render + Sized {
@@ -177,6 +179,7 @@ pub struct MultiWorkspace {
     active_workspace_index: usize,
     sidebar: Option<Box<dyn SidebarHandle>>,
     sidebar_open: bool,
+    sidebar_collapsed_groups: Vec<SerializedPathList>,
     pending_removal_tasks: Vec<Task<()>>,
     _serialize_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -225,6 +228,7 @@ impl MultiWorkspace {
             active_workspace_index: 0,
             sidebar: None,
             sidebar_open: false,
+            sidebar_collapsed_groups: Vec::new(),
             pending_removal_tasks: Vec::new(),
             _serialize_task: None,
             _subscriptions: vec![
@@ -249,6 +253,19 @@ impl MultiWorkspace {
 
     pub fn sidebar_open(&self) -> bool {
         self.sidebar_open
+    }
+
+    pub fn sidebar_collapsed_groups(&self) -> &[SerializedPathList] {
+        &self.sidebar_collapsed_groups
+    }
+
+    pub fn set_sidebar_collapsed_groups(
+        &mut self,
+        groups: Vec<SerializedPathList>,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar_collapsed_groups = groups;
+        cx.emit(MultiWorkspaceEvent::SidebarCollapsedGroupsChanged);
     }
 
     pub fn sidebar_has_notifications(&self, cx: &App) -> bool {
@@ -487,11 +504,12 @@ impl MultiWorkspace {
         self.cycle_workspace(-1, window, cx);
     }
 
-    fn serialize(&mut self, cx: &mut App) {
+    pub fn serialize(&mut self, cx: &mut App) {
         let window_id = self.window_id;
         let state = crate::persistence::model::MultiWorkspaceState {
             active_workspace_id: self.workspace().read(cx).database_id(),
             sidebar_open: self.sidebar_open,
+            collapsed_sidebar_groups: self.sidebar_collapsed_groups.clone(),
         };
         let kvp = db::kvp::KeyValueStore::global(cx);
         self._serialize_task = Some(cx.background_spawn(async move {

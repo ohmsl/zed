@@ -10,12 +10,12 @@ use agent_ui::{
     Agent, AgentPanel, AgentPanelEvent, DEFAULT_THREAD_TITLE, NewThread, RemoveSelectedThread,
 };
 use chrono::Utc;
-use db::kvp::KeyValueStore;
+
 use editor::Editor;
 use feature_flags::{AgentV2FeatureFlag, FeatureFlagViewExt as _};
 use gpui::{
     Action as _, AnyElement, App, Context, Entity, FocusHandle, Focusable, KeyContext, ListState,
-    Pixels, Render, SharedString, Task, WeakEntity, Window, WindowHandle, list, prelude::*, px,
+    Pixels, Render, SharedString, WeakEntity, Window, WindowHandle, list, prelude::*, px,
 };
 
 use menu::{
@@ -25,7 +25,6 @@ use project::{Event as ProjectEvent, linked_worktree_short_name};
 use recent_projects::sidebar_recent_projects::SidebarRecentProjects;
 use ui::utils::platform_title_bar_height;
 
-use serde::{Deserialize, Serialize};
 use settings::Settings as _;
 use std::collections::{HashMap, HashSet};
 use std::mem;
@@ -35,12 +34,12 @@ use ui::{
     AgentThreadStatus, CommonAnimationExt, ContextMenu, Divider, HighlightedLabel, KeyBinding,
     PopoverMenu, PopoverMenuHandle, Tab, ThreadItem, TintColor, Tooltip, WithScrollbar, prelude::*,
 };
+use util::ResultExt as _;
 use util::path_list::PathList;
-use util::{ResultExt as _, TryFutureExt as _};
 use workspace::{
     AddFolderToProject, FocusWorkspaceSidebar, MultiWorkspace, MultiWorkspaceEvent, Open,
-    SerializedPathList, Sidebar as WorkspaceSidebar, SidebarSide, ToggleWorkspaceSidebar,
-    Workspace, WorkspaceId, sidebar_side_context_menu,
+    Sidebar as WorkspaceSidebar, SidebarSide, ToggleWorkspaceSidebar, Workspace, WorkspaceId,
+    sidebar_side_context_menu,
 };
 
 use zed_actions::OpenRecent;
@@ -66,20 +65,12 @@ const DEFAULT_WIDTH: Pixels = px(300.0);
 const MIN_WIDTH: Pixels = px(200.0);
 const MAX_WIDTH: Pixels = px(800.0);
 const DEFAULT_THREADS_SHOWN: usize = 5;
-const SIDEBAR_COLLAPSED_GROUPS_NAMESPACE: &str = "agents_sidebar_collapsed_groups";
-const SIDEBAR_COLLAPSED_GROUPS_KEY: &str = "global";
 
 #[derive(Debug, Default)]
 enum SidebarView {
     #[default]
     ThreadList,
     Archive(Entity<ThreadsArchiveView>),
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct SerializedSidebarState {
-    #[serde(default)]
-    collapsed_groups: Vec<SerializedPathList>,
 }
 
 #[derive(Clone, Debug)]
@@ -240,24 +231,7 @@ fn workspace_path_list(workspace: &Entity<Workspace>, cx: &App) -> PathList {
     PathList::new(&workspace.read(cx).root_paths(cx))
 }
 
-fn load_collapsed_groups(kvp: &KeyValueStore) -> HashSet<PathList> {
-    kvp.scoped(SIDEBAR_COLLAPSED_GROUPS_NAMESPACE)
-        .read(SIDEBAR_COLLAPSED_GROUPS_KEY)
-        .log_err()
-        .flatten()
-        .and_then(|json| serde_json::from_str::<SerializedSidebarState>(&json).log_err())
-        .map(|state| {
-            state
-                .collapsed_groups
-                .into_iter()
-                .map(|path_list| PathList::deserialize(&path_list))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// The sidebar re-derives its entire entry list from scratch on every
-
 /// change via `update_entries` → `rebuild_contents`. Avoid adding
 /// incremental or inter-event coordination state — if something can
 /// be computed from the current world state, compute it in the rebuild.
@@ -282,7 +256,6 @@ pub struct Sidebar {
     hovered_thread_index: Option<usize>,
     collapsed_groups: HashSet<PathList>,
     expanded_groups: HashMap<PathList, usize>,
-    pending_serialization: Task<Option<()>>,
     view: SidebarView,
     recent_projects_popover_handle: PopoverMenuHandle<SidebarRecentProjects>,
     project_header_menu_ix: Option<usize>,
@@ -310,7 +283,7 @@ impl Sidebar {
         cx.subscribe_in(
             &multi_workspace,
             window,
-            |this, _multi_workspace, event: &MultiWorkspaceEvent, window, cx| match event {
+            |this, multi_workspace, event: &MultiWorkspaceEvent, window, cx| match event {
                 MultiWorkspaceEvent::ActiveWorkspaceChanged => {
                     this.observe_draft_editor(cx);
                     this.update_entries(cx);
@@ -321,6 +294,18 @@ impl Sidebar {
                 }
                 MultiWorkspaceEvent::WorkspaceRemoved(_) => {
                     this.update_entries(cx);
+                }
+                MultiWorkspaceEvent::SidebarCollapsedGroupsChanged => {
+                    let groups: HashSet<PathList> = multi_workspace
+                        .read(cx)
+                        .sidebar_collapsed_groups()
+                        .iter()
+                        .map(|s| PathList::deserialize(s))
+                        .collect();
+                    if groups != this.collapsed_groups {
+                        this.collapsed_groups = groups;
+                        this.update_entries(cx);
+                    }
                 }
             },
         )
@@ -353,7 +338,12 @@ impl Sidebar {
         })
         .detach();
 
-        let collapsed_groups = load_collapsed_groups(&KeyValueStore::global(cx));
+        let collapsed_groups: HashSet<PathList> = multi_workspace
+            .read(cx)
+            .sidebar_collapsed_groups()
+            .iter()
+            .map(|s| PathList::deserialize(s))
+            .collect();
 
         let workspaces = multi_workspace.read(cx).workspaces().to_vec();
         cx.defer_in(window, move |this, window, cx| {
@@ -377,7 +367,6 @@ impl Sidebar {
             hovered_thread_index: None,
             collapsed_groups,
             expanded_groups: HashMap::new(),
-            pending_serialization: Task::ready(None),
             view: SidebarView::default(),
             recent_projects_popover_handle: PopoverMenuHandle::default(),
             project_header_menu_ix: None,
@@ -1719,24 +1708,27 @@ impl Sidebar {
     }
 
     fn serialize_collapsed_groups(&mut self, cx: &mut Context<Self>) {
+        let known_path_lists: HashSet<&PathList> = self
+            .contents
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                ListEntry::ProjectHeader { path_list, .. } => Some(path_list),
+                _ => None,
+            })
+            .collect();
         let collapsed_groups = self
             .collapsed_groups
             .iter()
+            .filter(|path_list| known_path_lists.contains(path_list))
             .map(PathList::serialize)
             .collect::<Vec<_>>();
-        let kvp = KeyValueStore::global(cx);
-        self.pending_serialization = cx.background_spawn(
-            async move {
-                kvp.scoped(SIDEBAR_COLLAPSED_GROUPS_NAMESPACE)
-                    .write(
-                        SIDEBAR_COLLAPSED_GROUPS_KEY.to_string(),
-                        serde_json::to_string(&SerializedSidebarState { collapsed_groups })?,
-                    )
-                    .await?;
-                anyhow::Ok(())
-            }
-            .log_err(),
-        );
+        if let Some(multi_workspace) = self.multi_workspace.upgrade() {
+            multi_workspace.update(cx, |mw, cx| {
+                mw.set_sidebar_collapsed_groups(collapsed_groups, cx);
+                mw.serialize(cx);
+            });
+        }
     }
 
     fn toggle_collapse(
@@ -3840,6 +3832,91 @@ mod tests {
         assert_eq!(
             visible_entries_as_strings(&restored_sidebar, cx),
             vec!["> [my-project]"]
+        );
+    }
+
+    #[gpui::test]
+    async fn test_collapsed_groups_mixed_state_restore(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/project-a", serde_json::json!({ "src": {} }))
+            .await;
+        fs.insert_tree("/project-b", serde_json::json!({ "src": {} }))
+            .await;
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+
+        let project_a = project::Project::test(fs.clone(), ["/project-a".as_ref()], cx).await;
+        let project_b = project::Project::test(fs.clone(), ["/project-b".as_ref()], cx).await;
+
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            mw.test_add_workspace(project_b, window, cx);
+        });
+        let sidebar = setup_sidebar(&multi_workspace, cx);
+
+        let path_a = PathList::new(&[std::path::PathBuf::from("/project-a")]);
+        let path_b = PathList::new(&[std::path::PathBuf::from("/project-b")]);
+        save_n_test_threads(1, &path_a, cx).await;
+        save_named_thread_metadata("thread-b", "Thread B", &path_b, cx).await;
+
+        multi_workspace.update_in(cx, |_, _window, cx| cx.notify());
+        cx.run_until_parked();
+
+        // Collapse only project-a, leave project-b expanded
+        sidebar.update_in(cx, |s, window, cx| {
+            s.toggle_collapse(&path_a, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            visible_entries_as_strings(&sidebar, cx),
+            vec!["> [project-a]", "v [project-b]", "  Thread B"]
+        );
+
+        // Recreate sidebar to simulate restart
+        let restored_sidebar = setup_sidebar(&multi_workspace, cx);
+        multi_workspace.update_in(cx, |_, _window, cx| cx.notify());
+        cx.run_until_parked();
+
+        // project-a should still be collapsed, project-b should still be expanded
+        assert_eq!(
+            visible_entries_as_strings(&restored_sidebar, cx),
+            vec!["> [project-a]", "v [project-b]", "  Thread B"]
+        );
+    }
+
+    #[gpui::test]
+    async fn test_collapsed_groups_empty_after_uncollapse_all(cx: &mut TestAppContext) {
+        let project = init_test_project("/my-project", cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let sidebar = setup_sidebar(&multi_workspace, cx);
+
+        let path_list = PathList::new(&[std::path::PathBuf::from("/my-project")]);
+        save_n_test_threads(1, &path_list, cx).await;
+
+        multi_workspace.update_in(cx, |_, _window, cx| cx.notify());
+        cx.run_until_parked();
+
+        // Collapse, then uncollapse
+        sidebar.update_in(cx, |s, window, cx| {
+            s.toggle_collapse(&path_list, window, cx);
+        });
+        cx.run_until_parked();
+        sidebar.update_in(cx, |s, window, cx| {
+            s.toggle_collapse(&path_list, window, cx);
+        });
+        cx.run_until_parked();
+
+        // Recreate sidebar — everything should be expanded
+        let restored_sidebar = setup_sidebar(&multi_workspace, cx);
+        multi_workspace.update_in(cx, |_, _window, cx| cx.notify());
+        cx.run_until_parked();
+
+        assert_eq!(
+            visible_entries_as_strings(&restored_sidebar, cx),
+            vec!["v [my-project]", "  Thread 1"]
         );
     }
 

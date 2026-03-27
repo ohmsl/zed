@@ -3978,6 +3978,7 @@ mod tests {
             MultiWorkspaceState {
                 active_workspace_id: Some(WorkspaceId(2)),
                 sidebar_open: true,
+                collapsed_sidebar_groups: Vec::new(),
             },
         )
         .await;
@@ -3988,6 +3989,7 @@ mod tests {
             MultiWorkspaceState {
                 active_workspace_id: Some(WorkspaceId(3)),
                 sidebar_open: false,
+                collapsed_sidebar_groups: Vec::new(),
             },
         )
         .await;

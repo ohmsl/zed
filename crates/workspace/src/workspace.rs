@@ -8610,6 +8610,15 @@ pub async fn restore_multiworkspace(
             .ok();
     }
 
+    if !state.collapsed_sidebar_groups.is_empty() {
+        let collapsed_groups = state.collapsed_sidebar_groups;
+        window_handle
+            .update(cx, |multi_workspace, _, cx| {
+                multi_workspace.set_sidebar_collapsed_groups(collapsed_groups, cx);
+            })
+            .ok();
+    }
+
     window_handle
         .update(cx, |_, window, _cx| {
             window.activate_window();
