@@ -22,7 +22,6 @@ use icons::IconName;
 use parking_lot::Mutex;
 use provider::parse_prompt_too_long;
 use serde::{Deserialize, Serialize};
-pub use settings::LanguageModelCacheConfiguration;
 use std::ops::{Add, Sub};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -47,6 +46,13 @@ pub fn init(user_store: Entity<UserStore>, client: Arc<Client>, cx: &mut App) {
 
 pub fn init_settings(cx: &mut App) {
     registry::init(cx);
+}
+
+#[derive(Clone, Debug)]
+pub struct LanguageModelCacheConfiguration {
+    pub max_cache_anchors: usize,
+    pub should_speculate: bool,
+    pub min_total_token: u64,
 }
 
 /// A completion event from a language model.
