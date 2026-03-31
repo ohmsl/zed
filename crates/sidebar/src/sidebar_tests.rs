@@ -45,7 +45,7 @@ fn assert_active_thread(sidebar: &Sidebar, session_id: &acp::SessionId, msg: &st
 #[track_caller]
 fn assert_active_draft(sidebar: &Sidebar, workspace: &Entity<Workspace>, msg: &str) {
     assert!(
-        matches!(&sidebar.active_entry, Some(ActiveEntry::Draft(ws)) if ws == workspace),
+        matches!(&sidebar.active_entry, Some(ActiveEntry::Draft { workspace: ws, .. }) if ws == workspace),
         "{msg}: expected active_entry to be Draft for workspace {:?}, got {:?}",
         workspace.entity_id(),
         sidebar.active_entry,
@@ -244,7 +244,11 @@ fn visible_entries_as_strings(
                             format!("  + View More{}", selected)
                         }
                     }
-                    ListEntry::NewThread { worktrees, .. } => {
+                    ListEntry::NewThread {
+                        worktrees,
+                        draft_thread,
+                        ..
+                    } => {
                         let worktree = if worktrees.is_empty() {
                             String::new()
                         } else {
@@ -258,7 +262,11 @@ fn visible_entries_as_strings(
                             }
                             format!(" {}", chips.join(", "))
                         };
-                        format!("  [+ New Thread{}]{}", worktree, selected)
+                        let label = draft_thread
+                            .as_ref()
+                            .and_then(|thread| Sidebar::draft_text_from_thread(thread, _cx))
+                            .unwrap_or_else(|| DEFAULT_THREAD_TITLE.into());
+                        format!("  [+ {}{}]{}", label, worktree, selected)
                     }
                 }
             })
@@ -323,41 +331,40 @@ async fn test_serialization_round_trip(cx: &mut TestAppContext) {
 }
 
 #[test]
-fn test_clean_mention_links() {
-    // Simple mention link
+fn test_summarize_content_blocks() {
+    use agent_client_protocol as acp;
+
     assert_eq!(
-        Sidebar::clean_mention_links("check [@Button.tsx](file:///path/to/Button.tsx)"),
-        "check @Button.tsx"
+        summarize_content_blocks(&[acp::ContentBlock::Text(acp::TextContent::new(
+            "check this out".to_string()
+        ))]),
+        Some(SharedString::from("check this out"))
     );
 
-    // Multiple mention links
     assert_eq!(
-        Sidebar::clean_mention_links(
-            "look at [@foo.rs](file:///foo.rs) and [@bar.rs](file:///bar.rs)"
-        ),
-        "look at @foo.rs and @bar.rs"
+        summarize_content_blocks(&[
+            acp::ContentBlock::Text(acp::TextContent::new("look at ".to_string())),
+            acp::ContentBlock::ResourceLink(acp::ResourceLink::new(
+                "foo.rs".to_string(),
+                "file:///foo.rs".to_string()
+            )),
+            acp::ContentBlock::Text(acp::TextContent::new(" and ".to_string())),
+            acp::ContentBlock::ResourceLink(acp::ResourceLink::new(
+                "bar.rs".to_string(),
+                "file:///bar.rs".to_string()
+            )),
+        ]),
+        Some(SharedString::from("look at @foo.rs and @bar.rs"))
     );
 
-    // No mention links — passthrough
-    assert_eq!(
-        Sidebar::clean_mention_links("plain text with no mentions"),
-        "plain text with no mentions"
-    );
+    assert_eq!(summarize_content_blocks(&[]), None);
 
-    // Incomplete link syntax — preserved as-is
     assert_eq!(
-        Sidebar::clean_mention_links("broken [@mention without closing"),
-        "broken [@mention without closing"
+        summarize_content_blocks(&[acp::ContentBlock::Text(acp::TextContent::new(
+            "  lots   of    spaces  ".to_string()
+        ))]),
+        Some(SharedString::from("lots of spaces"))
     );
-
-    // Regular markdown link (no @) — not touched
-    assert_eq!(
-        Sidebar::clean_mention_links("see [docs](https://example.com)"),
-        "see [docs](https://example.com)"
-    );
-
-    // Empty input
-    assert_eq!(Sidebar::clean_mention_links(""), "");
 }
 
 #[gpui::test]
@@ -2381,6 +2388,24 @@ async fn test_draft_with_server_session_shows_as_draft(cx: &mut TestAppContext) 
             "Draft with server session should be Draft, not Thread",
         );
     });
+
+    // Now activate the saved thread. The draft should still appear in
+    // the sidebar — drafts don't disappear when you navigate away.
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        let metadata = ThreadMetadataStore::global(cx)
+            .read(cx)
+            .entries()
+            .find(|m| m.session_id == saved_session_id)
+            .expect("saved thread should exist in metadata store");
+        sidebar.activate_thread_locally(&metadata, &workspace, window, cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        visible_entries_as_strings(&sidebar, cx),
+        vec!["v [my-project]", "  [+ New Thread]", "  Hello *"],
+        "Draft should still be visible after navigating to a saved thread"
+    );
 }
 
 #[gpui::test]
@@ -4881,9 +4906,10 @@ mod property_test {
     enum Operation {
         SaveThread { workspace_index: usize },
         SaveWorktreeThread { worktree_index: usize },
-        DeleteThread { index: usize },
+        ArchiveThread { index: usize },
         ToggleAgentPanel,
         CreateDraftThread,
+        ActivateSavedThread { index: usize },
         AddWorkspace,
         OpenWorktreeAsWorkspace { worktree_index: usize },
         RemoveWorkspace { index: usize },
@@ -4892,17 +4918,18 @@ mod property_test {
     }
 
     // Distribution (out of 20 slots):
-    //   SaveThread:              5 slots (~23%)
-    //   SaveWorktreeThread:      2 slots (~9%)
-    //   DeleteThread:            2 slots (~9%)
-    //   ToggleAgentPanel:        2 slots (~9%)
-    //   CreateDraftThread:       2 slots (~9%)
-    //   AddWorkspace:            1 slot  (~5%)
-    //   OpenWorktreeAsWorkspace: 1 slot  (~5%)
-    //   RemoveWorkspace:         1 slot  (~5%)
-    //   SwitchWorkspace:         2 slots (~9%)
-    //   AddLinkedWorktree:       4 slots (~18%)
-    const DISTRIBUTION_SLOTS: u32 = 22;
+    //   SaveThread:              4 slots (~17%)
+    //   SaveWorktreeThread:      2 slots (~8%)
+    //   ArchiveThread:           2 slots (~8%)
+    //   ToggleAgentPanel:        2 slots (~8%)
+    //   CreateDraftThread:       2 slots (~8%)
+    //   ActivateSavedThread:     2 slots (~8%)
+    //   AddWorkspace:            1 slot  (~4%)
+    //   OpenWorktreeAsWorkspace: 1 slot  (~4%)
+    //   RemoveWorkspace:         1 slot  (~4%)
+    //   SwitchWorkspace:         2 slots (~8%)
+    //   AddLinkedWorktree:       4 slots (~17%)
+    const DISTRIBUTION_SLOTS: u32 = 23;
 
     impl TestState {
         fn generate_operation(&self, raw: u32) -> Operation {
@@ -4919,7 +4946,7 @@ mod property_test {
                 5..=6 => Operation::SaveThread {
                     workspace_index: extra % workspace_count,
                 },
-                7..=8 if !self.saved_thread_ids.is_empty() => Operation::DeleteThread {
+                7..=8 if !self.saved_thread_ids.is_empty() => Operation::ArchiveThread {
                     index: extra % self.saved_thread_ids.len(),
                 },
                 7..=8 => Operation::SaveThread {
@@ -4927,24 +4954,28 @@ mod property_test {
                 },
                 9..=10 => Operation::ToggleAgentPanel,
                 11..=12 => Operation::CreateDraftThread,
-                13 if !self.unopened_worktrees.is_empty() => Operation::OpenWorktreeAsWorkspace {
+                13..=14 if !self.saved_thread_ids.is_empty() => Operation::ActivateSavedThread {
+                    index: extra % self.saved_thread_ids.len(),
+                },
+                13..=14 => Operation::CreateDraftThread,
+                15 if !self.unopened_worktrees.is_empty() => Operation::OpenWorktreeAsWorkspace {
                     worktree_index: extra % self.unopened_worktrees.len(),
                 },
-                13 => Operation::AddWorkspace,
-                14 if workspace_count > 1 => Operation::RemoveWorkspace {
+                15 => Operation::AddWorkspace,
+                16 if workspace_count > 1 => Operation::RemoveWorkspace {
                     index: extra % workspace_count,
                 },
-                14 => Operation::AddWorkspace,
-                15..=16 => Operation::SwitchWorkspace {
+                16 => Operation::AddWorkspace,
+                17..=18 => Operation::SwitchWorkspace {
                     index: extra % workspace_count,
                 },
-                17..=21 if !self.main_repo_indices.is_empty() => {
+                19..=22 if !self.main_repo_indices.is_empty() => {
                     let main_index = self.main_repo_indices[extra % self.main_repo_indices.len()];
                     Operation::AddLinkedWorktree {
                         workspace_index: main_index,
                     }
                 }
-                17..=21 => Operation::SaveThread {
+                19..=22 => Operation::SaveThread {
                     workspace_index: extra % workspace_count,
                 },
                 _ => unreachable!(),
@@ -4996,11 +5027,10 @@ mod property_test {
                 let path_list = PathList::new(&[std::path::PathBuf::from(&worktree.path)]);
                 save_thread_to_path(state, path_list, cx);
             }
-            Operation::DeleteThread { index } => {
+            Operation::ArchiveThread { index } => {
                 let session_id = state.remove_thread(index);
-                cx.update(|_, cx| {
-                    ThreadMetadataStore::global(cx)
-                        .update(cx, |store, cx| store.delete(session_id, cx));
+                _sidebar.update_in(cx, |sidebar, window, cx| {
+                    sidebar.archive_thread(&session_id, window, cx);
                 });
             }
             Operation::ToggleAgentPanel => {
@@ -5027,6 +5057,46 @@ mod property_test {
                 workspace.update_in(cx, |workspace, window, cx| {
                     workspace.focus_panel::<AgentPanel>(window, cx);
                 });
+            }
+            Operation::ActivateSavedThread { index } => {
+                let session_id = state.saved_thread_ids[index].clone();
+                let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+                let metadata = cx.update(|_, cx| {
+                    ThreadMetadataStore::global(cx)
+                        .read(cx)
+                        .entries()
+                        .find(|m| m.session_id == session_id)
+                });
+                if let Some(metadata) = metadata {
+                    let panel =
+                        workspace.read_with(cx, |workspace, cx| workspace.panel::<AgentPanel>(cx));
+                    if let Some(panel) = panel {
+                        let connection = StubAgentConnection::new();
+                        connection.set_next_prompt_updates(vec![
+                            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                                metadata.title.to_string().into(),
+                            )),
+                        ]);
+                        open_thread_with_connection(&panel, connection, cx);
+                        send_message(&panel, cx);
+                        let panel_session_id = active_session_id(&panel, cx);
+                        // Replace the old metadata entry with one that
+                        // uses the panel's actual session ID.
+                        let old_session_id = metadata.session_id.clone();
+                        let mut updated_metadata = metadata.clone();
+                        updated_metadata.session_id = panel_session_id.clone();
+                        cx.update(|_, cx| {
+                            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                                store.delete(old_session_id, cx);
+                                store.save(updated_metadata, cx);
+                            });
+                        });
+                        state.saved_thread_ids[index] = panel_session_id;
+                    }
+                    _sidebar.update_in(cx, |sidebar, _window, cx| {
+                        sidebar.update_entries(cx);
+                    });
+                }
             }
             Operation::AddWorkspace => {
                 let path = state.next_workspace_path();
@@ -5227,7 +5297,7 @@ mod property_test {
             .contents
             .entries
             .iter()
-            .filter_map(|entry| entry.session_id().cloned())
+            .filter_map(|entry| entry.session_id(cx).cloned())
             .collect();
 
         let mut metadata_thread_ids: HashSet<acp::SessionId> = HashSet::default();
@@ -5248,11 +5318,35 @@ mod property_test {
                     }
                 }
             }
+
+            // Draft conversations live in the agent panel but aren't in the
+            // metadata store yet. They should still appear as thread entries.
+            if let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx) {
+                let panel = panel.read(cx);
+                if let Some(cv) = panel.active_conversation_view() {
+                    let cv = cv.read(cx);
+                    if let Some(session_id) = cv.parent_id(cx) {
+                        if let Some(thread) = cv.active_thread() {
+                            if thread.read(cx).thread.read(cx).is_draft() {
+                                metadata_thread_ids.insert(session_id);
+                            }
+                        }
+                    }
+                }
+                for (session_id, cv) in panel.background_threads() {
+                    let cv = cv.read(cx);
+                    if let Some(thread) = cv.active_thread() {
+                        if thread.read(cx).thread.read(cx).is_draft() {
+                            metadata_thread_ids.insert(session_id.clone());
+                        }
+                    }
+                }
+            }
         }
 
         anyhow::ensure!(
             sidebar_thread_ids == metadata_thread_ids,
-            "sidebar threads don't match metadata store: sidebar has {:?}, store has {:?}",
+            "sidebar threads don't match expected: sidebar has {:?}, expected {:?}",
             sidebar_thread_ids,
             metadata_thread_ids,
         );
@@ -5288,7 +5382,7 @@ mod property_test {
         let panel = active_workspace.read(cx).panel::<AgentPanel>(cx).unwrap();
         if panel.read(cx).active_thread_is_draft(cx) {
             anyhow::ensure!(
-                matches!(entry, ActiveEntry::Draft(_)),
+                matches!(entry, ActiveEntry::Draft { .. }),
                 "panel shows a draft but active_entry is {:?}",
                 entry,
             );
@@ -5311,7 +5405,7 @@ mod property_test {
             .contents
             .entries
             .iter()
-            .filter(|e| entry.matches_entry(e))
+            .filter(|e| entry.matches_entry(e, cx))
             .count();
         anyhow::ensure!(
             matching_count == 1,

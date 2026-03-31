@@ -2611,13 +2611,11 @@ impl AgentPanel {
         );
     }
 
-    fn active_thread_has_messages(&self, cx: &App) -> bool {
-        self.active_agent_thread(cx)
-            .is_some_and(|thread| !thread.read(cx).entries().is_empty())
-    }
-
     pub fn active_thread_is_draft(&self, cx: &App) -> bool {
-        self.active_conversation_view().is_some() && !self.active_thread_has_messages(cx)
+        self.active_conversation_view().is_some()
+            && self
+                .active_agent_thread(cx)
+                .map_or(true, |thread| thread.read(cx).is_draft())
     }
 
     fn handle_first_send_requested(
@@ -4090,7 +4088,9 @@ impl AgentPanel {
 
         let show_history_menu = self.has_history_for_selected_agent(cx);
         let has_v2_flag = cx.has_flag::<AgentV2FeatureFlag>();
-        let is_empty_state = !self.active_thread_has_messages(cx);
+        let is_empty_state = !self
+            .active_agent_thread(cx)
+            .is_some_and(|thread| !thread.read(cx).is_draft());
 
         let is_in_history_or_config = matches!(
             &self.active_view,

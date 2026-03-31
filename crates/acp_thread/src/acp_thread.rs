@@ -1276,6 +1276,10 @@ impl AcpThread {
         self.provisional_title.is_some()
     }
 
+    pub fn is_draft(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     pub fn entries(&self) -> &[AgentThreadEntry] {
         &self.entries
     }

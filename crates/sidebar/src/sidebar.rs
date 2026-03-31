@@ -114,14 +114,24 @@ enum ActiveEntry {
         session_id: acp::SessionId,
         workspace: Entity<Workspace>,
     },
-    Draft(Entity<Workspace>),
+    Draft {
+        session_id: Option<acp::SessionId>,
+        workspace: Entity<Workspace>,
+    },
 }
 
 impl ActiveEntry {
+    fn draft_for_workspace(workspace: Entity<Workspace>) -> Self {
+        ActiveEntry::Draft {
+            session_id: None,
+            workspace,
+        }
+    }
+
     fn workspace(&self) -> &Entity<Workspace> {
         match self {
             ActiveEntry::Thread { workspace, .. } => workspace,
-            ActiveEntry::Draft(workspace) => workspace,
+            ActiveEntry::Draft { workspace, .. } => workspace,
         }
     }
 
@@ -129,18 +139,29 @@ impl ActiveEntry {
         matches!(self, ActiveEntry::Thread { session_id: id, .. } if id == session_id)
     }
 
-    fn matches_entry(&self, entry: &ListEntry) -> bool {
+    fn matches_entry(&self, entry: &ListEntry, cx: &App) -> bool {
         match (self, entry) {
             (ActiveEntry::Thread { session_id, .. }, ListEntry::Thread(thread)) => {
                 thread.metadata.session_id == *session_id
             }
             (
-                ActiveEntry::Draft(workspace),
+                ActiveEntry::Draft {
+                    session_id,
+                    workspace,
+                },
                 ListEntry::NewThread {
                     workspace: entry_workspace,
+                    draft_thread,
                     ..
                 },
-            ) => workspace == entry_workspace,
+            ) => {
+                workspace == entry_workspace
+                    && match (session_id, draft_thread) {
+                        (Some(id), Some(thread)) => thread.read(cx).session_id() == id,
+                        (None, None) => true,
+                        _ => false,
+                    }
+            }
             _ => false,
         }
     }
@@ -224,6 +245,7 @@ enum ListEntry {
         path_list: PathList,
         workspace: Entity<Workspace>,
         worktrees: Vec<WorktreeInfo>,
+        draft_thread: Option<Entity<acp_thread::AcpThread>>,
     },
 }
 
@@ -241,9 +263,13 @@ impl ListEntry {
         }
     }
 
-    fn session_id(&self) -> Option<&acp::SessionId> {
+    fn session_id<'a>(&'a self, cx: &'a App) -> Option<&'a acp::SessionId> {
         match self {
             ListEntry::Thread(thread_entry) => Some(&thread_entry.metadata.session_id),
+            ListEntry::NewThread {
+                draft_thread: Some(thread),
+                ..
+            } => Some(thread.read(cx).session_id()),
             _ => None,
         }
     }
@@ -569,7 +595,8 @@ impl Sidebar {
                             .upgrade()
                             .map(|mw| mw.read(cx).workspace().clone())
                         {
-                            this.active_entry = Some(ActiveEntry::Draft(active_workspace));
+                            this.active_entry =
+                                Some(ActiveEntry::draft_for_workspace(active_workspace));
                         }
                     }
                     this.observe_draft_editor(cx);
@@ -631,48 +658,12 @@ impl Sidebar {
             });
     }
 
-    fn active_draft_text(&self, cx: &App) -> Option<SharedString> {
-        let mw = self.multi_workspace.upgrade()?;
-        let workspace = mw.read(cx).workspace();
-        let panel = workspace.read(cx).panel::<AgentPanel>(cx)?;
-        let conversation_view = panel.read(cx).active_conversation_view()?;
-        let thread_view = conversation_view.read(cx).active_thread()?;
-        let raw = thread_view.read(cx).message_editor.read(cx).text(cx);
-        let cleaned = Self::clean_mention_links(&raw);
-        let mut text: String = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-        if text.is_empty() {
-            None
-        } else {
-            const MAX_CHARS: usize = 250;
-            if let Some((truncate_at, _)) = text.char_indices().nth(MAX_CHARS) {
-                text.truncate(truncate_at);
-            }
-            Some(text.into())
-        }
-    }
-
-    fn clean_mention_links(input: &str) -> String {
-        let mut result = String::with_capacity(input.len());
-        let mut remaining = input;
-
-        while let Some(start) = remaining.find("[@") {
-            result.push_str(&remaining[..start]);
-            let after_bracket = &remaining[start + 1..]; // skip '['
-            if let Some(close_bracket) = after_bracket.find("](") {
-                let mention = &after_bracket[..close_bracket]; // "@something"
-                let after_link_start = &after_bracket[close_bracket + 2..]; // after "]("
-                if let Some(close_paren) = after_link_start.find(')') {
-                    result.push_str(mention);
-                    remaining = &after_link_start[close_paren + 1..];
-                    continue;
-                }
-            }
-            // Couldn't parse full link syntax — emit the literal "[@" and move on.
-            result.push_str("[@");
-            remaining = &remaining[start + 2..];
-        }
-        result.push_str(remaining);
-        result
+    fn draft_text_from_thread(
+        thread: &Entity<acp_thread::AcpThread>,
+        cx: &App,
+    ) -> Option<SharedString> {
+        let blocks = thread.read(cx).draft_prompt()?;
+        summarize_content_blocks(blocks)
     }
 
     /// Rebuilds the sidebar contents from current workspace and thread state.
@@ -704,14 +695,6 @@ impl Sidebar {
 
         let query = self.filter_editor.read(cx).text(cx);
 
-        // Derive active_entry from the active workspace's agent panel.
-        // Draft is checked first because a conversation can have a session_id
-        // before any messages are sent. However, a thread that's still loading
-        // also appears as a "draft" (no messages yet), so when we already have
-        // an eager Thread write for this workspace we preserve it. A session_id
-        // on a non-draft is a positive Thread signal. The remaining case
-        // (conversation exists, not draft, no session_id) is a genuine
-        // mid-load — keep the previous value.
         if let Some(active_ws) = &active_workspace {
             if let Some(panel) = active_ws.read(cx).panel::<AgentPanel>(cx) {
                 if panel.read(cx).active_thread_is_draft(cx)
@@ -721,7 +704,14 @@ impl Sidebar {
                         matches!(&self.active_entry, Some(ActiveEntry::Thread { .. }))
                             && self.active_entry_workspace() == Some(active_ws);
                     if !preserving_thread {
-                        self.active_entry = Some(ActiveEntry::Draft(active_ws.clone()));
+                        let draft_session_id = panel
+                            .read(cx)
+                            .active_conversation_view()
+                            .and_then(|cv| cv.read(cx).parent_id(cx));
+                        self.active_entry = Some(ActiveEntry::Draft {
+                            session_id: draft_session_id,
+                            workspace: active_ws.clone(),
+                        });
                     }
                 } else if let Some(session_id) = panel
                     .read(cx)
@@ -1007,10 +997,6 @@ impl Sidebar {
                     entries.push(thread.into());
                 }
             } else {
-                let is_draft_for_workspace = is_active
-                    && matches!(&self.active_entry, Some(ActiveEntry::Draft(_)))
-                    && self.active_entry_workspace() == Some(representative_workspace);
-
                 project_header_indices.push(entries.len());
                 entries.push(ListEntry::ProjectHeader {
                     path_list: path_list.clone(),
@@ -1026,27 +1012,91 @@ impl Sidebar {
                     continue;
                 }
 
-                // Emit "New Thread" entries for threadless workspaces
-                // and active drafts, right after the header.
+                // Collect draft threads from agent panels in this group.
+                // Collect draft conversations from agent panels in this
+                // group. A draft is a conversation with no messages but a
+                // valid server session.
+                struct DraftEntry {
+                    workspace: Entity<Workspace>,
+                    thread: Entity<acp_thread::AcpThread>,
+                }
+                let mut draft_entries: Vec<DraftEntry> = Vec::new();
+                for workspace in &group.workspaces {
+                    if let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx) {
+                        let panel = panel.read(cx);
+                        let conversation_views: Vec<_> = panel
+                            .active_conversation_view()
+                            .into_iter()
+                            .chain(panel.background_threads().values())
+                            .collect();
+                        for cv in conversation_views {
+                            let cv = cv.read(cx);
+                            if let Some(thread_view) = cv.active_thread()
+                                && thread_view.read(cx).thread.read(cx).is_draft()
+                            {
+                                draft_entries.push(DraftEntry {
+                                    workspace: workspace.clone(),
+                                    thread: thread_view.read(cx).thread.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Emit "New Thread" entries for threadless workspaces.
+                // If a threadless workspace has a draft, attach it.
+                let mut used_draft_indices: HashSet<usize> = HashSet::new();
                 for (workspace, worktrees) in &threadless_workspaces {
+                    let draft_index = draft_entries.iter().position(|d| &d.workspace == workspace);
+                    let draft_thread = draft_index.map(|i| {
+                        used_draft_indices.insert(i);
+                        draft_entries[i].thread.clone()
+                    });
                     entries.push(ListEntry::NewThread {
                         path_list: path_list.clone(),
                         workspace: workspace.clone(),
                         worktrees: worktrees.clone(),
+                        draft_thread,
                     });
                 }
-                if is_draft_for_workspace
-                    && !threadless_workspaces
-                        .iter()
-                        .any(|(ws, _)| ws == representative_workspace)
-                {
-                    let ws_path_list = workspace_path_list(representative_workspace, cx);
+                // Emit NewThread for each remaining draft (including
+                // multiple drafts per workspace and drafts in workspaces
+                // that have saved threads).
+                for (i, draft) in draft_entries.iter().enumerate() {
+                    if used_draft_indices.contains(&i) {
+                        continue;
+                    }
+                    let ws_path_list = workspace_path_list(&draft.workspace, cx);
                     let worktrees = worktree_info_from_thread_paths(&ws_path_list, &project_groups);
                     entries.push(ListEntry::NewThread {
                         path_list: path_list.clone(),
-                        workspace: representative_workspace.clone(),
+                        workspace: draft.workspace.clone(),
                         worktrees,
+                        draft_thread: Some(draft.thread.clone()),
                     });
+                }
+                // Also emit NewThread if active_entry is Draft for a
+                // workspace in this group but no draft_thread was collected
+                // (e.g. the draft has no server session yet).
+                if let Some(ActiveEntry::Draft {
+                    workspace: draft_ws,
+                    ..
+                }) = &self.active_entry
+                {
+                    if group.workspaces.contains(draft_ws)
+                        && !threadless_workspaces.iter().any(|(ws, _)| ws == draft_ws)
+                        && !draft_entries.iter().any(|d| &d.workspace == draft_ws)
+                    {
+                        let ws_path_list = workspace_path_list(draft_ws, cx);
+                        let worktrees =
+                            worktree_info_from_thread_paths(&ws_path_list, &project_groups);
+                        entries.push(ListEntry::NewThread {
+                            path_list: path_list.clone(),
+                            workspace: draft_ws.clone(),
+                            worktrees,
+                            draft_thread: None,
+                        });
+                    }
                 }
 
                 let total = threads.len();
@@ -1071,7 +1121,7 @@ impl Sidebar {
                             || thread.status == AgentThreadStatus::WaitingForConfirmation
                             || notified_threads.contains(session_id)
                             || self.active_entry.as_ref().is_some_and(|active| {
-                                active.matches_entry(&ListEntry::Thread(thread.clone()))
+                                active.matches_entry(&ListEntry::Thread(thread.clone()), cx)
                             });
                         if is_promoted {
                             promoted_threads.insert(session_id.clone());
@@ -1174,7 +1224,7 @@ impl Sidebar {
         let is_active = self
             .active_entry
             .as_ref()
-            .is_some_and(|active| active.matches_entry(entry));
+            .is_some_and(|active| active.matches_entry(entry, cx));
 
         let rendered = match entry {
             ListEntry::ProjectHeader {
@@ -1207,12 +1257,14 @@ impl Sidebar {
                 path_list,
                 workspace,
                 worktrees,
+                draft_thread,
             } => self.render_new_thread(
                 ix,
                 path_list,
                 workspace,
                 is_active,
                 worktrees,
+                draft_thread.as_ref(),
                 is_selected,
                 cx,
             ),
@@ -1431,8 +1483,9 @@ impl Sidebar {
                             .tooltip(Tooltip::text("Activate Workspace"))
                             .on_click(cx.listener({
                                 move |this, _, window, cx| {
-                                    this.active_entry =
-                                        Some(ActiveEntry::Draft(workspace_for_open.clone()));
+                                    this.active_entry = Some(ActiveEntry::draft_for_workspace(
+                                        workspace_for_open.clone(),
+                                    ));
                                     if let Some(multi_workspace) = this.multi_workspace.upgrade() {
                                         multi_workspace.update(cx, |multi_workspace, cx| {
                                             multi_workspace.activate(
@@ -2437,7 +2490,7 @@ impl Sidebar {
                 }
             } else {
                 if let Some(workspace) = &group_workspace {
-                    self.active_entry = Some(ActiveEntry::Draft(workspace.clone()));
+                    self.active_entry = Some(ActiveEntry::draft_for_workspace(workspace.clone()));
                     if let Some(agent_panel) = workspace.read(cx).panel::<AgentPanel>(cx) {
                         agent_panel.update(cx, |panel, cx| {
                             panel.new_thread(&NewThread, window, cx);
@@ -3016,7 +3069,7 @@ impl Sidebar {
             return;
         };
 
-        self.active_entry = Some(ActiveEntry::Draft(workspace.clone()));
+        self.active_entry = Some(ActiveEntry::draft_for_workspace(workspace.clone()));
 
         multi_workspace.update(cx, |multi_workspace, cx| {
             multi_workspace.activate(workspace.clone(), window, cx);
@@ -3039,15 +3092,13 @@ impl Sidebar {
         workspace: &Entity<Workspace>,
         is_active: bool,
         worktrees: &[WorktreeInfo],
+        draft_thread: Option<&Entity<acp_thread::AcpThread>>,
         is_selected: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let label: SharedString = if is_active {
-            self.active_draft_text(cx)
-                .unwrap_or_else(|| DEFAULT_THREAD_TITLE.into())
-        } else {
-            DEFAULT_THREAD_TITLE.into()
-        };
+        let label: SharedString = draft_thread
+            .and_then(|thread| Self::draft_text_from_thread(thread, cx))
+            .unwrap_or_else(|| DEFAULT_THREAD_TITLE.into());
 
         let workspace = workspace.clone();
         let id = SharedString::from(format!("new-thread-btn-{}", ix));
@@ -3570,6 +3621,38 @@ impl Render for Sidebar {
                 SidebarView::Archive(archive_view) => this.child(archive_view.clone()),
             })
             .child(self.render_sidebar_bottom_bar(cx))
+    }
+}
+
+fn summarize_content_blocks(blocks: &[acp::ContentBlock]) -> Option<SharedString> {
+    const MAX_CHARS: usize = 250;
+
+    let mut text = String::new();
+    for block in blocks {
+        match block {
+            acp::ContentBlock::Text(text_content) => {
+                text.push_str(&text_content.text);
+            }
+            acp::ContentBlock::ResourceLink(link) => {
+                text.push_str(&format!("@{}", link.name));
+            }
+            acp::ContentBlock::Image(_) => {
+                text.push_str("[image]");
+            }
+            _ => {}
+        }
+        if text.len() > MAX_CHARS {
+            break;
+        }
+    }
+    let mut text: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        None
+    } else {
+        if let Some((truncate_at, _)) = text.char_indices().nth(MAX_CHARS) {
+            text.truncate(truncate_at);
+        }
+        Some(text.into())
     }
 }
 
