@@ -749,7 +749,7 @@ pub mod wsl_actions {
 }
 
 pub mod markdown {
-    use gpui::{Action, actions};
+    use gpui::Action;
     use schemars::JsonSchema;
     use serde::Deserialize;
 
@@ -786,21 +786,21 @@ pub mod markdown {
         #[serde(default)]
         pub behavior: OutdentBehavior,
     }
-
-    actions!(
-        markdown,
-        [
-            /// Opens a markdown preview for the current file.
-            OpenPreview,
-            /// Opens a markdown preview in a split pane.
-            OpenPreviewToTheSide,
-        ]
-    );
 }
 
 pub mod preview {
     pub mod markdown {
-        pub use crate::markdown::*;
+        use gpui::actions;
+
+        actions!(
+            markdown,
+            [
+                /// Opens a markdown preview for the current file.
+                OpenPreview,
+                /// Opens a markdown preview in a split pane.
+                OpenPreviewToTheSide,
+            ]
+        );
     }
 
     pub mod svg {
