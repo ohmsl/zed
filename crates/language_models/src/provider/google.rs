@@ -16,6 +16,7 @@ use language_model::{
     IconOrSvg, LanguageModel, LanguageModelId, LanguageModelName, LanguageModelProvider,
     LanguageModelProviderId, LanguageModelProviderName, LanguageModelProviderState,
     LanguageModelRequest, RateLimiter, Role,
+    provider::{GOOGLE_PROVIDER_ID, GOOGLE_PROVIDER_NAME},
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -33,8 +34,8 @@ use util::ResultExt;
 
 use language_model::ApiKeyState;
 
-const PROVIDER_ID: LanguageModelProviderId = language_model::GOOGLE_PROVIDER_ID;
-const PROVIDER_NAME: LanguageModelProviderName = language_model::GOOGLE_PROVIDER_NAME;
+const PROVIDER_ID: LanguageModelProviderId = GOOGLE_PROVIDER_ID;
+const PROVIDER_NAME: LanguageModelProviderName = GOOGLE_PROVIDER_NAME;
 
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct GoogleSettings {

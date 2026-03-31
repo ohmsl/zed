@@ -16,6 +16,7 @@ use language_model::{
     LanguageModelProviderName, LanguageModelProviderState, LanguageModelRequest,
     LanguageModelToolChoice, LanguageModelToolResultContent, LanguageModelToolUse, MessageContent,
     RateLimiter, Role, StopReason, env_var,
+    provider::{ANTHROPIC_PROVIDER_ID, ANTHROPIC_PROVIDER_NAME},
 };
 use settings::{Settings, SettingsStore};
 use std::pin::Pin;
@@ -30,8 +31,8 @@ use crate::provider::util::{fix_streamed_json, parse_tool_arguments};
 
 pub use settings::AnthropicAvailableModel as AvailableModel;
 
-const PROVIDER_ID: LanguageModelProviderId = language_model::ANTHROPIC_PROVIDER_ID;
-const PROVIDER_NAME: LanguageModelProviderName = language_model::ANTHROPIC_PROVIDER_NAME;
+const PROVIDER_ID: LanguageModelProviderId = ANTHROPIC_PROVIDER_ID;
+const PROVIDER_NAME: LanguageModelProviderName = ANTHROPIC_PROVIDER_NAME;
 
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct AnthropicSettings {

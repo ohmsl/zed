@@ -3726,7 +3726,7 @@ impl AgentPanel {
                     .read(cx)
                     .default_model()
                     .is_some_and(|model| {
-                        model.provider.id() != language_model::ZED_CLOUD_PROVIDER_ID
+                        model.provider.id() != language_model::provider::ZED_CLOUD_PROVIDER_ID
                     })
                 {
                     return false;
@@ -3767,7 +3767,7 @@ impl AgentPanel {
             .iter()
             .any(|provider| {
                 provider.is_authenticated(cx)
-                    && provider.id() != language_model::ZED_CLOUD_PROVIDER_ID
+                    && provider.id() != language_model::provider::ZED_CLOUD_PROVIDER_ID
             });
 
         match &self.active_view {

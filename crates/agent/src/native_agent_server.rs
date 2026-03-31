@@ -112,7 +112,7 @@ mod tests {
                 prompt_store::init(cx);
                 let registry = language_model::LanguageModelRegistry::read_global(cx);
                 let auth = registry
-                    .provider(&language_model::ANTHROPIC_PROVIDER_ID)
+                    .provider(&language_model::provider::ANTHROPIC_PROVIDER_ID)
                     .unwrap()
                     .authenticate(cx);
 
@@ -127,7 +127,7 @@ mod tests {
                 registry.update(cx, |registry, cx| {
                     registry.select_default_model(
                         Some(&language_model::SelectedModel {
-                            provider: language_model::ANTHROPIC_PROVIDER_ID,
+                            provider: language_model::provider::ANTHROPIC_PROVIDER_ID,
                             model: language_model::LanguageModelId("claude-sonnet-4-latest".into()),
                         }),
                         cx,
