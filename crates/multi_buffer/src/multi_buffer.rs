@@ -673,12 +673,14 @@ impl DiffState {
                             base_text_changed_range,
                             extended_range: _,
                         }) => {
-                            this.inverted_buffer_diff_changed(
-                                diff,
-                                main_buffer,
-                                base_text_changed_range.clone(),
-                                cx,
-                            );
+                            if let Some(base_text_changed_range) = base_text_changed_range {
+                                this.inverted_buffer_diff_changed(
+                                    diff,
+                                    main_buffer,
+                                    base_text_changed_range.clone(),
+                                    cx,
+                                );
+                            }
                             cx.emit(Event::BufferDiffChanged);
                         }
                         BufferDiffEvent::LanguageChanged => {
@@ -2574,7 +2576,7 @@ impl MultiBuffer {
         &mut self,
         diff: Entity<BufferDiff>,
         main_buffer: Entity<language::Buffer>,
-        diff_change_range: Option<Range<usize>>,
+        diff_change_range: Range<usize>,
         cx: &mut Context<Self>,
     ) {
         self.sync_mut(cx);
@@ -2593,10 +2595,6 @@ impl MultiBuffer {
         };
         let mut snapshot = self.snapshot.get_mut();
         snapshot.diffs.insert_or_replace(new_diff, ());
-
-        let Some(diff_change_range) = diff_change_range else {
-            return;
-        };
 
         let excerpt_edits = snapshot.excerpt_edits_for_diff_change(buffer_state, diff_change_range);
         let edits = Self::sync_diff_transforms(
@@ -2788,12 +2786,7 @@ impl MultiBuffer {
         let base_text_buffer_id = snapshot.remote_id();
         let diff_change_range = 0..snapshot.len();
         self.snapshot.get_mut().has_inverted_diff = true;
-        self.inverted_buffer_diff_changed(
-            diff.clone(),
-            main_buffer.clone(),
-            Some(diff_change_range),
-            cx,
-        );
+        self.inverted_buffer_diff_changed(diff.clone(), main_buffer.clone(), diff_change_range, cx);
         self.diffs.insert(
             base_text_buffer_id,
             DiffState::new_inverted(diff, main_buffer, cx),
