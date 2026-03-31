@@ -748,19 +748,59 @@ pub mod wsl_actions {
     }
 }
 
+pub mod markdown {
+    use gpui::{Action, actions};
+    use schemars::JsonSchema;
+    use serde::Deserialize;
+
+    #[derive(PartialEq, Clone, Copy, Debug, Deserialize, JsonSchema, Default)]
+    #[serde(rename_all = "snake_case")]
+    pub enum IndentBehavior {
+        Tab,
+        #[default]
+        Indent,
+    }
+
+    /// Indents in markdown buffers with optional tab-style behavior.
+    #[derive(PartialEq, Clone, Deserialize, JsonSchema, Action)]
+    #[action(namespace = markdown)]
+    #[serde(deny_unknown_fields)]
+    pub struct Indent {
+        #[serde(default)]
+        pub behavior: IndentBehavior,
+    }
+
+    #[derive(PartialEq, Clone, Copy, Debug, Deserialize, JsonSchema, Default)]
+    #[serde(rename_all = "snake_case")]
+    pub enum OutdentBehavior {
+        Backtab,
+        #[default]
+        Outdent,
+    }
+
+    /// Outdents in markdown buffers with optional backtab-style behavior.
+    #[derive(PartialEq, Clone, Deserialize, JsonSchema, Action)]
+    #[action(namespace = markdown)]
+    #[serde(deny_unknown_fields)]
+    pub struct Outdent {
+        #[serde(default)]
+        pub behavior: OutdentBehavior,
+    }
+
+    actions!(
+        markdown,
+        [
+            /// Opens a markdown preview for the current file.
+            OpenPreview,
+            /// Opens a markdown preview in a split pane.
+            OpenPreviewToTheSide,
+        ]
+    );
+}
+
 pub mod preview {
     pub mod markdown {
-        use gpui::actions;
-
-        actions!(
-            markdown,
-            [
-                /// Opens a markdown preview for the current file.
-                OpenPreview,
-                /// Opens a markdown preview in a split pane.
-                OpenPreviewToTheSide,
-            ]
-        );
+        pub use crate::markdown::*;
     }
 
     pub mod svg {
