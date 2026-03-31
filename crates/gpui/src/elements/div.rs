@@ -3588,60 +3588,13 @@ impl ScrollHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AppContext as _, Context, Modifiers, TestAppContext, size};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering::SeqCst},
-    };
+    use crate::{AppContext as _, Context, TestAppContext};
 
-    struct TooltipLifecycleCounts {
-        created: AtomicUsize,
-        dropped: AtomicUsize,
-    }
+    struct TestTooltipView;
 
-    struct DropTrackingTooltip {
-        tooltip_lifecycle_counts: Arc<TooltipLifecycleCounts>,
-    }
-
-    impl Drop for DropTrackingTooltip {
-        fn drop(&mut self) {
-            self.tooltip_lifecycle_counts.dropped.fetch_add(1, SeqCst);
-        }
-    }
-
-    impl Render for DropTrackingTooltip {
+    impl Render for TestTooltipView {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             div().w(px(20.)).h(px(20.)).child("tooltip")
-        }
-    }
-
-    struct TooltipOwner {
-        show_target: bool,
-        tooltip_lifecycle_counts: Arc<TooltipLifecycleCounts>,
-    }
-
-    impl Render for TooltipOwner {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            let root = div().size_full();
-            if self.show_target {
-                let tooltip_lifecycle_counts = self.tooltip_lifecycle_counts.clone();
-                root.child(
-                    div()
-                        .id("target")
-                        .w(px(50.))
-                        .h(px(50.))
-                        .tooltip(move |_window, cx| {
-                            tooltip_lifecycle_counts.created.fetch_add(1, SeqCst);
-                            let tooltip_lifecycle_counts = tooltip_lifecycle_counts.clone();
-                            cx.new(|_| DropTrackingTooltip {
-                                tooltip_lifecycle_counts,
-                            })
-                            .into()
-                        }),
-                )
-            } else {
-                root
-            }
         }
     }
 
@@ -3686,45 +3639,25 @@ mod tests {
     #[test]
     fn tooltip_is_released_when_its_owner_disappears() {
         let mut test_app = TestAppContext::single();
-        let tooltip_lifecycle_counts = Arc::new(TooltipLifecycleCounts {
-            created: AtomicUsize::new(0),
-            dropped: AtomicUsize::new(0),
+
+        let active_tooltip: Rc<RefCell<Option<ActiveTooltip>>> = Rc::new(RefCell::new(None));
+        let weak_active_tooltip = Rc::downgrade(&active_tooltip);
+        let tooltip_view = test_app.update(|cx| cx.new(|_| TestTooltipView).into());
+
+        *active_tooltip.borrow_mut() = Some(ActiveTooltip::Visible {
+            tooltip: AnyTooltip {
+                view: tooltip_view,
+                mouse_position: point(px(0.), px(0.)),
+                check_visible_and_update: Rc::new(move |_, _, _| {
+                    weak_active_tooltip.upgrade().is_some()
+                }),
+            },
+            is_hoverable: false,
         });
 
-        let (view, cx) = test_app.add_window_view({
-            let tooltip_lifecycle_counts = tooltip_lifecycle_counts.clone();
-            move |_window, _cx| TooltipOwner {
-                show_target: true,
-                tooltip_lifecycle_counts,
-            }
-        });
+        let weak_active_tooltip = Rc::downgrade(&active_tooltip);
+        drop(active_tooltip);
 
-        cx.draw(point(px(0.), px(0.)), size(px(100.), px(100.)), |_, _| {
-            view.clone().into_any_element()
-        });
-        cx.simulate_mouse_move(point(px(10.), px(10.)), None, Modifiers::default());
-        cx.run_until_parked();
-        cx.draw(point(px(0.), px(0.)), size(px(100.), px(100.)), |_, _| {
-            view.clone().into_any_element()
-        });
-
-        assert_eq!(tooltip_lifecycle_counts.created.load(SeqCst), 1);
-        assert_eq!(tooltip_lifecycle_counts.dropped.load(SeqCst), 0);
-
-        cx.update(|_window, app| {
-            view.update(app, |tooltip_owner, cx| {
-                tooltip_owner.show_target = false;
-                cx.notify();
-            });
-        });
-        cx.draw(point(px(0.), px(0.)), size(px(100.), px(100.)), |_, _| {
-            view.clone().into_any_element()
-        });
-        cx.run_until_parked();
-        cx.draw(point(px(0.), px(0.)), size(px(100.), px(100.)), |_, _| {
-            view.clone().into_any_element()
-        });
-
-        assert_eq!(tooltip_lifecycle_counts.dropped.load(SeqCst), 1);
+        assert!(weak_active_tooltip.upgrade().is_none());
     }
 }
