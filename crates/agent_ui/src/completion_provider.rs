@@ -874,7 +874,7 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
         let project = workspace.read(cx).project().clone();
         let repo = project.read(cx).active_repository(cx)?;
 
-        let default_branch_receiver = repo.update(cx, |repo, _| repo.default_branch(false));
+        let default_branch_receiver = repo.update(cx, |repo, _| repo.default_branch(true));
 
         Some(cx.spawn(async move |_cx| {
             let base_ref = default_branch_receiver
@@ -2577,7 +2577,7 @@ mod tests {
 
         let app_state = cx.update(|cx| {
             let state = AppState::test(cx);
-            theme::init(theme::LoadThemes::JustBase, cx);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
             editor::init(cx);
             state
         });
