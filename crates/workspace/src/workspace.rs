@@ -1923,7 +1923,7 @@ impl Workspace {
                         });
                         match open_mode {
                             OpenMode::Replace => {
-                                multi_workspace.replace(workspace.clone(), &*window, cx);
+                                multi_workspace.replace(workspace.clone(), window, cx);
                             }
                             OpenMode::Activate => {
                                 multi_workspace.activate(workspace.clone(), window, cx);

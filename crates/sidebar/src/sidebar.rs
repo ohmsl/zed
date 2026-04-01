@@ -3727,35 +3727,50 @@ pub fn dump_workspace_info(
     let mut output = String::new();
     let this_entity = cx.entity();
 
-    let multi_workspace = workspace.multi_workspace().and_then(|weak| weak.upgrade());
-    let workspaces: Vec<gpui::Entity<Workspace>> = match &multi_workspace {
-        Some(mw) => mw.read(cx).workspaces().collect::<Vec<_>>(),
-        None => vec![this_entity.clone()],
-    };
-    let active_workspace = multi_workspace
-        .as_ref()
-        .map(|mw| mw.read(cx).active_workspace());
+    let multi_workspace = workspace
+        .multi_workspace()
+        .and_then(|weak| weak.upgrade())
+        .unwrap();
 
-    writeln!(output, "MultiWorkspace: {} workspace(s)", workspaces.len()).ok();
-    writeln!(output).ok();
+    writeln!(
+        output,
+        "MultiWorkspace: {} project group(s)",
+        multi_workspace.read(cx).project_groups().len()
+    )
+    .ok();
 
-    for (index, ws) in workspaces.iter().enumerate() {
-        let is_active = active_workspace.as_ref() == Some(ws);
-        writeln!(
-            output,
-            "--- Workspace {index}{} ---",
-            if is_active { " (active)" } else { "" }
-        )
-        .ok();
+    let active_workspace = multi_workspace.read(cx).workspace();
 
-        // The action handler is already inside an update on `this_entity`,
-        // so we must avoid a nested read/update on that same entity.
-        if *ws == this_entity {
-            dump_single_workspace(workspace, &mut output, cx);
-        } else {
-            ws.read_with(cx, |ws, cx| {
-                dump_single_workspace(ws, &mut output, cx);
-            });
+    // The action handler is already inside an update on `this_entity`,
+    // so we must avoid a nested read/update on that same entity.
+    if *active_workspace == this_entity {
+        dump_single_workspace(workspace, &mut output, cx);
+    } else {
+        active_workspace.read_with(cx, |ws, cx| {
+            dump_single_workspace(ws, &mut output, cx);
+        });
+    }
+
+    for project_group in multi_workspace.read(cx).project_groups() {
+        writeln!(output, "Project Group: {:?}", project_group.key.path_list()).ok();
+        for group_workspace in &project_group.workspaces {
+            let is_active = active_workspace == group_workspace;
+            writeln!(
+                output,
+                "  Workspace{}: ",
+                if is_active { " (active)" } else { "" }
+            )
+            .ok();
+
+            // The action handler is already inside an update on `this_entity`,
+            // so we must avoid a nested read/update on that same entity.
+            if *group_workspace == this_entity {
+                dump_single_workspace(workspace, &mut output, cx);
+            } else {
+                group_workspace.read_with(cx, |ws, cx| {
+                    dump_single_workspace(ws, &mut output, cx);
+                });
+            }
         }
     }
 

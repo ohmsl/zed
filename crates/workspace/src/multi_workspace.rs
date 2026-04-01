@@ -582,7 +582,7 @@ impl MultiWorkspace {
     pub fn replace(
         &mut self,
         workspace: Entity<Workspace>,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !self.multi_workspace_enabled(cx) {
@@ -602,10 +602,24 @@ impl MultiWorkspace {
             return;
         }
 
-        let old_workspace = std::mem::replace(&mut self.active_workspace, workspace.clone());
+        let key = workspace.read(cx).project_group_key(cx);
+        if let Some(group) = self.project_groups.iter_mut().find(|g| g.key == key) {
+            group.workspaces.push(workspace.clone());
+        } else {
+            let active_group_ix = self
+                .project_groups
+                .iter()
+                .position(|group| group.workspaces.contains(&self.active_workspace));
+            if let Some(ix) = active_group_ix {
+                self.remove_group_at_index(ix, window, cx);
+            }
+            self.project_groups.push(ProjectGroup {
+                key,
+                workspaces: vec![workspace.clone()],
+            });
+        };
 
-        self.detach_workspace(&old_workspace, cx);
-
+        self.active_workspace = workspace.clone();
         Self::subscribe_to_workspace(&workspace, window, cx);
         self.sync_sidebar_to_workspace(&workspace, cx);
 
@@ -617,6 +631,9 @@ impl MultiWorkspace {
     }
 
     fn set_single_workspace(&mut self, workspace: Entity<Workspace>, cx: &mut Context<Self>) {
+        self.project_groups.clear();
+        self.project_groups
+            .push(ProjectGroup::from_workspace(workspace.clone(), cx));
         self.active_workspace = workspace;
         cx.emit(MultiWorkspaceEvent::ActiveWorkspaceChanged);
         cx.notify();

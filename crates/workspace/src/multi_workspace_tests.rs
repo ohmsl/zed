@@ -108,7 +108,7 @@ async fn test_replace(cx: &mut TestAppContext) {
     // Replace the only workspace (single-workspace case).
     let workspace_b = multi_workspace.update_in(cx, |mw, window, cx| {
         let workspace = cx.new(|cx| Workspace::test_new(project_b.clone(), window, cx));
-        mw.replace(workspace.clone(), &*window, cx);
+        mw.replace(workspace.clone(), window, cx);
         workspace
     });
 
@@ -148,7 +148,7 @@ async fn test_replace(cx: &mut TestAppContext) {
 
     let workspace_d = multi_workspace.update_in(cx, |mw, window, cx| {
         let workspace = cx.new(|cx| Workspace::test_new(project_d.clone(), window, cx));
-        mw.replace(workspace.clone(), &*window, cx);
+        mw.replace(workspace.clone(), window, cx);
         workspace
     });
 
@@ -179,7 +179,7 @@ async fn test_replace(cx: &mut TestAppContext) {
 
     // Replace with workspace_b which is already in the list — should just switch.
     multi_workspace.update_in(cx, |mw, window, cx| {
-        mw.replace(workspace_b.clone(), &*window, cx);
+        mw.replace(workspace_b.clone(), window, cx);
     });
 
     multi_workspace.read_with(cx, |mw, _cx| {
