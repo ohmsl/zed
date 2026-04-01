@@ -883,7 +883,8 @@ impl GitRepository for FakeGitRepository {
         _env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>> {
         self.with_state_async(true, move |state| {
-            if !options.allow_empty && state.index_contents == state.head_contents {
+            if !options.allow_empty && !options.amend && state.index_contents == state.head_contents
+            {
                 anyhow::bail!("nothing to commit (use allow_empty to create an empty commit)");
             }
 
