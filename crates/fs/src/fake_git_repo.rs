@@ -254,11 +254,12 @@ impl GitRepository for FakeGitRepository {
                 );
             }
 
-            let mut snapshot = None;
-            for _ in 0..pop_count {
-                snapshot = state.commit_history.pop();
-            }
-            let snapshot = snapshot.expect("pop_count validated above");
+            let target_index = state.commit_history.len() - pop_count;
+            state.commit_history.truncate(target_index + 1);
+            let snapshot = state
+                .commit_history
+                .pop()
+                .expect("pop_count validated above");
 
             match mode {
                 ResetMode::Soft => {
