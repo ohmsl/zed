@@ -300,6 +300,7 @@ pub struct Sidebar {
     focused_thread: Option<acp::SessionId>,
     agent_panel_visible: bool,
     active_thread_is_draft: bool,
+    is_creating_worktree: bool,
     hovered_thread_index: Option<usize>,
     collapsed_groups: HashSet<PathList>,
     expanded_groups: HashMap<PathList, usize>,
@@ -399,6 +400,7 @@ impl Sidebar {
             focused_thread: None,
             agent_panel_visible: false,
             active_thread_is_draft: false,
+            is_creating_worktree: false,
             hovered_thread_index: None,
             collapsed_groups: HashSet::new(),
             expanded_groups: HashMap::new(),
@@ -651,6 +653,11 @@ impl Sidebar {
             .as_ref()
             .and_then(|ws| ws.read(cx).panel::<AgentPanel>(cx))
             .map_or(false, |panel| panel.read(cx).active_thread_is_draft(cx));
+
+        self.is_creating_worktree = active_workspace
+            .as_ref()
+            .and_then(|ws| ws.read(cx).panel::<AgentPanel>(cx))
+            .map_or(false, |panel| panel.read(cx).is_creating_worktree());
 
         // Derive focused_thread from the active workspace's agent panel.
         // Only update when the panel gives us a positive signal — if the
@@ -2934,6 +2941,9 @@ impl Sidebar {
             .icon_color(Color::Custom(cx.theme().colors().icon_muted.opacity(0.8)))
             .selected(is_active)
             .focused(is_selected)
+            .when(self.is_creating_worktree && is_active, |this| {
+                this.status(AgentThreadStatus::Running)
+            })
             .when(!is_active, |this| {
                 this.on_click(cx.listener(move |this, _, window, cx| {
                     this.selection = None;

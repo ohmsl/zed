@@ -1660,7 +1660,9 @@ impl GitRepository for RealGitRepository {
             .spawn(async move {
                 std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
                 let git = git_binary?;
-                let output = git.build_command(&args).output().await?;
+                let mut command = git.build_command(&args);
+                command.kill_on_drop(true);
+                let output = command.output().await?;
                 if output.status.success() {
                     Ok(())
                 } else {

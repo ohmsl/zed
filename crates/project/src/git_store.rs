@@ -298,6 +298,47 @@ pub struct RepositorySnapshot {
 
 type JobId = u64;
 
+#[derive(Copy, Clone)]
+pub enum CancelOutcome {
+    /// The job was still queued and was removed before it started.
+    RemovedFromQueue,
+    /// The job was running; the process was killed. Cleanup callback has been awaited.
+    KilledRunning,
+    /// The job had already finished before the cancel arrived.
+    AlreadyFinished,
+}
+
+pub struct CancellationToken {
+    id: JobId,
+    job_sender: mpsc::UnboundedSender<GitWorkerMessage>,
+}
+
+impl CancellationToken {
+    pub fn cancel(
+        self,
+        cleanup: impl FnOnce(RepositoryState, &mut AsyncApp) -> Task<()> + 'static,
+    ) -> oneshot::Receiver<CancelOutcome> {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.job_sender
+            .unbounded_send(GitWorkerMessage::Cancel {
+                id: self.id,
+                cleanup: Some(Box::new(cleanup)),
+                result_tx,
+            })
+            .ok();
+        result_rx
+    }
+}
+
+enum GitWorkerMessage {
+    Job(GitJob),
+    Cancel {
+        id: JobId,
+        cleanup: Option<Box<dyn FnOnce(RepositoryState, &mut AsyncApp) -> Task<()>>>,
+        result_tx: oneshot::Sender<CancelOutcome>,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JobInfo {
     pub start: Instant,
@@ -336,7 +377,7 @@ pub struct Repository {
     // For a local repository, holds paths that have had worktree events since the last status scan completed,
     // and that should be examined during the next status scan.
     paths_needing_status_update: Vec<Vec<RepoPath>>,
-    job_sender: mpsc::UnboundedSender<GitJob>,
+    job_sender: mpsc::UnboundedSender<GitWorkerMessage>,
     active_jobs: HashMap<JobId, JobInfo>,
     pending_ops: SumTree<PendingOps>,
     job_id: JobId,
@@ -455,6 +496,7 @@ impl EventEmitter<JobsUpdated> for Repository {}
 impl EventEmitter<GitStoreEvent> for GitStore {}
 
 pub struct GitJob {
+    id: JobId,
     job: Box<dyn FnOnce(RepositoryState, &mut AsyncApp) -> Task<()>>,
     key: Option<GitJobKey>,
 }
@@ -4175,6 +4217,57 @@ impl Repository {
         self.send_keyed_job(None, status, job)
     }
 
+    pub fn send_cancellable_job<F, Fut, R>(
+        &mut self,
+        status: Option<SharedString>,
+        job: F,
+    ) -> (oneshot::Receiver<R>, CancellationToken)
+    where
+        F: FnOnce(RepositoryState, AsyncApp) -> Fut + 'static,
+        Fut: Future<Output = R> + 'static,
+        R: Send + 'static,
+    {
+        let (result_tx, result_rx) = futures::channel::oneshot::channel();
+        let job_id = post_inc(&mut self.job_id);
+        let this = self.this.clone();
+        let token = CancellationToken {
+            id: job_id,
+            job_sender: self.job_sender.clone(),
+        };
+        self.job_sender
+            .unbounded_send(GitWorkerMessage::Job(GitJob {
+                id: job_id,
+                key: None,
+                job: Box::new(move |state, cx: &mut AsyncApp| {
+                    let job = job(state, cx.clone());
+                    cx.spawn(async move |cx| {
+                        if let Some(s) = status.clone() {
+                            this.update(cx, |this, cx| {
+                                this.active_jobs.insert(
+                                    job_id,
+                                    JobInfo {
+                                        start: Instant::now(),
+                                        message: s.clone(),
+                                    },
+                                );
+                                cx.notify();
+                            })
+                            .ok();
+                        }
+                        let result = job.await;
+                        this.update(cx, |this, cx| {
+                            this.active_jobs.remove(&job_id);
+                            cx.notify();
+                        })
+                        .ok();
+                        result_tx.send(result).ok();
+                    })
+                }),
+            }))
+            .ok();
+        (result_rx, token)
+    }
+
     fn send_keyed_job<F, Fut, R>(
         &mut self,
         key: Option<GitJobKey>,
@@ -4190,7 +4283,8 @@ impl Repository {
         let job_id = post_inc(&mut self.job_id);
         let this = self.this.clone();
         self.job_sender
-            .unbounded_send(GitJob {
+            .unbounded_send(GitWorkerMessage::Job(GitJob {
+                id: job_id,
                 key,
                 job: Box::new(move |state, cx: &mut AsyncApp| {
                     let job = job(state, cx.clone());
@@ -4220,7 +4314,7 @@ impl Repository {
                         result_tx.send(result).ok();
                     })
                 }),
-            })
+            }))
             .ok();
         result_rx
     }
@@ -5882,6 +5976,37 @@ impl Repository {
         )
     }
 
+    pub fn create_cancellable_worktree(
+        &mut self,
+        branch_name: String,
+        path: PathBuf,
+        commit: Option<String>,
+    ) -> (oneshot::Receiver<Result<()>>, CancellationToken) {
+        let id = self.id;
+        self.send_cancellable_job(
+            Some(format!("git worktree add: {}", branch_name).into()),
+            move |repo, _cx| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                        backend.create_worktree(branch_name, path, commit).await
+                    }
+                    RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
+                        client
+                            .request(proto::GitCreateWorktree {
+                                project_id: project_id.0,
+                                repository_id: id.to_proto(),
+                                name: branch_name,
+                                directory: path.to_string_lossy().to_string(),
+                                commit,
+                            })
+                            .await?;
+                        Ok(())
+                    }
+                }
+            },
+        )
+    }
+
     pub fn remove_worktree(&mut self, path: PathBuf, force: bool) -> oneshot::Receiver<Result<()>> {
         let id = self.id;
         self.send_job(
@@ -6405,8 +6530,8 @@ impl Repository {
     fn spawn_local_git_worker(
         state: Shared<Task<Result<LocalRepositoryState, String>>>,
         cx: &mut Context<Self>,
-    ) -> mpsc::UnboundedSender<GitJob> {
-        let (job_tx, mut job_rx) = mpsc::unbounded::<GitJob>();
+    ) -> mpsc::UnboundedSender<GitWorkerMessage> {
+        let (job_tx, mut job_rx) = mpsc::unbounded::<GitWorkerMessage>();
 
         cx.spawn(async move |_, cx| {
             let state = state.await.map_err(|err| anyhow::anyhow!(err))?;
@@ -6420,10 +6545,34 @@ impl Repository {
                 .await;
             }
             let state = RepositoryState::Local(state);
-            let mut jobs = VecDeque::new();
+            let mut jobs: VecDeque<GitJob> = VecDeque::new();
+            let mut completed_ids: HashSet<JobId> = HashSet::new();
             loop {
-                while let Ok(Some(next_job)) = job_rx.try_next() {
-                    jobs.push_back(next_job);
+                while let Ok(Some(msg)) = job_rx.try_next() {
+                    match msg {
+                        GitWorkerMessage::Job(job) => jobs.push_back(job),
+                        GitWorkerMessage::Cancel {
+                            id,
+                            cleanup,
+                            result_tx,
+                        } => {
+                            let before = jobs.len();
+                            jobs.retain(|j| j.id != id);
+                            let outcome = if jobs.len() < before {
+                                CancelOutcome::RemovedFromQueue
+                            } else if completed_ids.contains(&id) {
+                                CancelOutcome::AlreadyFinished
+                            } else {
+                                CancelOutcome::AlreadyFinished
+                            };
+                            result_tx.send(outcome).ok();
+                            if let Some(f) = cleanup {
+                                if matches!(outcome, CancelOutcome::RemovedFromQueue) {
+                                    f(state.clone(), cx).await;
+                                }
+                            }
+                        }
+                    }
                 }
 
                 if let Some(job) = jobs.pop_front() {
@@ -6434,9 +6583,74 @@ impl Repository {
                     {
                         continue;
                     }
-                    (job.job)(state.clone(), cx).await;
-                } else if let Some(job) = job_rx.next().await {
-                    jobs.push_back(job);
+                    let running_job_id = job.id;
+                    let task = (job.job)(state.clone(), cx);
+                    let mut task = std::pin::pin!(task);
+
+                    loop {
+                        match futures::future::select(task, job_rx.next()).await {
+                            futures::future::Either::Left(((), _)) => {
+                                completed_ids.insert(running_job_id);
+                                if completed_ids.len() > 256 {
+                                    let to_remove: Vec<_> =
+                                        completed_ids.iter().copied().take(128).collect();
+                                    for id in to_remove {
+                                        completed_ids.remove(&id);
+                                    }
+                                }
+                                break;
+                            }
+                            futures::future::Either::Right((Some(msg), ongoing_task)) => {
+                                match msg {
+                                    GitWorkerMessage::Job(j) => {
+                                        jobs.push_back(j);
+                                        task = ongoing_task;
+                                    }
+                                    GitWorkerMessage::Cancel {
+                                        id,
+                                        cleanup,
+                                        result_tx,
+                                    } => {
+                                        if id == running_job_id {
+                                            let _ = ongoing_task;
+                                            if let Some(f) = cleanup {
+                                                f(state.clone(), cx).await;
+                                            }
+                                            result_tx.send(CancelOutcome::KilledRunning).ok();
+                                            break;
+                                        } else {
+                                            let before = jobs.len();
+                                            jobs.retain(|j| j.id != id);
+                                            let outcome = if jobs.len() < before {
+                                                CancelOutcome::RemovedFromQueue
+                                            } else if completed_ids.contains(&id) {
+                                                CancelOutcome::AlreadyFinished
+                                            } else {
+                                                CancelOutcome::AlreadyFinished
+                                            };
+                                            result_tx.send(outcome).ok();
+                                            task = ongoing_task;
+                                        }
+                                    }
+                                }
+                            }
+                            futures::future::Either::Right((None, ongoing_task)) => {
+                                ongoing_task.await;
+                                break;
+                            }
+                        }
+                    }
+                } else if let Some(msg) = job_rx.next().await {
+                    match msg {
+                        GitWorkerMessage::Job(job) => jobs.push_back(job),
+                        GitWorkerMessage::Cancel {
+                            id: _,
+                            cleanup: _,
+                            result_tx,
+                        } => {
+                            result_tx.send(CancelOutcome::AlreadyFinished).ok();
+                        }
+                    }
                 } else {
                     break;
                 }
@@ -6451,15 +6665,39 @@ impl Repository {
     fn spawn_remote_git_worker(
         state: RemoteRepositoryState,
         cx: &mut Context<Self>,
-    ) -> mpsc::UnboundedSender<GitJob> {
-        let (job_tx, mut job_rx) = mpsc::unbounded::<GitJob>();
+    ) -> mpsc::UnboundedSender<GitWorkerMessage> {
+        let (job_tx, mut job_rx) = mpsc::unbounded::<GitWorkerMessage>();
 
         cx.spawn(async move |_, cx| {
             let state = RepositoryState::Remote(state);
-            let mut jobs = VecDeque::new();
+            let mut jobs: VecDeque<GitJob> = VecDeque::new();
+            let mut completed_ids: HashSet<JobId> = HashSet::new();
             loop {
-                while let Ok(Some(next_job)) = job_rx.try_next() {
-                    jobs.push_back(next_job);
+                while let Ok(Some(msg)) = job_rx.try_next() {
+                    match msg {
+                        GitWorkerMessage::Job(job) => jobs.push_back(job),
+                        GitWorkerMessage::Cancel {
+                            id,
+                            cleanup,
+                            result_tx,
+                        } => {
+                            let before = jobs.len();
+                            jobs.retain(|j| j.id != id);
+                            let outcome = if jobs.len() < before {
+                                CancelOutcome::RemovedFromQueue
+                            } else if completed_ids.contains(&id) {
+                                CancelOutcome::AlreadyFinished
+                            } else {
+                                CancelOutcome::AlreadyFinished
+                            };
+                            result_tx.send(outcome).ok();
+                            if let Some(f) = cleanup {
+                                if matches!(outcome, CancelOutcome::RemovedFromQueue) {
+                                    f(state.clone(), cx).await;
+                                }
+                            }
+                        }
+                    }
                 }
 
                 if let Some(job) = jobs.pop_front() {
@@ -6470,9 +6708,74 @@ impl Repository {
                     {
                         continue;
                     }
-                    (job.job)(state.clone(), cx).await;
-                } else if let Some(job) = job_rx.next().await {
-                    jobs.push_back(job);
+                    let running_job_id = job.id;
+                    let task = (job.job)(state.clone(), cx);
+                    let mut task = std::pin::pin!(task);
+
+                    loop {
+                        match futures::future::select(task, job_rx.next()).await {
+                            futures::future::Either::Left(((), _)) => {
+                                completed_ids.insert(running_job_id);
+                                if completed_ids.len() > 256 {
+                                    let to_remove: Vec<_> =
+                                        completed_ids.iter().copied().take(128).collect();
+                                    for id in to_remove {
+                                        completed_ids.remove(&id);
+                                    }
+                                }
+                                break;
+                            }
+                            futures::future::Either::Right((Some(msg), ongoing_task)) => {
+                                match msg {
+                                    GitWorkerMessage::Job(j) => {
+                                        jobs.push_back(j);
+                                        task = ongoing_task;
+                                    }
+                                    GitWorkerMessage::Cancel {
+                                        id,
+                                        cleanup,
+                                        result_tx,
+                                    } => {
+                                        if id == running_job_id {
+                                            let _ = ongoing_task;
+                                            if let Some(f) = cleanup {
+                                                f(state.clone(), cx).await;
+                                            }
+                                            result_tx.send(CancelOutcome::KilledRunning).ok();
+                                            break;
+                                        } else {
+                                            let before = jobs.len();
+                                            jobs.retain(|j| j.id != id);
+                                            let outcome = if jobs.len() < before {
+                                                CancelOutcome::RemovedFromQueue
+                                            } else if completed_ids.contains(&id) {
+                                                CancelOutcome::AlreadyFinished
+                                            } else {
+                                                CancelOutcome::AlreadyFinished
+                                            };
+                                            result_tx.send(outcome).ok();
+                                            task = ongoing_task;
+                                        }
+                                    }
+                                }
+                            }
+                            futures::future::Either::Right((None, ongoing_task)) => {
+                                ongoing_task.await;
+                                break;
+                            }
+                        }
+                    }
+                } else if let Some(msg) = job_rx.next().await {
+                    match msg {
+                        GitWorkerMessage::Job(job) => jobs.push_back(job),
+                        GitWorkerMessage::Cancel {
+                            id: _,
+                            cleanup: _,
+                            result_tx,
+                        } => {
+                            result_tx.send(CancelOutcome::AlreadyFinished).ok();
+                        }
+                    }
                 } else {
                     break;
                 }

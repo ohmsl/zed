@@ -358,6 +358,7 @@ dependencies = [
  "futures 0.3.31",
  "fuzzy",
  "git",
+ "git_ui",
  "gpui",
  "gpui_tokio",
  "heapless",

@@ -29,7 +29,9 @@ actions!(
     [
         WorktreeFromDefault,
         WorktreeFromDefaultOnWindow,
-        DeleteWorktree
+        DeleteWorktree,
+        /// Cancels an in-progress worktree creation.
+        CancelWorktreeCreation,
     ]
 );
 

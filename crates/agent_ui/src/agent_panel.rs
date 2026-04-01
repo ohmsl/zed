@@ -70,6 +70,7 @@ use gpui::{
 };
 use language::LanguageRegistry;
 use language_model::{ConfigurationError, LanguageModelRegistry};
+use notifications::status_toast::{StatusToast, ToastIcon};
 use project::project_settings::ProjectSettings;
 use project::{Project, ProjectPath, Worktree};
 use prompt_store::{PromptBuilder, PromptStore, UserPromptId};
@@ -751,6 +752,12 @@ pub struct AgentPanel {
     _thread_view_subscription: Option<Subscription>,
     _active_thread_focus_subscription: Option<Subscription>,
     _worktree_creation_task: Option<Task<()>>,
+    worktree_creation_tokens: Vec<(
+        Entity<project::git_store::Repository>,
+        PathBuf,
+        project::git_store::CancellationToken,
+    )>,
+    worktree_creation_toast: Option<Entity<StatusToast>>,
     show_trust_workspace_message: bool,
     last_configuration_error_telemetry: Option<String>,
     on_boarding_upsell_dismissed: AtomicBool,
@@ -1084,6 +1091,8 @@ impl AgentPanel {
             _thread_view_subscription: None,
             _active_thread_focus_subscription: None,
             _worktree_creation_task: None,
+            worktree_creation_tokens: Vec::new(),
+            worktree_creation_toast: None,
             show_trust_workspace_message: false,
             last_configuration_error_telemetry: None,
             on_boarding_upsell_dismissed: AtomicBool::new(OnboardingUpsell::dismissed(cx)),
@@ -1179,6 +1188,12 @@ impl AgentPanel {
     }
 
     pub fn new_thread(&mut self, _action: &NewThread, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(
+            self.worktree_creation_status,
+            Some(WorktreeCreationStatus::Creating)
+        ) {
+            self.cancel_worktree_creation(window, cx);
+        }
         self.reset_start_thread_in_to_default(cx);
         self.external_thread(None, None, None, None, None, true, window, cx);
     }
@@ -2632,24 +2647,34 @@ impl AgentPanel {
             futures::channel::oneshot::Receiver<Result<()>>,
         )>,
         Vec<(PathBuf, PathBuf)>,
+        Vec<(
+            Entity<project::git_store::Repository>,
+            PathBuf,
+            project::git_store::CancellationToken,
+        )>,
     )> {
         let mut creation_infos = Vec::new();
         let mut path_remapping = Vec::new();
+        let mut tokens = Vec::new();
 
         for repo in git_repos {
-            let (work_dir, new_path, receiver) = repo.update(cx, |repo, _cx| {
+            let (work_dir, new_path, receiver, token) = repo.update(cx, |repo, _cx| {
                 let new_path =
                     repo.path_for_new_linked_worktree(branch_name, worktree_directory_setting)?;
-                let receiver =
-                    repo.create_worktree(branch_name.to_string(), new_path.clone(), None);
+                let (receiver, token) = repo.create_cancellable_worktree(
+                    branch_name.to_string(),
+                    new_path.clone(),
+                    None,
+                );
                 let work_dir = repo.work_directory_abs_path.clone();
-                anyhow::Ok((work_dir, new_path, receiver))
+                anyhow::Ok((work_dir, new_path, receiver, token))
             })?;
             path_remapping.push((work_dir.to_path_buf(), new_path.clone()));
+            tokens.push((repo.clone(), new_path.clone(), token));
             creation_infos.push((repo.clone(), new_path, receiver));
         }
 
-        Ok((creation_infos, path_remapping))
+        Ok((creation_infos, path_remapping, tokens))
     }
 
     /// Waits for every in-flight worktree creation to complete. If any
@@ -2730,6 +2755,47 @@ impl AgentPanel {
         Err(anyhow!(error_message))
     }
 
+    fn cancel_worktree_creation(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(
+            self.worktree_creation_status,
+            Some(WorktreeCreationStatus::Creating)
+        ) {
+            return;
+        }
+
+        self._worktree_creation_task = None;
+
+        let tokens = std::mem::take(&mut self.worktree_creation_tokens);
+        for (_repo, path_for_cleanup, token) in tokens {
+            drop(token.cancel(move |state, cx| {
+                cx.background_spawn(async move {
+                    if let project::git_store::RepositoryState::Local(local) = state {
+                        local
+                            .backend
+                            .remove_worktree(path_for_cleanup, true)
+                            .await
+                            .log_err();
+                    }
+                })
+            }));
+        }
+
+        self.worktree_creation_status = None;
+
+        if let Some(toast) = self.worktree_creation_toast.take() {
+            toast.update(cx, |_, cx| cx.emit(DismissEvent));
+        }
+
+        cx.notify();
+    }
+
+    pub fn is_creating_worktree(&self) -> bool {
+        matches!(
+            self.worktree_creation_status,
+            Some(WorktreeCreationStatus::Creating)
+        )
+    }
+
     fn set_worktree_creation_error(
         &mut self,
         message: SharedString,
@@ -2737,6 +2803,10 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         self.worktree_creation_status = Some(WorktreeCreationStatus::Error(message));
+        self.worktree_creation_tokens.clear();
+        if let Some(toast) = self.worktree_creation_toast.take() {
+            toast.update(cx, |_, cx| cx.emit(DismissEvent));
+        }
         if matches!(self.active_view, ActiveView::Uninitialized) {
             let selected_agent_type = self.selected_agent_type.clone();
             self.new_agent_thread(selected_agent_type, window, cx);
@@ -2759,6 +2829,22 @@ impl AgentPanel {
 
         self.worktree_creation_status = Some(WorktreeCreationStatus::Creating);
         cx.notify();
+
+        if let Some(workspace) = self.workspace.upgrade() {
+            let toast = StatusToast::new("Creating worktree\u{2026}", cx, |this, _cx| {
+                this.icon(ToastIcon::new(ui::IconName::LoadCircle).color(ui::Color::Muted))
+                    .action("Cancel", |window, cx| {
+                        window.dispatch_action(
+                            git_ui::worktree_picker::CancelWorktreeCreation.boxed_clone(),
+                            cx,
+                        );
+                    })
+            });
+            self.worktree_creation_toast = Some(toast.clone());
+            workspace.update(cx, |workspace, cx| {
+                workspace.toggle_status_toast(toast, cx);
+            });
+        }
 
         let (git_repos, non_git_paths) = self.classify_worktrees(cx);
 
@@ -2835,27 +2921,33 @@ impl AgentPanel {
                     }
                 };
 
-            let (creation_infos, path_remapping) = match this.update_in(cx, |_this, _window, cx| {
-                Self::start_worktree_creations(
-                    &git_repos,
-                    &branch_name,
-                    &worktree_directory_setting,
-                    cx,
-                )
-            }) {
-                Ok(Ok(result)) => result,
-                Ok(Err(err)) | Err(err) => {
-                    this.update_in(cx, |this, window, cx| {
-                        this.set_worktree_creation_error(
-                            format!("Failed to validate worktree directory: {err}").into(),
-                            window,
-                            cx,
-                        );
-                    })
-                    .log_err();
-                    return anyhow::Ok(());
-                }
-            };
+            let (creation_infos, path_remapping, tokens) =
+                match this.update_in(cx, |_this, _window, cx| {
+                    Self::start_worktree_creations(
+                        &git_repos,
+                        &branch_name,
+                        &worktree_directory_setting,
+                        cx,
+                    )
+                }) {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(err)) | Err(err) => {
+                        this.update_in(cx, |this, window, cx| {
+                            this.set_worktree_creation_error(
+                                format!("Failed to validate worktree directory: {err}").into(),
+                                window,
+                                cx,
+                            );
+                        })
+                        .log_err();
+                        return anyhow::Ok(());
+                    }
+                };
+
+            this.update_in(cx, |this, _window, _cx| {
+                this.worktree_creation_tokens = tokens;
+            })
+            .ok();
 
             let created_paths = match Self::await_and_rollback_on_failure(creation_infos, cx).await
             {
@@ -2885,6 +2977,14 @@ impl AgentPanel {
                     return anyhow::Ok(());
                 }
             };
+
+            this.update_in(cx, |this, _window, cx| {
+                this.worktree_creation_tokens.clear();
+                if let Some(toast) = this.worktree_creation_toast.take() {
+                    toast.update(cx, |_, cx| cx.emit(DismissEvent));
+                }
+            })
+            .ok();
 
             let this_for_error = this.clone();
             if let Err(err) = Self::setup_new_workspace(
@@ -4112,6 +4212,24 @@ impl AgentPanel {
                                     }),
                             )
                         })
+                        .when(
+                            matches!(
+                                self.worktree_creation_status,
+                                Some(WorktreeCreationStatus::Creating)
+                            ),
+                            |this| {
+                                this.child(
+                                    IconButton::new("cancel-worktree-creation", IconName::Stop)
+                                        .icon_size(IconSize::Small)
+                                        .icon_color(Color::Error)
+                                        .style(ButtonStyle::Tinted(ui::TintColor::Error))
+                                        .tooltip(Tooltip::text("Cancel worktree creation"))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.cancel_worktree_creation(window, cx);
+                                        })),
+                                )
+                            },
+                        )
                         .child(self.render_panel_options_menu(window, cx)),
                 )
                 .into_any_element()
@@ -4178,37 +4296,34 @@ impl AgentPanel {
                                     }),
                             )
                         })
+                        .when(
+                            matches!(
+                                self.worktree_creation_status,
+                                Some(WorktreeCreationStatus::Creating)
+                            ),
+                            |this| {
+                                this.child(
+                                    IconButton::new("cancel-worktree-creation", IconName::Stop)
+                                        .icon_size(IconSize::Small)
+                                        .icon_color(Color::Error)
+                                        .style(ButtonStyle::Tinted(ui::TintColor::Error))
+                                        .tooltip(Tooltip::text("Cancel worktree creation"))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.cancel_worktree_creation(window, cx);
+                                        })),
+                                )
+                            },
+                        )
                         .child(self.render_panel_options_menu(window, cx)),
                 )
                 .into_any_element()
         }
     }
 
-    fn render_worktree_creation_status(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_worktree_creation_status(&self, _cx: &mut Context<Self>) -> Option<AnyElement> {
         let status = self.worktree_creation_status.as_ref()?;
         match status {
-            WorktreeCreationStatus::Creating => Some(
-                h_flex()
-                    .absolute()
-                    .bottom_12()
-                    .w_full()
-                    .p_2()
-                    .gap_1()
-                    .justify_center()
-                    .bg(cx.theme().colors().editor_background)
-                    .child(
-                        Icon::new(IconName::LoadCircle)
-                            .size(IconSize::Small)
-                            .color(Color::Muted)
-                            .with_rotate_animation(3),
-                    )
-                    .child(
-                        Label::new("Creating Worktree…")
-                            .color(Color::Muted)
-                            .size(LabelSize::Small),
-                    )
-                    .into_any_element(),
-            ),
+            WorktreeCreationStatus::Creating => None,
             WorktreeCreationStatus::Error(message) => Some(
                 Callout::new()
                     .icon(IconName::Warning)
@@ -4648,6 +4763,11 @@ impl Render for AgentPanel {
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
             .on_action(cx.listener(Self::toggle_zoom))
+            .on_action(cx.listener(
+                |this, _: &git_ui::worktree_picker::CancelWorktreeCreation, window, cx| {
+                    this.cancel_worktree_creation(window, cx);
+                },
+            ))
             .on_action(cx.listener(|this, _: &ReauthenticateAgent, window, cx| {
                 if let Some(conversation_view) = this.active_conversation_view() {
                     conversation_view.update(cx, |conversation_view, cx| {
