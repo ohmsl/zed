@@ -5015,12 +5015,7 @@ async fn test_archive_and_restore_single_worktree(cx: &mut TestAppContext) {
         sidebar.activate_archived_thread(metadata, window, cx);
     });
     // The restore flow involves multiple async steps: worktree creation,
-    // a 500ms timer, reset, branch switch, DB cleanup. We need to park
-    // (to let the spawn reach the timer), advance the clock past the
-    // timer, then park again to let the rest complete.
-    cx.run_until_parked();
-    cx.executor()
-        .advance_clock(std::time::Duration::from_secs(1));
+    // project scan, reset, branch switch, DB cleanup.
     cx.run_until_parked();
 
     // 1. The thread should no longer be archived.

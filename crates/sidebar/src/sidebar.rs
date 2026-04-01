@@ -2370,10 +2370,39 @@ impl Sidebar {
                 }
             }
 
-            // Wait for the worktree to be recognized by the project.
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(500))
-                .await;
+            // Tell the project about the new worktree and wait for it
+            // to finish scanning so the GitStore creates a Repository.
+            let project = cx.update(|_window, cx| {
+                workspaces.iter().find_map(|workspace| {
+                    let project = workspace.read(cx).project().clone();
+                    let has_main_repo = project.read(cx).repositories(cx).values().any(|repo| {
+                        let repo = repo.read(cx);
+                        repo.is_main_worktree()
+                            && *repo.work_directory_abs_path == *row.main_repo_path
+                    });
+                    has_main_repo.then_some(project)
+                })
+            })?;
+
+            if let Some(project) = project {
+                let path_for_register = final_worktree_path.clone();
+                let worktree_result = project
+                    .update(cx, |project, cx| {
+                        project.find_or_create_worktree(path_for_register, true, cx)
+                    })
+                    .await;
+                if let Ok((worktree, _)) = worktree_result {
+                    let scan_complete = cx.update(|_window, cx| {
+                        worktree
+                            .read(cx)
+                            .as_local()
+                            .map(project::LocalWorktree::scan_complete)
+                    })?;
+                    if let Some(future) = scan_complete {
+                        future.await;
+                    }
+                }
+            }
 
             // Find the new worktree's repo entity.
             let worktree_repo = cx.update(|_window, cx| {
