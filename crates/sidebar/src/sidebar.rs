@@ -2415,18 +2415,37 @@ impl Sidebar {
             })?;
 
             if let Some(worktree_repo) = worktree_repo {
-                // Reset HEAD~ to undo the WIP commit (mixed reset puts
-                // changes back as unstaged).
-                let reset_receiver = worktree_repo.update(cx, |repo, cx| {
+                // Two resets to restore the original staging state:
+                //   1. Mixed reset HEAD~ undoes the "WIP unstaged" commit,
+                //      putting previously-unstaged/untracked files back as
+                //      unstaged while resetting the index to match the
+                //      "WIP staged" commit's tree.
+                //   2. Soft reset HEAD~ undoes the "WIP staged" commit
+                //      without touching the index, so originally-staged
+                //      files remain staged.
+                let mixed_reset = worktree_repo.update(cx, |repo, cx| {
                     repo.reset("HEAD~".to_string(), ResetMode::Mixed, cx)
                 });
-                match reset_receiver.await {
+                match mixed_reset.await {
                     Ok(Ok(())) => {}
                     Ok(Err(err)) => {
-                        log::warn!("Failed to reset WIP commit: {err}");
+                        log::warn!("Failed to mixed-reset WIP unstaged commit: {err}");
                     }
                     Err(_) => {
-                        log::warn!("Reset was canceled");
+                        log::warn!("Mixed reset was canceled");
+                    }
+                }
+
+                let soft_reset = worktree_repo.update(cx, |repo, cx| {
+                    repo.reset("HEAD~".to_string(), ResetMode::Soft, cx)
+                });
+                match soft_reset.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        log::warn!("Failed to soft-reset WIP staged commit: {err}");
+                    }
+                    Err(_) => {
+                        log::warn!("Soft reset was canceled");
                     }
                 }
 
@@ -2898,60 +2917,136 @@ impl Sidebar {
                 }
             };
 
-            // Helper: undo the WIP commit on the worktree.
-            let undo_wip_commit = |cx: &mut AsyncWindowContext| {
+            // Helper: undo both WIP commits on the worktree.
+            let undo_wip_commits = |cx: &mut AsyncWindowContext| {
                 let reset_receiver = worktree_repo.update(cx, |repo, cx| {
-                    repo.reset("HEAD~".to_string(), ResetMode::Mixed, cx)
+                    repo.reset("HEAD~2".to_string(), ResetMode::Mixed, cx)
                 });
                 async move {
                     match reset_receiver.await {
                         Ok(Ok(())) => {}
-                        Ok(Err(err)) => log::error!("Failed to undo WIP commit: {err}"),
+                        Ok(Err(err)) => log::error!("Failed to undo WIP commits: {err}"),
                         Err(_) => log::error!("WIP commit undo was canceled"),
                     }
                 }
             };
 
-            // === Last thread: WIP commit, ref creation, and worktree deletion ===
+            // === Last thread: two WIP commits, ref creation, and worktree deletion ===
+            //
+            // We create two commits to preserve the original staging state:
+            //   1. Commit whatever is currently staged (allow-empty).
+            //   2. Stage everything (including untracked), commit again (allow-empty).
+            //
+            // On restore, two resets undo this:
+            //   1. `git reset --mixed HEAD~`  — undoes commit 2, puts
+            //      previously-unstaged/untracked files back as unstaged.
+            //   2. `git reset --soft HEAD~`   — undoes commit 1, leaves
+            //      the index as-is so originally-staged files stay staged.
+            //
+            // If any step in this sequence fails, we undo everything and
+            // bail out.
 
-            // Stage all files including untracked.
-            let stage_result =
-                worktree_repo.update(cx, |repo, _cx| repo.stage_all_including_untracked());
-            let stage_ok = match stage_result.await {
+            // Step 1: commit whatever is currently staged.
+            let askpass = AskPassDelegate::new(cx, |_, _, _| {});
+            let first_commit_result = worktree_repo.update(cx, |repo, cx| {
+                repo.commit(
+                    "WIP staged".into(),
+                    None,
+                    CommitOptions {
+                        allow_empty: true,
+                        ..Default::default()
+                    },
+                    askpass,
+                    cx,
+                )
+            });
+            let first_commit_ok = match first_commit_result.await {
                 Ok(Ok(())) => true,
                 Ok(Err(err)) => {
-                    log::error!("Failed to stage worktree files: {err}");
+                    log::error!("Failed to create first WIP commit (staged): {err}");
                     false
                 }
                 Err(_) => {
-                    log::error!("Stage operation was canceled");
+                    log::error!("First WIP commit was canceled");
                     false
                 }
             };
 
-            let commit_ok = if stage_ok {
-                let askpass = AskPassDelegate::new(cx, |_, _, _| {});
-                let commit_result = worktree_repo.update(cx, |repo, cx| {
-                    repo.commit(
-                        "WIP".into(),
-                        None,
-                        CommitOptions {
-                            allow_empty: true,
-                            ..Default::default()
-                        },
-                        askpass,
-                        cx,
-                    )
-                });
-                match commit_result.await {
+            // Step 2: stage everything including untracked, then commit.
+            // If anything fails after the first commit, undo it and bail.
+            let commit_ok = if first_commit_ok {
+                let stage_result =
+                    worktree_repo.update(cx, |repo, _cx| repo.stage_all_including_untracked());
+                let stage_ok = match stage_result.await {
                     Ok(Ok(())) => true,
                     Ok(Err(err)) => {
-                        log::error!("Failed to create WIP commit: {err}");
+                        log::error!("Failed to stage worktree files: {err}");
                         false
                     }
                     Err(_) => {
-                        log::error!("WIP commit was canceled");
+                        log::error!("Stage operation was canceled");
                         false
+                    }
+                };
+
+                if !stage_ok {
+                    let undo = worktree_repo.update(cx, |repo, cx| {
+                        repo.reset("HEAD~".to_string(), ResetMode::Mixed, cx)
+                    });
+                    match undo.await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(err)) => log::error!("Failed to undo first WIP commit: {err}"),
+                        Err(_) => log::error!("Undo of first WIP commit was canceled"),
+                    }
+                    false
+                } else {
+                    let askpass = AskPassDelegate::new(cx, |_, _, _| {});
+                    let second_commit_result = worktree_repo.update(cx, |repo, cx| {
+                        repo.commit(
+                            "WIP unstaged".into(),
+                            None,
+                            CommitOptions {
+                                allow_empty: true,
+                                ..Default::default()
+                            },
+                            askpass,
+                            cx,
+                        )
+                    });
+                    match second_commit_result.await {
+                        Ok(Ok(())) => true,
+                        Ok(Err(err)) => {
+                            log::error!("Failed to create second WIP commit (unstaged): {err}");
+                            let undo = worktree_repo.update(cx, |repo, cx| {
+                                repo.reset("HEAD~".to_string(), ResetMode::Mixed, cx)
+                            });
+                            match undo.await {
+                                Ok(Ok(())) => {}
+                                Ok(Err(err)) => {
+                                    log::error!("Failed to undo first WIP commit: {err}")
+                                }
+                                Err(_) => {
+                                    log::error!("Undo of first WIP commit was canceled")
+                                }
+                            }
+                            false
+                        }
+                        Err(_) => {
+                            log::error!("Second WIP commit was canceled");
+                            let undo = worktree_repo.update(cx, |repo, cx| {
+                                repo.reset("HEAD~".to_string(), ResetMode::Mixed, cx)
+                            });
+                            match undo.await {
+                                Ok(Ok(())) => {}
+                                Ok(Err(err)) => {
+                                    log::error!("Failed to undo first WIP commit: {err}")
+                                }
+                                Err(_) => {
+                                    log::error!("Undo of first WIP commit was canceled")
+                                }
+                            }
+                            false
+                        }
                     }
                 }
             } else {
@@ -2998,8 +3093,8 @@ impl Sidebar {
                             Err(_) => "HEAD SHA operation was canceled".into(),
                             Ok(Ok(Some(_))) => unreachable!(),
                         };
-                        log::error!("{reason} after WIP commit; attempting to undo");
-                        undo_wip_commit(cx).await;
+                        log::error!("{reason} after WIP commits; attempting to undo");
+                        undo_wip_commits(cx).await;
                         unarchive(cx);
                         cx.prompt(
                             PromptLevel::Warning,
@@ -3048,7 +3143,7 @@ impl Sidebar {
                     }
                     Err(err) => {
                         log::error!("Failed to create archived worktree record: {err}");
-                        undo_wip_commit(cx).await;
+                        undo_wip_commits(cx).await;
                         unarchive(cx);
                         cx.prompt(
                             PromptLevel::Warning,
