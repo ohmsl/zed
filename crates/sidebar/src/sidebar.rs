@@ -2386,8 +2386,14 @@ impl Sidebar {
             match create_receiver.await {
                 Ok(Ok(())) => {}
                 Ok(Err(err)) => {
-                    log::error!("Failed to create worktree: {err}");
-                    return Self::create_fresh_worktree(row, workspaces, cx).await;
+                    // Another concurrent restore may have already created
+                    // this worktree. Re-check before falling back.
+                    if fs.metadata(&final_worktree_path).await?.is_some() {
+                        log::info!("Worktree creation failed ({err}) but path exists — reusing it");
+                    } else {
+                        log::error!("Failed to create worktree: {err}");
+                        return Self::create_fresh_worktree(row, workspaces, cx).await;
+                    }
                 }
                 Err(_) => {
                     anyhow::bail!("Worktree creation was canceled");
