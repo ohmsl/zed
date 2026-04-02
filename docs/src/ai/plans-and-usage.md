@@ -11,35 +11,35 @@ Zed works without AI features or a subscription. No [authentication](../authenti
 
 ## Plans {#plans}
 
-|                                           | Free    | Pro       | Business  |
-| ----------------------------------------- | ------- | --------- | --------- |
-| Zed-hosted AI models                      | —       | ✓         | ✓         |
-| [AI via own API keys](./llm-providers.md) | ✓       | ✓         | ✓         |
-| [External agents](./external-agents.md)   | ✓       | ✓         | ✓         |
-| Edit Predictions                          | Limited | Unlimited | Unlimited |
-| Admin-enforced data controls              | —       | —         | ✓         |
-| RBAC and permissions                      | —       | —         | ✓         |
-| Consolidated billing                      | —       | —         | ✓         |
+|                                           | Free    | Pro       | Student   | Business  |
+| ----------------------------------------- | ------- | --------- | --------- | --------- |
+| Zed-hosted AI models                      | —       | ✓         | ✓         | ✓         |
+| [AI via own API keys](./llm-providers.md) | ✓       | ✓         | ✓         | ✓         |
+| [External agents](./external-agents.md)   | ✓       | ✓         | ✓         | ✓         |
+| Edit Predictions                          | Limited | Unlimited | Unlimited | Unlimited |
+| Org-wide admin controls              | —       | —         | —         | ✓         |
+| Roles & permissions                     | —       | —         | —         | ✓         |
+| Consolidated billing                      | —       | —         | —         | ✓         |
 
-## Zed Free {#free}
+### Zed Free {#free}
 
-Zed is free to use. You can use AI with your own API keys via [Providers](./llm-providers.md). [Edit Predictions](./edit-prediction.md) are available on a limited basis. Zed's hosted models require a Pro subscription.
+Zed is free to use. You can configure AI agents with your own API keys via [Providers](./llm-providers.md). [Edit Predictions](./edit-prediction.md) are available on a limited basis. Zed's hosted models require a Pro subscription.
 
-## Zed Pro {#pro}
+### Zed Pro {#pro}
 
 Zed Pro includes access to all hosted AI models and Edit Predictions. The plan includes $5 of monthly token credit; usage beyond that is billed at the rates listed on [the Models page](./models.md). A trial of Zed Pro includes $20 of credit, usable for 14 days.
 
 For details on billing and payment, see [Individual Billing](./billing.md).
 
-## Zed Business {#business}
+### Zed Business {#business}
 
 <!-- TODO: confirm per-seat pricing before launch -->
 
-Zed Business gives every member full Zed Pro access, plus org-wide controls for administrators: which AI features are available, what data leaves your organization, and how AI spend is tracked. All seats and AI usage are consolidated into a single invoice.
+Zed Business gives every member access to all of Zed's hosted AI models, unlimited edit predictions, plus org-wide controls for administrators: which AI features are available, what data leaves your organization, and how AI spend is tracked. All seats and AI usage are consolidated into a single invoice.
 
-For a full feature overview, see [Zed Business](../business/overview.md). For billing details, see [Organization Billing](../business/org-billing.md).
+For a full feature overview, see [Zed Business](../business/overview.md). For billing details, see [Billing](./billing.md#organization).
 
-## Student Plan {#student}
+### Student Plan {#student}
 
 The [Zed Student plan](https://zed.dev/education) includes all Zed Pro features: unlimited [Edit Predictions](./edit-prediction.md), all [hosted AI models](./models.md) except Claude Opus, and $10/month in token credits. Available free for one year to verified university students.
 
@@ -59,6 +59,6 @@ Once the spend limit is hit, we'll stop any further usage until your token spend
 
 > **Note:** Spend limits are a Zed Pro feature. Student plan users cannot configure spend limits; usage is capped at the $10/month included credit.
 
-## Trials {#trials}
+### Trials {#trials}
 
-Trials automatically convert to Zed Free when they end. No cancellation is needed to prevent conversion to Zed Pro.
+Trials automatically convert to Zed Free when they end. Trials do not include access to Anthropic's Opus models. No cancellation is needed to prevent conversion to Zed Pro.

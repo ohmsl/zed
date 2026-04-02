@@ -59,8 +59,7 @@
 
 - [Authenticate](./authentication.md)
 - [Plans & Pricing](./ai/plans-and-usage.md)
-- [Individual Billing](./ai/billing.md)
-- [Organization Billing](./business/org-billing.md)
+- [Billing](./ai/billing.md)
 
 # Zed Business
 
