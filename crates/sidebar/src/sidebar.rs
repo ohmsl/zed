@@ -46,9 +46,9 @@ use ui::{
 use util::ResultExt as _;
 use util::path_list::{PathList, SerializedPathList};
 use workspace::{
-    AddFolderToProject, CloseWindow, FocusWorkspaceSidebar, MultiWorkspace, MultiWorkspaceEvent,
-    Open, Sidebar as WorkspaceSidebar, SidebarSide, ToggleWorkspaceSidebar, Workspace, WorkspaceId,
-    sidebar_side_context_menu,
+    AddFolderToProject, AppState, CloseWindow, FocusWorkspaceSidebar, MultiWorkspace,
+    MultiWorkspaceEvent, Open, OpenOptions, Sidebar as WorkspaceSidebar, SidebarSide,
+    ToggleWorkspaceSidebar, Workspace, WorkspaceId, sidebar_side_context_menu,
 };
 
 use zed_actions::OpenRecent;
@@ -2302,7 +2302,7 @@ impl Sidebar {
                     }
                     Some(row) => {
                         let fs = cx.update(|_window, cx| <dyn fs::Fs>::global(cx))?;
-                        match Self::restore_archived_worktree(row, &workspaces, fs, cx).await {
+                        match Self::restore_archived_worktree(row, fs, cx).await {
                             Ok(restored_path) => {
                                 final_paths.push(restored_path);
                                 Self::maybe_cleanup_archived_worktree(row, &store, &workspaces, cx)
@@ -2334,19 +2334,58 @@ impl Sidebar {
 
     async fn restore_archived_worktree(
         row: &ArchivedGitWorktree,
-        workspaces: &[Entity<Workspace>],
         fs: Arc<dyn fs::Fs>,
         cx: &mut AsyncWindowContext,
     ) -> anyhow::Result<PathBuf> {
         let commit_hash = row.commit_hash.clone();
+        let main_repo_path = row.main_repo_path.clone();
 
-        // Find the main repo entity.
+        // Ensure the main repo's workspace is open (finds existing or opens new).
+        let open_task = cx.update(|_window, cx| {
+            let app_state = AppState::global(cx);
+            workspace::open_paths(
+                std::slice::from_ref(&main_repo_path),
+                app_state,
+                OpenOptions::default(),
+                cx,
+            )
+        })?;
+        let open_result = open_task.await?;
+        let project = open_result
+            .workspace
+            .update(cx, |workspace, _cx| workspace.project().clone());
+
+        // Wait for worktree scans to complete so the Repository entities are available.
+        let scan_futures = cx.update(|_window, cx| {
+            project
+                .read(cx)
+                .worktrees(cx)
+                .filter_map(|worktree| {
+                    worktree
+                        .read(cx)
+                        .as_local()
+                        .map(|local| local.scan_complete())
+                })
+                .collect::<Vec<_>>()
+        })?;
+        for scan_future in scan_futures {
+            scan_future.await;
+        }
+
+        // Find the main repo entity in the project.
         let main_repo = cx.update(|_window, cx| {
-            find_main_repo_in_workspaces(workspaces, &row.main_repo_path, cx)
+            project
+                .read(cx)
+                .repositories(cx)
+                .values()
+                .find_map(|repo_entity| {
+                    let repo = repo_entity.read(cx);
+                    (repo.is_main_worktree() && *repo.work_directory_abs_path == *main_repo_path)
+                        .then(|| repo_entity.clone())
+                })
         })?;
 
         let Some(main_repo) = main_repo else {
-            // Main repo not found — fall back to fresh worktree.
             return Self::create_fresh_worktree(row, &fs, cx).await;
         };
 
@@ -2357,17 +2396,13 @@ impl Sidebar {
         let is_restored_and_valid = already_exists
             && row.restored
             && cx.update(|_window, cx| {
-                workspaces.iter().any(|workspace| {
-                    let project = workspace.read(cx).project().clone();
-                    project
-                        .read(cx)
-                        .repositories(cx)
-                        .values()
-                        .any(|repo_entity| {
-                            *repo_entity.read(cx).snapshot().work_directory_abs_path
-                                == *worktree_path
-                        })
-                })
+                project
+                    .read(cx)
+                    .repositories(cx)
+                    .values()
+                    .any(|repo_entity| {
+                        *repo_entity.read(cx).snapshot().work_directory_abs_path == *worktree_path
+                    })
             })?;
 
         let final_worktree_path = if !already_exists {
@@ -2431,52 +2466,35 @@ impl Sidebar {
 
             // Tell the project about the new worktree and wait for it
             // to finish scanning so the GitStore creates a Repository.
-            let project = cx.update(|_window, cx| {
-                workspaces.iter().find_map(|workspace| {
-                    let project = workspace.read(cx).project().clone();
-                    let has_main_repo = project.read(cx).repositories(cx).values().any(|repo| {
-                        let repo = repo.read(cx);
-                        repo.is_main_worktree()
-                            && *repo.work_directory_abs_path == *row.main_repo_path
-                    });
-                    has_main_repo.then_some(project)
+            let path_for_register = final_worktree_path.clone();
+            let worktree_result = project
+                .update(cx, |project, cx| {
+                    project.find_or_create_worktree(path_for_register, true, cx)
                 })
-            })?;
-
-            if let Some(project) = project {
-                let path_for_register = final_worktree_path.clone();
-                let worktree_result = project
-                    .update(cx, |project, cx| {
-                        project.find_or_create_worktree(path_for_register, true, cx)
-                    })
-                    .await;
-                if let Ok((worktree, _)) = worktree_result {
-                    let scan_complete = cx.update(|_window, cx| {
-                        worktree
-                            .read(cx)
-                            .as_local()
-                            .map(project::LocalWorktree::scan_complete)
-                    })?;
-                    if let Some(future) = scan_complete {
-                        future.await;
-                    }
+                .await;
+            if let Ok((worktree, _)) = worktree_result {
+                let scan_complete = cx.update(|_window, cx| {
+                    worktree
+                        .read(cx)
+                        .as_local()
+                        .map(project::LocalWorktree::scan_complete)
+                })?;
+                if let Some(future) = scan_complete {
+                    future.await;
                 }
             }
 
             // Find the new worktree's repo entity.
             let worktree_repo = cx.update(|_window, cx| {
-                workspaces.iter().find_map(|workspace| {
-                    let project = workspace.read(cx).project().clone();
-                    project
-                        .read(cx)
-                        .repositories(cx)
-                        .values()
-                        .find_map(|repo_entity| {
-                            let snapshot = repo_entity.read(cx).snapshot();
-                            (*snapshot.work_directory_abs_path == *final_worktree_path)
-                                .then(|| repo_entity.clone())
-                        })
-                })
+                project
+                    .read(cx)
+                    .repositories(cx)
+                    .values()
+                    .find_map(|repo_entity| {
+                        let snapshot = repo_entity.read(cx).snapshot();
+                        (*snapshot.work_directory_abs_path == *final_worktree_path)
+                            .then(|| repo_entity.clone())
+                    })
             })?;
 
             if let Some(worktree_repo) = worktree_repo {
