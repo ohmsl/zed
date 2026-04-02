@@ -149,11 +149,19 @@ impl From<&ThreadMetadata> for acp_thread::AgentSessionInfo {
 
 /// Record of a git worktree that was archived (deleted from disk) when its last thread was archived.
 pub struct ArchivedGitWorktree {
+    /// Auto-incrementing primary key, used for the git ref name and join table.
     pub id: i64,
+    /// Absolute path where the worktree directory lived on disk before deletion.
     pub worktree_path: PathBuf,
+    /// Absolute path of the main (non-linked) repository that owns this worktree.
     pub main_repo_path: PathBuf,
+    /// Branch that was checked out in the worktree at archive time. `None` if
+    /// the worktree was in detached HEAD state, which shouldn't normally happen
+    /// for user-created linked worktrees but is possible via the terminal.
     pub branch_name: Option<String>,
+    /// SHA of the WIP commit that preserves the worktree's file state.
     pub commit_hash: String,
+    /// Whether this worktree has been restored by a prior unarchive.
     pub restored: bool,
 }
 
