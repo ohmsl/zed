@@ -17,8 +17,8 @@ Zed works without AI features or a subscription. No [authentication](../authenti
 | [AI via own API keys](./llm-providers.md) | ✓       | ✓         | ✓         | ✓         |
 | [External agents](./external-agents.md)   | ✓       | ✓         | ✓         | ✓         |
 | Edit Predictions                          | Limited | Unlimited | Unlimited | Unlimited |
-| Org-wide admin controls              | —       | —         | —         | ✓         |
-| Roles & permissions                     | —       | —         | —         | ✓         |
+| Org-wide admin controls                   | —       | —         | —         | ✓         |
+| Roles & permissions                       | —       | —         | —         | ✓         |
 | Consolidated billing                      | —       | —         | —         | ✓         |
 
 ### Zed Free {#free}
