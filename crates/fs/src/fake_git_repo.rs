@@ -548,8 +548,10 @@ impl GitRepository for FakeGitRepository {
                 if let Some(message) = &state.simulated_create_worktree_error {
                     anyhow::bail!("{message}");
                 }
-                if state.branches.contains(&branch_name) {
-                    bail!("a branch named '{}' already exists", branch_name);
+                if let Some(ref name) = branch_name {
+                    if state.branches.contains(name) {
+                        bail!("a branch named '{}' already exists", name);
+                    }
                 }
                 Ok(())
             })??;

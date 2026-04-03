@@ -2205,10 +2205,137 @@ impl Sidebar {
             return;
         }
 
-        // Check all paths for archived worktrees that may need restoration
-        // before opening the workspace.
-        let paths = metadata.folder_paths.paths().to_vec();
-        self.maybe_restore_git_worktrees(paths, metadata, window, cx);
+        // Cancel any in-flight archive tasks for the paths we're about to restore.
+        for path in metadata.folder_paths.paths() {
+            self.pending_worktree_archives.remove(path);
+        }
+
+        let session_id = metadata.session_id.clone();
+        let store = ThreadMetadataStore::global(cx);
+
+        let task = store.update(cx, |store, cx| {
+            store.get_archived_worktrees_for_thread(session_id.0.to_string(), cx)
+        });
+
+        let fs = <dyn fs::Fs>::global(cx);
+
+        cx.spawn_in(window, async move |this, cx| {
+            let archived_worktrees = task.await.unwrap_or_default();
+
+            if archived_worktrees.is_empty() {
+                this.update_in(cx, |this, window, cx| {
+                    this.activate_unarchived_thread_in_workspace(&metadata, window, cx);
+                })?;
+                return anyhow::Ok(());
+            }
+
+            // Use the first archived worktree's main repo path to show the
+            // thread immediately while restoration proceeds in the background.
+            let first_archived = &archived_worktrees[0];
+            let main_repo_path = first_archived.main_repo_path.clone();
+
+            // Step 1: Immediately associate thread with main repo and show it.
+            let store = cx.update(|_window, cx| ThreadMetadataStore::global(cx))?;
+            store.update(cx, |store, cx| {
+                store.update_working_directories(
+                    &metadata.session_id,
+                    PathList::new(std::slice::from_ref(&main_repo_path)),
+                    cx,
+                );
+                store.set_pending_worktree_restore(
+                    &metadata.session_id,
+                    Some(main_repo_path.clone()),
+                    cx,
+                );
+            });
+
+            let temp_metadata = store
+                .update(cx, |store, _cx| store.entry(&metadata.session_id).cloned())
+                .unwrap_or(metadata.clone());
+
+            this.update_in(cx, |this, window, cx| {
+                this.activate_unarchived_thread_in_workspace(&temp_metadata, window, cx);
+            })?;
+
+            // Step 2: Background git restoration.
+            for row in &archived_worktrees {
+                match Self::restore_worktree_via_git(row, &fs, cx).await {
+                    Ok(restored_path) => {
+                        Self::cleanup_archived_worktree_record(row, &fs, &store, cx).await;
+
+                        // Step 3: Reassociate thread with the restored worktree path.
+                        let new_paths = PathList::new(std::slice::from_ref(&restored_path));
+                        store.update(cx, |store, cx| {
+                            store.complete_worktree_restore(
+                                &metadata.session_id,
+                                new_paths.clone(),
+                                cx,
+                            );
+                        });
+
+                        // Open the restored worktree workspace and activate
+                        // the thread there.
+                        let paths_vec = vec![restored_path];
+                        let open_result = this.update_in(cx, |this, window, cx| {
+                            let Some(multi_workspace) = this.multi_workspace.upgrade() else {
+                                return None;
+                            };
+                            Some(multi_workspace.update(cx, |mw, cx| {
+                                mw.open_project(paths_vec, workspace::OpenMode::Add, window, cx)
+                            }))
+                        })?;
+
+                        if let Some(open_task) = open_result {
+                            if let Ok(workspace) = open_task.await {
+                                let final_metadata = store
+                                    .update(cx, |store, _cx| {
+                                        store.entry(&metadata.session_id).cloned()
+                                    })
+                                    .unwrap_or_else(|| {
+                                        let mut m = metadata.clone();
+                                        m.folder_paths = new_paths;
+                                        m.pending_worktree_restore = None;
+                                        m
+                                    });
+                                this.update_in(cx, |this, window, cx| {
+                                    this.activate_thread_locally(
+                                        &final_metadata,
+                                        &workspace,
+                                        window,
+                                        cx,
+                                    );
+                                })
+                                .ok();
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        log::error!("Failed to restore worktree: {err}");
+
+                        // Clear pending state — leave thread on main repo.
+                        store.update(cx, |store, cx| {
+                            store.set_pending_worktree_restore(&metadata.session_id, None, cx);
+                        });
+
+                        cx.prompt(
+                            PromptLevel::Warning,
+                            "Worktree restoration failed",
+                            Some(&format!(
+                                "Could not restore the git worktree. \
+                                 The thread has been associated with {} instead.",
+                                main_repo_path.display()
+                            )),
+                            &["OK"],
+                        )
+                        .await
+                        .ok();
+                    }
+                }
+            }
+
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
     }
 
     fn activate_unarchived_thread_in_workspace(
@@ -2248,370 +2375,24 @@ impl Sidebar {
         }
     }
 
-    fn maybe_restore_git_worktrees(
-        &mut self,
-        paths: Vec<std::path::PathBuf>,
-        metadata: ThreadMetadata,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // Cancel any in-flight archive tasks for the paths we're about to
-        // restore, so a slow archive cannot delete a worktree we are restoring.
-        let canceled_paths: Vec<_> = paths
-            .iter()
-            .filter(|path| self.pending_worktree_archives.remove(*path).is_some())
-            .cloned()
-            .collect();
-
-        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
-            return;
-        };
-        let workspaces = multi_workspace.read(cx).workspaces().to_vec();
-        let session_id = metadata.session_id.0.to_string();
-
-        cx.spawn_in(window, async move |this, cx| {
-            let store = cx.update(|_window, cx| ThreadMetadataStore::global(cx))?;
-
-            // Look up all archived worktrees linked to this thread.
-            let archived_worktrees = store
-                .update(cx, |store, cx| {
-                    store.get_archived_worktrees_for_thread(session_id, cx)
-                })
-                .await
-                .unwrap_or_default();
-
-            // Build a map from worktree_path → ArchivedGitWorktree for quick lookup.
-            let archived_by_path: HashMap<PathBuf, ArchivedGitWorktree> = archived_worktrees
-                .into_iter()
-                .map(|row| (row.worktree_path.clone(), row))
-                .collect();
-
-            // Clean up any canceled in-flight archives that have DB records.
-            for canceled_path in &canceled_paths {
-                if let Some(row) = archived_by_path.get(canceled_path) {
-                    Self::maybe_cleanup_archived_worktree(row, &store, &workspaces, cx).await;
-                }
-            }
-
-            let mut final_paths = Vec::with_capacity(paths.len());
-
-            for path in &paths {
-                match archived_by_path.get(path) {
-                    None => {
-                        final_paths.push(path.clone());
-                    }
-                    Some(row) => {
-                        let fs = cx.update(|_window, cx| <dyn fs::Fs>::global(cx))?;
-                        match Self::restore_archived_worktree(row, &workspaces, fs, cx).await {
-                            Ok(restored_path) => {
-                                final_paths.push(restored_path);
-                                Self::maybe_cleanup_archived_worktree(row, &store, &workspaces, cx)
-                                    .await;
-                            }
-                            Err(err) => {
-                                log::error!(
-                                    "Failed to restore archived worktree for {}: {err}",
-                                    path.display()
-                                );
-                                final_paths.push(path.clone());
-                            }
-                        }
-                    }
-                }
-            }
-
-            let mut updated_metadata = metadata;
-            updated_metadata.folder_paths = PathList::new(&final_paths);
-
-            this.update_in(cx, |this, window, cx| {
-                this.activate_unarchived_thread_in_workspace(&updated_metadata, window, cx);
-            })?;
-
-            anyhow::Ok(())
-        })
-        .detach_and_log_err(cx);
-    }
-
-    async fn restore_archived_worktree(
-        row: &ArchivedGitWorktree,
-        workspaces: &[Entity<Workspace>],
-        fs: Arc<dyn fs::Fs>,
-        cx: &mut AsyncWindowContext,
-    ) -> anyhow::Result<PathBuf> {
-        let commit_hash = row.commit_hash.clone();
-
-        // Find the main repo entity.
-        let main_repo = cx.update(|_window, cx| {
-            find_main_repo_in_workspaces(workspaces, &row.main_repo_path, cx)
-        })?;
-
-        let Some(main_repo) = main_repo else {
-            // Main repo not found — fall back to fresh worktree.
-            return Self::create_fresh_worktree(row, &fs, cx).await;
-        };
-
-        // Check if the original worktree path is already in use.
-        let worktree_path = &row.worktree_path;
-        let already_exists = fs.metadata(worktree_path).await?.is_some();
-
-        let is_restored_and_valid = already_exists
-            && row.restored
-            && cx.update(|_window, cx| {
-                workspaces.iter().any(|workspace| {
-                    let project = workspace.read(cx).project().clone();
-                    project
-                        .read(cx)
-                        .repositories(cx)
-                        .values()
-                        .any(|repo_entity| {
-                            *repo_entity.read(cx).snapshot().work_directory_abs_path
-                                == *worktree_path
-                        })
-                })
-            })?;
-
-        let final_worktree_path = if !already_exists {
-            worktree_path.clone()
-        } else if is_restored_and_valid {
-            // Another thread already restored this worktree and it's
-            // registered as a git worktree in the project — reuse it.
-            worktree_path.clone()
-        } else {
-            // Collision — use a different path. Generate a name based on
-            // the archived worktree ID to keep it deterministic.
-            let suffix = row.id.to_string();
-            let new_name = format!(
-                "{}-restored-{suffix}",
-                row.branch_name.as_deref().unwrap_or("worktree"),
-            );
-            let path = main_repo.update(cx, |repo, _cx| {
-                let setting = git_store::worktrees_directory_for_repo(
-                    &repo.snapshot().original_repo_abs_path,
-                    git::repository::DEFAULT_WORKTREE_DIRECTORY,
-                )
-                .ok()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
-                repo.path_for_new_linked_worktree(&new_name, &setting)
-            })?;
-            path
-        };
-
-        // We need to create the worktree if it doesn't already exist at
-        // the final path (which may differ from the original due to a
-        // collision). If another thread already restored it and it's a
-        // recognized worktree, we skip creation.
-        let final_path_exists = if final_worktree_path == *worktree_path {
-            already_exists
-        } else {
-            fs.metadata(&final_worktree_path).await?.is_some()
-        };
-
-        if !final_path_exists && !is_restored_and_valid {
-            // Create the worktree in detached HEAD mode at the WIP commit.
-            let create_receiver = main_repo.update(cx, |repo, _cx| {
-                repo.create_worktree_detached(final_worktree_path.clone(), commit_hash.clone())
-            });
-            match create_receiver.await {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    // Another concurrent restore may have already created
-                    // this worktree. Re-check before falling back.
-                    if fs.metadata(&final_worktree_path).await?.is_some() {
-                        log::info!("Worktree creation failed ({err}) but path exists — reusing it");
-                    } else {
-                        log::error!("Failed to create worktree: {err}");
-                        return Self::create_fresh_worktree(row, &fs, cx).await;
-                    }
-                }
-                Err(_) => {
-                    anyhow::bail!("Worktree creation was canceled");
-                }
-            }
-
-            // Tell the project about the new worktree and wait for it
-            // to finish scanning so the GitStore creates a Repository.
-            let project = cx.update(|_window, cx| {
-                workspaces.iter().find_map(|workspace| {
-                    let project = workspace.read(cx).project().clone();
-                    let has_main_repo = project.read(cx).repositories(cx).values().any(|repo| {
-                        let repo = repo.read(cx);
-                        repo.is_main_worktree()
-                            && *repo.work_directory_abs_path == *row.main_repo_path
-                    });
-                    has_main_repo.then_some(project)
-                })
-            })?;
-
-            if let Some(project) = project {
-                let path_for_register = final_worktree_path.clone();
-                let worktree_result = project
-                    .update(cx, |project, cx| {
-                        project.find_or_create_worktree(path_for_register, true, cx)
-                    })
-                    .await;
-                if let Ok((worktree, _)) = worktree_result {
-                    let scan_complete = cx.update(|_window, cx| {
-                        worktree
-                            .read(cx)
-                            .as_local()
-                            .map(project::LocalWorktree::scan_complete)
-                    })?;
-                    if let Some(future) = scan_complete {
-                        future.await;
-                    }
-                }
-            }
-
-            // Find the new worktree's repo entity.
-            let worktree_repo = cx.update(|_window, cx| {
-                workspaces.iter().find_map(|workspace| {
-                    let project = workspace.read(cx).project().clone();
-                    project
-                        .read(cx)
-                        .repositories(cx)
-                        .values()
-                        .find_map(|repo_entity| {
-                            let snapshot = repo_entity.read(cx).snapshot();
-                            (*snapshot.work_directory_abs_path == *final_worktree_path)
-                                .then(|| repo_entity.clone())
-                        })
-                })
-            })?;
-
-            if let Some(worktree_repo) = worktree_repo {
-                let resets_ok = 'resets: {
-                    let mixed_reset = worktree_repo.update(cx, |repo, cx| {
-                        repo.reset("HEAD~".to_string(), ResetMode::Mixed, cx)
-                    });
-                    match mixed_reset.await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(err)) => {
-                            log::warn!("Failed to mixed-reset WIP unstaged commit: {err}");
-                            break 'resets false;
-                        }
-                        Err(_) => {
-                            log::warn!("Mixed reset was canceled");
-                            break 'resets false;
-                        }
-                    }
-
-                    let soft_reset = worktree_repo.update(cx, |repo, cx| {
-                        repo.reset("HEAD~".to_string(), ResetMode::Soft, cx)
-                    });
-                    match soft_reset.await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(err)) => {
-                            log::warn!("Failed to soft-reset WIP staged commit: {err}");
-                            // Attempt to undo the mixed reset to return to the WIP commit.
-                            let undo = worktree_repo.update(cx, |repo, cx| {
-                                repo.reset(commit_hash.clone(), ResetMode::Mixed, cx)
-                            });
-                            match undo.await {
-                                Ok(Ok(())) => {
-                                    log::info!("Undid mixed reset after soft-reset failure")
-                                }
-                                Ok(Err(undo_err)) => {
-                                    log::warn!("Could not undo mixed reset: {undo_err}")
-                                }
-                                Err(_) => log::warn!("Undo of mixed reset was canceled"),
-                            }
-                            break 'resets false;
-                        }
-                        Err(_) => {
-                            log::warn!("Soft reset was canceled");
-                            // Attempt to undo the mixed reset to return to the WIP commit.
-                            let undo = worktree_repo.update(cx, |repo, cx| {
-                                repo.reset(commit_hash.clone(), ResetMode::Mixed, cx)
-                            });
-                            match undo.await {
-                                Ok(Ok(())) => {
-                                    log::info!("Undid mixed reset after soft-reset cancellation")
-                                }
-                                Ok(Err(undo_err)) => {
-                                    log::warn!("Could not undo mixed reset: {undo_err}")
-                                }
-                                Err(_) => log::warn!("Undo of mixed reset was canceled"),
-                            }
-                            break 'resets false;
-                        }
-                    }
-
-                    true
-                };
-
-                if !resets_ok {
-                    log::warn!(
-                        "Staging state could not be fully restored for worktree; proceeding to mark as restored"
-                    );
-                } else if let Some(original_branch) = &row.branch_name {
-                    let switch_receiver = worktree_repo
-                        .update(cx, |repo, _cx| repo.change_branch(original_branch.clone()));
-                    let switch_ok = matches!(switch_receiver.await, Ok(Ok(())));
-
-                    if !switch_ok {
-                        // The branch may already exist but be checked out in
-                        // another worktree. Attempt to create it in case it
-                        // was deleted; if it already exists, just accept the
-                        // detached HEAD and warn.
-                        let create_receiver = worktree_repo.update(cx, |repo, _cx| {
-                            repo.create_branch(original_branch.clone(), None)
-                        });
-                        match create_receiver.await {
-                            Ok(Ok(())) => {}
-                            Ok(Err(_)) => {
-                                log::warn!(
-                                    "Could not switch to branch '{original_branch}' — \
-                                     it may be checked out in another worktree. \
-                                     The restored worktree is in detached HEAD state."
-                                );
-                            }
-                            Err(_) => {
-                                log::warn!(
-                                    "Branch creation for '{original_branch}' was canceled; \
-                                     the restored worktree is in detached HEAD state."
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Mark the archived worktree as restored in the database.
-            let store = cx.update(|_window, cx| ThreadMetadataStore::global(cx))?;
-            store
-                .update(cx, |store, cx| {
-                    store.set_archived_worktree_restored(
-                        row.id,
-                        final_worktree_path.to_string_lossy().to_string(),
-                        row.branch_name.clone(),
-                        cx,
-                    )
-                })
-                .await?;
-        }
-
-        Ok(final_worktree_path)
-    }
-
-    async fn create_fresh_worktree(
+    async fn restore_worktree_via_git(
         row: &ArchivedGitWorktree,
         fs: &Arc<dyn fs::Fs>,
         cx: &mut AsyncWindowContext,
     ) -> anyhow::Result<PathBuf> {
         let main_repo_path = row.main_repo_path.clone();
         let dot_git_path = main_repo_path.join(git::DOT_GIT);
+        let worktree_path = row.worktree_path.clone();
+        let commit_hash = row.commit_hash.clone();
 
         if fs.metadata(&dot_git_path).await?.is_none() {
             anyhow::bail!(
-                "Cannot unarchive worktree because there is no longer a git repository at {}",
+                "Git repository at {} no longer exists",
                 main_repo_path.display()
             );
         }
 
-        // Open the repo directly from disk — the main repo may not be
-        // open in any workspace.
-        let git_repo = cx
+        let main_repo = cx
             .background_spawn({
                 let fs = fs.clone();
                 let dot_git_path = dot_git_path.clone();
@@ -2619,64 +2400,94 @@ impl Sidebar {
             })
             .await?;
 
-        // Generate a new branch name for the fresh worktree.
-        let branch_name = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            row.worktree_path.hash(&mut hasher);
-            let suffix = format!("{:x}", hasher.finish())
-                .chars()
-                .take(8)
-                .collect::<String>();
-            format!("restored-{suffix}")
+        let already_exists = fs.metadata(&worktree_path).await?.is_some();
+
+        let final_path = if already_exists {
+            let worktree_directory = git_store::worktrees_directory_for_repo(
+                &main_repo_path,
+                git::repository::DEFAULT_WORKTREE_DIRECTORY,
+            )?;
+            let new_name = format!(
+                "{}-restored-{}",
+                row.branch_name.as_deref().unwrap_or("worktree"),
+                row.id
+            );
+            let project_name = main_repo_path
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("git repo must have a directory name"))?;
+            worktree_directory.join(&new_name).join(project_name)
+        } else {
+            worktree_path.clone()
         };
 
-        // Compute the worktree path (same logic as Repository::path_for_new_linked_worktree).
-        let project_name = main_repo_path
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("git repo must have a directory name"))?
-            .to_string_lossy()
-            .to_string();
-        let worktree_directory = git_store::worktrees_directory_for_repo(
-            &main_repo_path,
-            git::repository::DEFAULT_WORKTREE_DIRECTORY,
-        )?;
-        let worktree_path = worktree_directory.join(&branch_name).join(&project_name);
-
-        // Create the fresh worktree.
-        git_repo
-            .create_worktree(Some(branch_name), worktree_path.clone(), None)
+        main_repo
+            .create_worktree(None, final_path.clone(), Some(commit_hash.clone()))
             .await?;
 
-        log::warn!(
-            "Unable to restore the original git worktree. Created a fresh worktree instead."
-        );
+        let wt_dot_git = final_path.join(git::DOT_GIT);
+        let wt_repo = cx
+            .background_spawn({
+                let fs = fs.clone();
+                async move { fs.open_repo(&wt_dot_git, None) }
+            })
+            .await?;
 
-        Ok(worktree_path)
-    }
+        let empty_env: Arc<collections::HashMap<String, String>> = Arc::default();
 
-    async fn maybe_cleanup_archived_worktree(
-        row: &ArchivedGitWorktree,
-        store: &Entity<ThreadMetadataStore>,
-        workspaces: &[Entity<Workspace>],
-        cx: &mut AsyncWindowContext,
-    ) {
-        // Delete the git ref from the main repo.
-        let Ok(main_repo) = cx.update(|_window, cx| {
-            find_main_repo_in_workspaces(workspaces, &row.main_repo_path, cx)
-        }) else {
-            return;
-        };
+        if let Err(err) = wt_repo
+            .reset("HEAD~".to_string(), ResetMode::Mixed, empty_env.clone())
+            .await
+        {
+            log::warn!("Failed to mixed-reset: {err}");
+            let _ = wt_repo
+                .reset(commit_hash.clone(), ResetMode::Mixed, empty_env.clone())
+                .await;
+            anyhow::bail!("Failed to restore staging state: {err}");
+        }
 
-        if let Some(main_repo) = main_repo {
-            let ref_name = archived_worktree_ref_name(row.id);
-            let receiver = main_repo.update(cx, |repo, _cx| repo.delete_ref(ref_name));
-            if let Ok(result) = receiver.await {
-                result.log_err();
+        if let Err(err) = wt_repo
+            .reset("HEAD~".to_string(), ResetMode::Soft, empty_env.clone())
+            .await
+        {
+            log::warn!("Failed to soft-reset: {err}");
+            let _ = wt_repo
+                .reset(commit_hash.clone(), ResetMode::Mixed, empty_env)
+                .await;
+            anyhow::bail!("Failed to restore staging state: {err}");
+        }
+
+        if let Some(branch_name) = &row.branch_name {
+            if wt_repo.change_branch(branch_name.clone()).await.is_err() {
+                if let Err(_) = wt_repo.create_branch(branch_name.clone(), None).await {
+                    log::warn!(
+                        "Could not switch to branch '{branch_name}' — \
+                         the restored worktree is in detached HEAD state."
+                    );
+                }
             }
         }
 
-        // Delete the archived worktree record (and join table entries).
+        Ok(final_path)
+    }
+
+    async fn cleanup_archived_worktree_record(
+        row: &ArchivedGitWorktree,
+        fs: &Arc<dyn fs::Fs>,
+        store: &Entity<ThreadMetadataStore>,
+        cx: &mut AsyncWindowContext,
+    ) {
+        let dot_git_path = row.main_repo_path.join(git::DOT_GIT);
+        if let Ok(main_repo) = cx
+            .background_spawn({
+                let fs = fs.clone();
+                async move { fs.open_repo(&dot_git_path, None) }
+            })
+            .await
+        {
+            let ref_name = archived_worktree_ref_name(row.id);
+            main_repo.delete_ref(ref_name).await.log_err();
+        }
+
         store
             .update(cx, |store, cx| store.delete_archived_worktree(row.id, cx))
             .await
@@ -3878,6 +3689,7 @@ impl Sidebar {
             .timestamp(timestamp)
             .highlight_positions(thread.highlight_positions.to_vec())
             .title_generating(thread.is_title_generating)
+            .pending_worktree_restore(thread.metadata.pending_worktree_restore.is_some())
             .notified(has_notification)
             .when(thread.diff_stats.lines_added > 0, |this| {
                 this.added(thread.diff_stats.lines_added as usize)

@@ -146,7 +146,9 @@ fn save_thread_metadata(
         updated_at,
         created_at,
         folder_paths: path_list,
+        main_worktree_paths: PathList::default(),
         archived: false,
+        pending_worktree_restore: None,
     };
     cx.update(|cx| {
         ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save_manually(metadata, cx))
@@ -694,10 +696,12 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                     session_id: acp::SessionId::new(Arc::from("t-1")),
                     agent_id: AgentId::new("zed-agent"),
                     folder_paths: PathList::default(),
+                    main_worktree_paths: PathList::default(),
                     title: "Completed thread".into(),
                     updated_at: Utc::now(),
                     created_at: Some(Utc::now()),
                     archived: false,
+                    pending_worktree_restore: None,
                 },
                 icon: IconName::ZedAgent,
                 icon_from_external_svg: None,
@@ -716,10 +720,12 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                     session_id: acp::SessionId::new(Arc::from("t-2")),
                     agent_id: AgentId::new("zed-agent"),
                     folder_paths: PathList::default(),
+                    main_worktree_paths: PathList::default(),
                     title: "Running thread".into(),
                     updated_at: Utc::now(),
                     created_at: Some(Utc::now()),
                     archived: false,
+                    pending_worktree_restore: None,
                 },
                 icon: IconName::ZedAgent,
                 icon_from_external_svg: None,
@@ -738,10 +744,12 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                     session_id: acp::SessionId::new(Arc::from("t-3")),
                     agent_id: AgentId::new("zed-agent"),
                     folder_paths: PathList::default(),
+                    main_worktree_paths: PathList::default(),
                     title: "Error thread".into(),
                     updated_at: Utc::now(),
                     created_at: Some(Utc::now()),
                     archived: false,
+                    pending_worktree_restore: None,
                 },
                 icon: IconName::ZedAgent,
                 icon_from_external_svg: None,
@@ -760,10 +768,12 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                     session_id: acp::SessionId::new(Arc::from("t-4")),
                     agent_id: AgentId::new("zed-agent"),
                     folder_paths: PathList::default(),
+                    main_worktree_paths: PathList::default(),
                     title: "Waiting thread".into(),
                     updated_at: Utc::now(),
                     created_at: Some(Utc::now()),
                     archived: false,
+                    pending_worktree_restore: None,
                 },
                 icon: IconName::ZedAgent,
                 icon_from_external_svg: None,
@@ -782,10 +792,12 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                     session_id: acp::SessionId::new(Arc::from("t-5")),
                     agent_id: AgentId::new("zed-agent"),
                     folder_paths: PathList::default(),
+                    main_worktree_paths: PathList::default(),
                     title: "Notified thread".into(),
                     updated_at: Utc::now(),
                     created_at: Some(Utc::now()),
                     archived: false,
+                    pending_worktree_restore: None,
                 },
                 icon: IconName::ZedAgent,
                 icon_from_external_svg: None,
@@ -2049,7 +2061,9 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
                 updated_at: Utc::now(),
                 created_at: None,
                 folder_paths: PathList::default(),
+                main_worktree_paths: PathList::default(),
                 archived: false,
+                pending_worktree_restore: None,
             },
             &workspace_a,
             window,
@@ -2104,7 +2118,9 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
                 updated_at: Utc::now(),
                 created_at: None,
                 folder_paths: PathList::default(),
+                main_worktree_paths: PathList::default(),
                 archived: false,
+                pending_worktree_restore: None,
             },
             &workspace_b,
             window,
@@ -2440,6 +2456,7 @@ async fn test_cmd_n_shows_new_thread_entry_in_absorbed_worktree(cx: &mut TestApp
                     "feature-a": {
                         "commondir": "../../",
                         "HEAD": "ref: refs/heads/feature-a",
+                        "gitdir": "/wt-feature-a/.git",
                     },
                 },
             },
@@ -2459,12 +2476,9 @@ async fn test_cmd_n_shows_new_thread_entry_in_absorbed_worktree(cx: &mut TestApp
     .await;
 
     fs.with_git_state(std::path::Path::new("/project/.git"), false, |state| {
-        state.worktrees.push(git::repository::Worktree {
-            path: std::path::PathBuf::from("/wt-feature-a"),
-            ref_name: Some("refs/heads/feature-a".into()),
-            sha: "aaa".into(),
-            is_main: false,
-        });
+        state
+            .refs
+            .insert("refs/heads/feature-a".to_string(), "aaa".to_string());
     })
     .unwrap();
 
@@ -2568,20 +2582,62 @@ async fn init_test_project_with_git(
     (project, fs)
 }
 
+/// Register a git worktree in the FakeFs by creating the on-disk structures
+/// that `FakeGitRepository::worktrees()` reads (`.git/worktrees/<name>/` entries).
+///
+/// * `dot_git` — path to the main repo's `.git` dir (e.g. `/project/.git`)
+/// * `worktree_path` — checkout path for the worktree (e.g. `/wt-feature-a`)
+/// * `branch` — branch name (e.g. `feature-a`)
+/// * `sha` — fake commit SHA
+async fn register_fake_worktree(
+    fs: &FakeFs,
+    dot_git: &str,
+    worktree_path: &str,
+    branch: &str,
+    sha: &str,
+) {
+    register_fake_worktree_emit(fs, dot_git, worktree_path, branch, sha, false).await;
+}
+
+async fn register_fake_worktree_emit(
+    fs: &FakeFs,
+    dot_git: &str,
+    worktree_path: &str,
+    branch: &str,
+    sha: &str,
+    emit: bool,
+) {
+    let worktrees_entry = format!("{}/worktrees/{}", dot_git, branch);
+    fs.insert_tree(
+        &worktrees_entry,
+        serde_json::json!({
+            "HEAD": format!("ref: refs/heads/{}", branch),
+            "commondir": dot_git,
+            "gitdir": format!("{}/.git", worktree_path),
+        }),
+    )
+    .await;
+
+    fs.with_git_state(std::path::Path::new(dot_git), emit, |state| {
+        state
+            .refs
+            .insert(format!("refs/heads/{}", branch), sha.to_string());
+    })
+    .unwrap();
+}
+
 #[gpui::test]
 async fn test_search_matches_worktree_name(cx: &mut TestAppContext) {
     let (project, fs) = init_test_project_with_git("/project", cx).await;
 
-    fs.as_fake()
-        .with_git_state(std::path::Path::new("/project/.git"), false, |state| {
-            state.worktrees.push(git::repository::Worktree {
-                path: std::path::PathBuf::from("/wt/rosewood"),
-                ref_name: Some("refs/heads/rosewood".into()),
-                sha: "abc".into(),
-                is_main: false,
-            });
-        })
-        .unwrap();
+    register_fake_worktree(
+        &fs.as_fake(),
+        "/project/.git",
+        "/wt/rosewood",
+        "rosewood",
+        "abc",
+    )
+    .await;
 
     project
         .update(cx, |project, cx| project.git_scans_complete(cx))
@@ -2634,16 +2690,15 @@ async fn test_git_worktree_added_live_updates_sidebar(cx: &mut TestAppContext) {
     );
 
     // Now add the worktree to the git state and trigger a rescan.
-    fs.as_fake()
-        .with_git_state(std::path::Path::new("/project/.git"), true, |state| {
-            state.worktrees.push(git::repository::Worktree {
-                path: std::path::PathBuf::from("/wt/rosewood"),
-                ref_name: Some("refs/heads/rosewood".into()),
-                sha: "abc".into(),
-                is_main: false,
-            });
-        })
-        .unwrap();
+    register_fake_worktree_emit(
+        &fs.as_fake(),
+        "/project/.git",
+        "/wt/rosewood",
+        "rosewood",
+        "abc",
+        true,
+    )
+    .await;
 
     cx.run_until_parked();
 
@@ -2671,10 +2726,12 @@ async fn test_two_worktree_workspaces_absorbed_when_main_added(cx: &mut TestAppC
                     "feature-a": {
                         "commondir": "../../",
                         "HEAD": "ref: refs/heads/feature-a",
+                        "gitdir": "/wt-feature-a/.git",
                     },
                     "feature-b": {
                         "commondir": "../../",
                         "HEAD": "ref: refs/heads/feature-b",
+                        "gitdir": "/wt-feature-b/.git",
                     },
                 },
             },
@@ -2737,21 +2794,8 @@ async fn test_two_worktree_workspaces_absorbed_when_main_added(cx: &mut TestAppC
 
     // Configure the main repo to list both worktrees before opening
     // it so the initial git scan picks them up.
-    fs.with_git_state(std::path::Path::new("/project/.git"), false, |state| {
-        state.worktrees.push(git::repository::Worktree {
-            path: std::path::PathBuf::from("/wt-feature-a"),
-            ref_name: Some("refs/heads/feature-a".into()),
-            sha: "aaa".into(),
-            is_main: false,
-        });
-        state.worktrees.push(git::repository::Worktree {
-            path: std::path::PathBuf::from("/wt-feature-b"),
-            ref_name: Some("refs/heads/feature-b".into()),
-            sha: "bbb".into(),
-            is_main: false,
-        });
-    })
-    .unwrap();
+    register_fake_worktree(&fs, "/project/.git", "/wt-feature-a", "feature-a", "aaa").await;
+    register_fake_worktree(&fs, "/project/.git", "/wt-feature-b", "feature-b", "bbb").await;
 
     let main_project = project::Project::test(fs.clone(), ["/project".as_ref()], cx).await;
     main_project
@@ -2793,10 +2837,12 @@ async fn test_threadless_workspace_shows_new_thread_with_worktree_chip(cx: &mut 
                     "feature-a": {
                         "commondir": "../../",
                         "HEAD": "ref: refs/heads/feature-a",
+                        "gitdir": "/wt-feature-a/.git",
                     },
                     "feature-b": {
                         "commondir": "../../",
                         "HEAD": "ref: refs/heads/feature-b",
+                        "gitdir": "/wt-feature-b/.git",
                     },
                 },
             },
@@ -2821,21 +2867,8 @@ async fn test_threadless_workspace_shows_new_thread_with_worktree_chip(cx: &mut 
     )
     .await;
 
-    fs.with_git_state(std::path::Path::new("/project/.git"), false, |state| {
-        state.worktrees.push(git::repository::Worktree {
-            path: std::path::PathBuf::from("/wt-feature-a"),
-            ref_name: Some("refs/heads/feature-a".into()),
-            sha: "aaa".into(),
-            is_main: false,
-        });
-        state.worktrees.push(git::repository::Worktree {
-            path: std::path::PathBuf::from("/wt-feature-b"),
-            ref_name: Some("refs/heads/feature-b".into()),
-            sha: "bbb".into(),
-            is_main: false,
-        });
-    })
-    .unwrap();
+    register_fake_worktree(&fs, "/project/.git", "/wt-feature-a", "feature-a", "aaa").await;
+    register_fake_worktree(&fs, "/project/.git", "/wt-feature-b", "feature-b", "bbb").await;
 
     cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
 
@@ -2889,10 +2922,12 @@ async fn test_multi_worktree_thread_shows_multiple_chips(cx: &mut TestAppContext
                     "olivetti": {
                         "commondir": "../../",
                         "HEAD": "ref: refs/heads/olivetti",
+                        "gitdir": "/worktrees/project_a/olivetti/project_a/.git",
                     },
                     "selectric": {
                         "commondir": "../../",
                         "HEAD": "ref: refs/heads/selectric",
+                        "gitdir": "/worktrees/project_a/selectric/project_a/.git",
                     },
                 },
             },
@@ -2908,10 +2943,12 @@ async fn test_multi_worktree_thread_shows_multiple_chips(cx: &mut TestAppContext
                     "olivetti": {
                         "commondir": "../../",
                         "HEAD": "ref: refs/heads/olivetti",
+                        "gitdir": "/worktrees/project_b/olivetti/project_b/.git",
                     },
                     "selectric": {
                         "commondir": "../../",
                         "HEAD": "ref: refs/heads/selectric",
+                        "gitdir": "/worktrees/project_b/selectric/project_b/.git",
                     },
                 },
             },
@@ -2942,17 +2979,10 @@ async fn test_multi_worktree_thread_shows_multiple_chips(cx: &mut TestAppContext
     // Register linked worktrees.
     for repo in &["project_a", "project_b"] {
         let git_path = format!("/{repo}/.git");
-        fs.with_git_state(std::path::Path::new(&git_path), false, |state| {
-            for branch in &["olivetti", "selectric"] {
-                state.worktrees.push(git::repository::Worktree {
-                    path: std::path::PathBuf::from(format!("/worktrees/{repo}/{branch}/{repo}")),
-                    ref_name: Some(format!("refs/heads/{branch}").into()),
-                    sha: "aaa".into(),
-                    is_main: false,
-                });
-            }
-        })
-        .unwrap();
+        for branch in &["olivetti", "selectric"] {
+            let wt_path = format!("/worktrees/{repo}/{branch}/{repo}");
+            register_fake_worktree(&fs, &git_path, &wt_path, branch, "aaa").await;
+        }
     }
 
     cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
@@ -3010,6 +3040,7 @@ async fn test_same_named_worktree_chips_are_deduplicated(cx: &mut TestAppContext
                     "olivetti": {
                         "commondir": "../../",
                         "HEAD": "ref: refs/heads/olivetti",
+                        "gitdir": "/worktrees/project_a/olivetti/project_a/.git",
                     },
                 },
             },
@@ -3025,6 +3056,7 @@ async fn test_same_named_worktree_chips_are_deduplicated(cx: &mut TestAppContext
                     "olivetti": {
                         "commondir": "../../",
                         "HEAD": "ref: refs/heads/olivetti",
+                        "gitdir": "/worktrees/project_b/olivetti/project_b/.git",
                     },
                 },
             },
@@ -3046,15 +3078,8 @@ async fn test_same_named_worktree_chips_are_deduplicated(cx: &mut TestAppContext
         .await;
 
         let git_path = format!("/{repo}/.git");
-        fs.with_git_state(std::path::Path::new(&git_path), false, |state| {
-            state.worktrees.push(git::repository::Worktree {
-                path: std::path::PathBuf::from(format!("/worktrees/{repo}/olivetti/{repo}")),
-                ref_name: Some("refs/heads/olivetti".into()),
-                sha: "aaa".into(),
-                is_main: false,
-            });
-        })
-        .unwrap();
+        let wt_path = format!("/worktrees/{repo}/olivetti/{repo}");
+        register_fake_worktree(&fs, &git_path, &wt_path, "olivetti", "aaa").await;
     }
 
     cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
@@ -3119,6 +3144,7 @@ async fn test_absorbed_worktree_running_thread_shows_live_status(cx: &mut TestAp
                     "feature-a": {
                         "commondir": "../../",
                         "HEAD": "ref: refs/heads/feature-a",
+                        "gitdir": "/wt-feature-a/.git",
                     },
                 },
             },
@@ -3138,12 +3164,9 @@ async fn test_absorbed_worktree_running_thread_shows_live_status(cx: &mut TestAp
     .await;
 
     fs.with_git_state(std::path::Path::new("/project/.git"), false, |state| {
-        state.worktrees.push(git::repository::Worktree {
-            path: std::path::PathBuf::from("/wt-feature-a"),
-            ref_name: Some("refs/heads/feature-a".into()),
-            sha: "aaa".into(),
-            is_main: false,
-        });
+        state
+            .refs
+            .insert("refs/heads/feature-a".to_string(), "aaa".to_string());
     })
     .unwrap();
 
@@ -3236,6 +3259,7 @@ async fn test_absorbed_worktree_completion_triggers_notification(cx: &mut TestAp
                     "feature-a": {
                         "commondir": "../../",
                         "HEAD": "ref: refs/heads/feature-a",
+                        "gitdir": "/wt-feature-a/.git",
                     },
                 },
             },
@@ -3254,12 +3278,9 @@ async fn test_absorbed_worktree_completion_triggers_notification(cx: &mut TestAp
     .await;
 
     fs.with_git_state(std::path::Path::new("/project/.git"), false, |state| {
-        state.worktrees.push(git::repository::Worktree {
-            path: std::path::PathBuf::from("/wt-feature-a"),
-            ref_name: Some("refs/heads/feature-a".into()),
-            sha: "aaa".into(),
-            is_main: false,
-        });
+        state
+            .refs
+            .insert("refs/heads/feature-a".to_string(), "aaa".to_string());
     })
     .unwrap();
 
@@ -3343,6 +3364,7 @@ async fn test_clicking_worktree_thread_opens_workspace_when_none_exists(cx: &mut
                     "feature-a": {
                         "commondir": "../../",
                         "HEAD": "ref: refs/heads/feature-a",
+                        "gitdir": "/wt-feature-a/.git",
                     },
                 },
             },
@@ -3361,12 +3383,9 @@ async fn test_clicking_worktree_thread_opens_workspace_when_none_exists(cx: &mut
     .await;
 
     fs.with_git_state(std::path::Path::new("/project/.git"), false, |state| {
-        state.worktrees.push(git::repository::Worktree {
-            path: std::path::PathBuf::from("/wt-feature-a"),
-            ref_name: Some("refs/heads/feature-a".into()),
-            sha: "aaa".into(),
-            is_main: false,
-        });
+        state
+            .refs
+            .insert("refs/heads/feature-a".to_string(), "aaa".to_string());
     })
     .unwrap();
 
@@ -3449,6 +3468,7 @@ async fn test_clicking_worktree_thread_does_not_briefly_render_as_separate_proje
                     "feature-a": {
                         "commondir": "../../",
                         "HEAD": "ref: refs/heads/feature-a",
+                        "gitdir": "/wt-feature-a/.git",
                     },
                 },
             },
@@ -3467,12 +3487,9 @@ async fn test_clicking_worktree_thread_does_not_briefly_render_as_separate_proje
     .await;
 
     fs.with_git_state(std::path::Path::new("/project/.git"), false, |state| {
-        state.worktrees.push(git::repository::Worktree {
-            path: std::path::PathBuf::from("/wt-feature-a"),
-            ref_name: Some("refs/heads/feature-a".into()),
-            sha: "aaa".into(),
-            is_main: false,
-        });
+        state
+            .refs
+            .insert("refs/heads/feature-a".to_string(), "aaa".to_string());
     })
     .unwrap();
 
@@ -3600,6 +3617,7 @@ async fn test_clicking_absorbed_worktree_thread_activates_worktree_workspace(
                     "feature-a": {
                         "commondir": "../../",
                         "HEAD": "ref: refs/heads/feature-a",
+                        "gitdir": "/wt-feature-a/.git",
                     },
                 },
             },
@@ -3618,12 +3636,9 @@ async fn test_clicking_absorbed_worktree_thread_activates_worktree_workspace(
     .await;
 
     fs.with_git_state(std::path::Path::new("/project/.git"), false, |state| {
-        state.worktrees.push(git::repository::Worktree {
-            path: std::path::PathBuf::from("/wt-feature-a"),
-            ref_name: Some("refs/heads/feature-a".into()),
-            sha: "aaa".into(),
-            is_main: false,
-        });
+        state
+            .refs
+            .insert("refs/heads/feature-a".to_string(), "aaa".to_string());
     })
     .unwrap();
 
@@ -3753,7 +3768,9 @@ async fn test_activate_archived_thread_with_saved_paths_activates_matching_works
                 updated_at: Utc::now(),
                 created_at: None,
                 folder_paths: PathList::new(&[PathBuf::from("/project-b")]),
+                main_worktree_paths: PathList::default(),
                 archived: false,
+                pending_worktree_restore: None,
             },
             window,
             cx,
@@ -3815,7 +3832,9 @@ async fn test_activate_archived_thread_cwd_fallback_with_matching_workspace(
                 updated_at: Utc::now(),
                 created_at: None,
                 folder_paths: PathList::new(&[std::path::PathBuf::from("/project-b")]),
+                main_worktree_paths: PathList::default(),
                 archived: false,
+                pending_worktree_restore: None,
             },
             window,
             cx,
@@ -3877,7 +3896,9 @@ async fn test_activate_archived_thread_no_paths_no_cwd_uses_active_workspace(
                 updated_at: Utc::now(),
                 created_at: None,
                 folder_paths: PathList::default(),
+                main_worktree_paths: PathList::default(),
                 archived: false,
+                pending_worktree_restore: None,
             },
             window,
             cx,
@@ -3931,7 +3952,9 @@ async fn test_activate_archived_thread_saved_paths_opens_new_workspace(cx: &mut 
                 updated_at: Utc::now(),
                 created_at: None,
                 folder_paths: path_list_b,
+                main_worktree_paths: PathList::default(),
                 archived: false,
+                pending_worktree_restore: None,
             },
             window,
             cx,
@@ -3980,7 +4003,9 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window(cx: &m
                 updated_at: Utc::now(),
                 created_at: None,
                 folder_paths: PathList::new(&[PathBuf::from("/project-b")]),
+                main_worktree_paths: PathList::default(),
                 archived: false,
+                pending_worktree_restore: None,
             },
             window,
             cx,
@@ -4056,7 +4081,9 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window_with_t
                 updated_at: Utc::now(),
                 created_at: None,
                 folder_paths: PathList::new(&[PathBuf::from("/project-b")]),
+                main_worktree_paths: PathList::default(),
                 archived: false,
+                pending_worktree_restore: None,
             },
             window,
             cx,
@@ -4131,7 +4158,9 @@ async fn test_activate_archived_thread_prefers_current_window_for_matching_paths
                 updated_at: Utc::now(),
                 created_at: None,
                 folder_paths: PathList::new(&[PathBuf::from("/project-a")]),
+                main_worktree_paths: PathList::default(),
                 archived: false,
+                pending_worktree_restore: None,
             },
             window,
             cx,
@@ -4195,6 +4224,7 @@ async fn test_archive_thread_uses_next_threads_own_workspace(cx: &mut TestAppCon
                     "feature-a": {
                         "commondir": "../../",
                         "HEAD": "ref: refs/heads/feature-a",
+                        "gitdir": "/wt-feature-a/.git",
                     },
                 },
             },
@@ -4213,12 +4243,9 @@ async fn test_archive_thread_uses_next_threads_own_workspace(cx: &mut TestAppCon
     .await;
 
     fs.with_git_state(std::path::Path::new("/project/.git"), false, |state| {
-        state.worktrees.push(git::repository::Worktree {
-            path: std::path::PathBuf::from("/wt-feature-a"),
-            ref_name: Some("refs/heads/feature-a".into()),
-            sha: "aaa".into(),
-            is_main: false,
-        });
+        state
+            .refs
+            .insert("refs/heads/feature-a".to_string(), "aaa".to_string());
     })
     .unwrap();
 
@@ -4359,6 +4386,7 @@ async fn test_linked_worktree_threads_not_duplicated_across_groups(cx: &mut Test
                     "feature-a": {
                         "commondir": "../../",
                         "HEAD": "ref: refs/heads/feature-a",
+                        "gitdir": "/wt-feature-a/.git",
                     },
                 },
             },
@@ -4385,12 +4413,9 @@ async fn test_linked_worktree_threads_not_duplicated_across_groups(cx: &mut Test
 
     // Register the linked worktree in the main repo.
     fs.with_git_state(std::path::Path::new("/project/.git"), false, |state| {
-        state.worktrees.push(git::repository::Worktree {
-            path: std::path::PathBuf::from("/wt-feature-a"),
-            ref_name: Some("refs/heads/feature-a".into()),
-            sha: "aaa".into(),
-            is_main: false,
-        });
+        state
+            .refs
+            .insert("refs/heads/feature-a".to_string(), "aaa".to_string());
     })
     .unwrap();
 
@@ -4899,12 +4924,15 @@ async fn test_archived_threads_excluded_from_sidebar_entries(cx: &mut TestAppCon
 
 #[gpui::test]
 async fn test_archive_and_restore_single_worktree(cx: &mut TestAppContext) {
-    // Test the restore/unarchive flow for a git worktree. We set up a main
-    // repo with an archived worktree record (simulating a prior archive) and
-    // then trigger `activate_archived_thread` to verify:
-    //   1. The worktree directory is recreated.
-    //   2. The archived worktree DB record is cleaned up.
-    //   3. The thread is unarchived in the metadata store.
+    // Test the full restore/unarchive flow for a git worktree.
+    //
+    // The new restore flow is:
+    //   1. `activate_archived_thread` is called
+    //   2. Thread is immediately unarchived and associated with the main repo
+    //      path (with `pending_worktree_restore` set)
+    //   3. Background: git worktree is restored via `fs.open_repo()`
+    //   4. Thread is reassociated with the restored worktree path (pending cleared)
+    //   5. A workspace is opened for the restored path
     agent_ui::test_support::init_test(cx);
     cx.update(|cx| {
         cx.update_flags(false, vec!["agent-v2".into()]);
@@ -4918,14 +4946,41 @@ async fn test_archive_and_restore_single_worktree(cx: &mut TestAppContext) {
 
     // Set up a main repo at /project. The linked worktree at /wt-feature does
     // NOT exist on disk — it was deleted during the archive step.
+    //
+    // Pre-create the .git/worktrees/wt-feature/ entry directory so that
+    // when create_worktree runs during restore, the directory already has a
+    // FakeGitRepositoryState we can seed with commit history.
+    // (create_worktree passes branch_name=None, so the entry name is the
+    // path's file_name = "wt-feature".)
     fs.insert_tree(
         "/project",
         serde_json::json!({
-            ".git": {},
+            ".git": {
+                "worktrees": {
+                    "wt-feature": {},
+                },
+            },
             "src": { "main.rs": "fn main() {}" },
         }),
     )
     .await;
+
+    // Seed the worktree entry's state with 2 fake commits so the two
+    // HEAD~ resets in restore_worktree_via_git succeed.
+    fs.with_git_state(
+        std::path::Path::new("/project/.git/worktrees/wt-feature"),
+        false,
+        |state| {
+            for i in 0..2 {
+                state.commit_history.push(fs::FakeCommitSnapshot {
+                    head_contents: Default::default(),
+                    index_contents: Default::default(),
+                    sha: format!("fake-parent-{i}"),
+                });
+            }
+        },
+    )
+    .unwrap();
 
     let wip_commit_hash = "fake-wip-sha-123";
 
@@ -4983,8 +5038,7 @@ async fn test_archive_and_restore_single_worktree(cx: &mut TestAppContext) {
         .await
         .expect("linking thread to archived worktree should succeed");
 
-    // Verify pre-conditions: the worktree directory does not exist and the
-    // DB record is present.
+    // Verify pre-conditions.
     assert!(
         !fs.directories(false)
             .iter()
@@ -4998,17 +5052,11 @@ async fn test_archive_and_restore_single_worktree(cx: &mut TestAppContext) {
         })
         .await
         .expect("DB query should succeed");
-    assert_eq!(
-        archived_rows.len(),
-        1,
-        "expected exactly one archived worktree record before restore"
-    );
-    let archived_row = &archived_rows[0];
-    assert_eq!(archived_row.id, archived_id);
-    assert_eq!(archived_row.commit_hash, wip_commit_hash);
-    assert_eq!(archived_row.branch_name.as_deref(), Some("feature"));
+    assert_eq!(archived_rows.len(), 1);
+    assert_eq!(archived_rows[0].commit_hash, wip_commit_hash);
+    assert_eq!(archived_rows[0].branch_name.as_deref(), Some("feature"));
 
-    // Now seed the git ref using the actual archived worktree ID.
+    // Seed the git ref on the main repo.
     let expected_ref_name = archived_worktree_ref_name(archived_id);
     fs.with_git_state(std::path::Path::new("/project/.git"), false, |state| {
         state
@@ -5040,15 +5088,8 @@ async fn test_archive_and_restore_single_worktree(cx: &mut TestAppContext) {
         sidebar.activate_archived_thread(metadata, window, cx);
     });
     // The restore flow involves multiple async steps: worktree creation,
-    // project scan, reset, branch switch, DB cleanup.
+    // reset, branch switch, DB cleanup, workspace open.
     cx.run_until_parked();
-
-    // NOTE: The FakeGitRepository::create_worktree implementation does not
-    // create a `.git` gitfile inside the worktree directory, so the project
-    // scanner does not discover a Repository entity for the restored worktree.
-    // This means the two-reset staging-restoration logic (mixed reset HEAD~,
-    // then soft reset HEAD~) is not exercised by this test. An integration
-    // test with a real git repo would be needed to cover that path.
 
     // 1. The thread should no longer be archived.
     cx.update(|_, cx| {
@@ -5060,8 +5101,8 @@ async fn test_archive_and_restore_single_worktree(cx: &mut TestAppContext) {
         );
     });
 
-    // 2. The worktree directory should exist again on disk (recreated via
-    //    create_worktree_detached).
+    // 2. The worktree directory should exist on disk (recreated via
+    //    create_worktree in restore_worktree_via_git).
     assert!(
         fs.directories(false)
             .iter()
@@ -5070,7 +5111,26 @@ async fn test_archive_and_restore_single_worktree(cx: &mut TestAppContext) {
         fs.directories(false)
     );
 
-    // 3. The archived worktree DB record should be cleaned up.
+    // 3. The thread's folder_paths should point to the restored worktree,
+    //    not the main repo.
+    cx.update(|_, cx| {
+        let store = ThreadMetadataStore::global(cx);
+        let entry = store
+            .read(cx)
+            .entry(&session_id)
+            .expect("thread should exist in the store");
+        assert_eq!(
+            entry.folder_paths.paths(),
+            &[std::path::PathBuf::from("/wt-feature")],
+            "thread should be associated with the restored worktree path"
+        );
+        assert_eq!(
+            entry.pending_worktree_restore, None,
+            "pending_worktree_restore should be cleared after successful restore"
+        );
+    });
+
+    // 4. The archived worktree DB record should be cleaned up.
     let archived_rows_after = store
         .update_in(cx, |store, _window, cx| {
             store.get_archived_worktrees_for_thread(session_id.0.to_string(), cx)
@@ -5082,7 +5142,7 @@ async fn test_archive_and_restore_single_worktree(cx: &mut TestAppContext) {
         "expected archived worktree records to be empty after restore"
     );
 
-    // 4. The git ref should have been cleaned up from the main repo.
+    // 5. The git ref should have been cleaned up from the main repo.
     fs.with_git_state(std::path::Path::new("/project/.git"), false, |state| {
         assert!(
             !state.refs.contains_key(&expected_ref_name),
@@ -5097,8 +5157,8 @@ async fn test_archive_and_restore_single_worktree(cx: &mut TestAppContext) {
 async fn test_archive_two_threads_same_path_then_restore_first(cx: &mut TestAppContext) {
     // Regression test: archiving two different threads that use the same
     // worktree path should create independent archived worktree records.
-    // Unarchiving the first thread should restore its own record without
-    // losing the second thread's record.
+    // Unarchiving thread A should restore its record and clean up, while
+    // thread B's record survives intact.
     agent_ui::test_support::init_test(cx);
     cx.update(|cx| {
         cx.update_flags(false, vec!["agent-v2".into()]);
@@ -5110,14 +5170,37 @@ async fn test_archive_two_threads_same_path_then_restore_first(cx: &mut TestAppC
 
     let fs = FakeFs::new(cx.executor());
 
+    // Pre-create the .git/worktrees/wt-feature/ entry directory so that
+    // restore_worktree_via_git's create_worktree call finds it and the
+    // FakeGitRepositoryState we seed with commit history is used.
     fs.insert_tree(
         "/project",
         serde_json::json!({
-            ".git": {},
+            ".git": {
+                "worktrees": {
+                    "wt-feature": {},
+                },
+            },
             "src": { "main.rs": "fn main() {}" },
         }),
     )
     .await;
+
+    // Seed the worktree entry's state with 2 fake commits.
+    fs.with_git_state(
+        std::path::Path::new("/project/.git/worktrees/wt-feature"),
+        false,
+        |state| {
+            for i in 0..2 {
+                state.commit_history.push(fs::FakeCommitSnapshot {
+                    head_contents: Default::default(),
+                    index_contents: Default::default(),
+                    sha: format!("fake-parent-{i}"),
+                });
+            }
+        },
+    )
+    .unwrap();
 
     cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
 
@@ -5170,7 +5253,6 @@ async fn test_archive_two_threads_same_path_then_restore_first(cx: &mut TestAppC
         .await
         .expect("link thread A");
 
-    // Seed a git ref for thread A's archive.
     let ref_a = archived_worktree_ref_name(id_a);
     fs.with_git_state(std::path::Path::new("/project/.git"), false, |state| {
         state.refs.insert(ref_a.clone(), "sha-aaa".into());
@@ -5220,7 +5302,6 @@ async fn test_archive_two_threads_same_path_then_restore_first(cx: &mut TestAppC
     // Both threads should be archived, with independent IDs.
     assert_ne!(id_a, id_b, "each archive should get its own ID");
 
-    // Verify both records exist independently.
     let rows_a = store
         .update_in(cx, |store, _window, cx| {
             store.get_archived_worktrees_for_thread(session_a.0.to_string(), cx)
@@ -5266,6 +5347,24 @@ async fn test_archive_two_threads_same_path_then_restore_first(cx: &mut TestAppC
         assert!(
             !archived_ids.contains(&"thread-a".to_string()),
             "thread A should be unarchived, but archived list is: {archived_ids:?}"
+        );
+    });
+
+    // Thread A's folder_paths should point to the restored worktree.
+    cx.update(|_, cx| {
+        let store = ThreadMetadataStore::global(cx);
+        let entry = store
+            .read(cx)
+            .entry(&session_a)
+            .expect("thread A should exist in the store");
+        assert_eq!(
+            entry.folder_paths.paths(),
+            &[std::path::PathBuf::from("/wt-feature")],
+            "thread A should be associated with the restored worktree path"
+        );
+        assert_eq!(
+            entry.pending_worktree_restore, None,
+            "pending_worktree_restore should be cleared after successful restore"
         );
     });
 
@@ -5602,21 +5701,18 @@ mod property_test {
                         serde_json::json!({
                             "commondir": "../../",
                             "HEAD": format!("ref: refs/heads/{}", worktree_name),
+                            "gitdir": format!("{}/.git", worktree_path),
                         }),
                     )
                     .await;
 
                 let dot_git_path = std::path::Path::new(&dot_git);
-                let worktree_pathbuf = std::path::PathBuf::from(&worktree_path);
                 state
                     .fs
                     .with_git_state(dot_git_path, false, |git_state| {
-                        git_state.worktrees.push(git::repository::Worktree {
-                            path: worktree_pathbuf,
-                            ref_name: Some(format!("refs/heads/{}", worktree_name).into()),
-                            sha: "aaa".into(),
-                            is_main: false,
-                        });
+                        git_state
+                            .refs
+                            .insert(format!("refs/heads/{}", worktree_name), "aaa".to_string());
                     })
                     .unwrap();
 

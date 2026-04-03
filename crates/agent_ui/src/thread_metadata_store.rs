@@ -71,6 +71,7 @@ fn migrate_thread_metadata(cx: &mut App) {
                         folder_paths: entry.folder_paths,
                         main_worktree_paths: PathList::default(),
                         archived: true,
+                        pending_worktree_restore: None,
                     })
                 })
                 .collect::<Vec<_>>()
@@ -132,6 +133,9 @@ pub struct ThreadMetadata {
     pub folder_paths: PathList,
     pub main_worktree_paths: PathList,
     pub archived: bool,
+    /// When set, the thread's original worktree is being restored in the background.
+    /// The PathBuf is the main repo path being used temporarily while restoration is pending.
+    pub pending_worktree_restore: Option<PathBuf>,
 }
 
 impl From<&ThreadMetadata> for acp_thread::AgentSessionInfo {
@@ -158,7 +162,7 @@ pub struct ArchivedGitWorktree {
     /// Absolute path of the main repository ("main worktree") that owned this worktree.
     /// Used when restoring, to reattach the recreated worktree to the correct main worktree.
     /// If the main repo isn't found on disk, unarchiving fails because we only store the
-    /// commit hash, and without the actual git repo's contents, we can't restore the files.
+    /// commit hash, and without the actual git repo being available, we can't restore the files.
     pub main_repo_path: PathBuf,
     /// Branch that was checked out in the worktree at archive time. `None` if
     /// the worktree was in detached HEAD state, which isn't supported in Zed, but
@@ -520,6 +524,33 @@ impl ThreadMetadataStore {
         }
     }
 
+    pub fn set_pending_worktree_restore(
+        &mut self,
+        session_id: &acp::SessionId,
+        main_repo_path: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(thread) = self.threads.get_mut(session_id) {
+            thread.pending_worktree_restore = main_repo_path;
+            cx.notify();
+        }
+    }
+
+    pub fn complete_worktree_restore(
+        &mut self,
+        session_id: &acp::SessionId,
+        new_folder_paths: PathList,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(thread) = self.threads.get(session_id).cloned() {
+            let mut updated = thread;
+            updated.pending_worktree_restore = None;
+            updated.folder_paths = new_folder_paths;
+            self.save_internal(updated);
+            cx.notify();
+        }
+    }
+
     pub fn delete(&mut self, session_id: acp::SessionId, cx: &mut Context<Self>) {
         if !cx.has_flag::<AgentV2FeatureFlag>() {
             return;
@@ -711,6 +742,7 @@ impl ThreadMetadataStore {
                     folder_paths,
                     main_worktree_paths,
                     archived,
+                    pending_worktree_restore: None,
                 };
 
                 self.save(metadata, cx);
@@ -1005,6 +1037,7 @@ impl Column for ThreadMetadata {
                 folder_paths,
                 main_worktree_paths,
                 archived,
+                pending_worktree_restore: None,
             },
             next,
         ))
@@ -1083,6 +1116,7 @@ mod tests {
             created_at: Some(updated_at),
             folder_paths,
             main_worktree_paths: PathList::default(),
+            pending_worktree_restore: None,
         }
     }
 
@@ -1300,6 +1334,7 @@ mod tests {
             folder_paths: project_a_paths.clone(),
             main_worktree_paths: PathList::default(),
             archived: false,
+            pending_worktree_restore: None,
         };
 
         cx.update(|cx| {
@@ -1410,6 +1445,7 @@ mod tests {
             folder_paths: project_paths.clone(),
             main_worktree_paths: PathList::default(),
             archived: false,
+            pending_worktree_restore: None,
         };
 
         cx.update(|cx| {
