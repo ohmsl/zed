@@ -2464,6 +2464,20 @@ impl Sidebar {
             worktree_path.clone()
         };
 
+        // Clean up any stale worktree registration at this path (e.g. from
+        // a previous archive that deleted the directory but left the git
+        // metadata behind).
+        let cleanup_result = main_repo.update(cx, |repo, _cx| {
+            repo.remove_worktree(final_path.clone(), true)
+        });
+        match cleanup_result.await {
+            Ok(Ok(())) => log::info!(
+                "Cleaned up stale worktree registration at {}",
+                final_path.display()
+            ),
+            _ => {} // Not registered or already clean — that's fine
+        }
+
         // Create the worktree via the Repository entity (detached, since
         // the commit is a WIP snapshot, not a real branch tip).
         let create_result = main_repo.update(cx, |repo, _cx| {
@@ -2903,12 +2917,14 @@ impl Sidebar {
             .any(|entry| &entry.session_id != session_id);
 
         // Collect info for each path that is a linked git worktree.
+        #[allow(clippy::type_complexity)]
         let mut linked_worktrees: Vec<(
             Entity<git_store::Repository>,
             PathBuf,
             Option<String>,
             std::sync::Arc<std::path::Path>,
             Option<Entity<git_store::Repository>>,
+            Option<Entity<Workspace>>,
         )> = Vec::new();
         for worktree_path in folder_paths.paths() {
             if let Some(info) = workspaces.iter().find_map(|workspace| {
@@ -2933,6 +2949,7 @@ impl Sidebar {
                                 branch_name,
                                 main_repo_path,
                                 main_repo,
+                                Some(workspace.clone()),
                             ))
                         } else {
                             None
@@ -2949,8 +2966,14 @@ impl Sidebar {
 
         let fs = <dyn fs::Fs>::global(cx);
 
-        for (worktree_repo, worktree_path, branch_name, main_repo_path, main_repo) in
-            linked_worktrees
+        for (
+            worktree_repo,
+            worktree_path,
+            branch_name,
+            main_repo_path,
+            main_repo,
+            worktree_workspace,
+        ) in linked_worktrees
         {
             let session_id = session_id.clone();
             let folder_paths = folder_paths.clone();
@@ -2965,10 +2988,12 @@ impl Sidebar {
                     branch_name,
                     main_repo_path,
                     main_repo,
+                    worktree_workspace,
                     is_last_thread,
                     session_id,
                     folder_paths,
                     fs,
+                    this.clone(),
                     cx,
                 )
                 .await;
@@ -2989,10 +3014,12 @@ impl Sidebar {
         branch_name: Option<String>,
         main_repo_path: std::sync::Arc<std::path::Path>,
         main_repo: Option<Entity<git_store::Repository>>,
+        worktree_workspace: Option<Entity<Workspace>>,
         is_last_thread: bool,
         session_id: acp::SessionId,
         folder_paths: PathList,
         fs: std::sync::Arc<dyn fs::Fs>,
+        sidebar: WeakEntity<Sidebar>,
         cx: &mut AsyncWindowContext,
     ) -> anyhow::Result<()> {
         if !is_last_thread {
@@ -3379,42 +3406,25 @@ impl Sidebar {
             }
         }
 
-        // Use `git worktree remove --force` which handles both the git
-        // bookkeeping and directory deletion. Fall back to manual removal
-        // only if git can't do it.
-        let dir_removed = if let Some(main_repo) = &main_repo {
-            let receiver = main_repo.update(cx, |repo, _cx| {
-                repo.remove_worktree(worktree_path.clone(), true)
-            });
-            match receiver.await {
-                Ok(Ok(())) => true,
-                Ok(Err(err)) => {
-                    log::warn!("git worktree remove failed: {err}, trying manual removal");
-                    fs.remove_dir(
-                        &worktree_path,
-                        fs::RemoveOptions {
-                            recursive: true,
-                            ignore_if_not_exists: true,
-                        },
-                    )
-                    .await
-                    .is_ok()
-                }
-                Err(_) => {
-                    log::warn!("git worktree remove was canceled, trying manual removal");
-                    fs.remove_dir(
-                        &worktree_path,
-                        fs::RemoveOptions {
-                            recursive: true,
-                            ignore_if_not_exists: true,
-                        },
-                    )
-                    .await
-                    .is_ok()
-                }
-            }
-        } else {
-            fs.remove_dir(
+        // Remove the worktree's workspace from the MultiWorkspace before
+        // deleting the directory, so the file watcher stops scanning it.
+        if let Some(worktree_workspace) = &worktree_workspace {
+            sidebar
+                .update_in(cx, |sidebar, window, cx| {
+                    if let Some(multi_workspace) = sidebar.multi_workspace.upgrade() {
+                        multi_workspace.update(cx, |mw, cx| {
+                            mw.remove(worktree_workspace, window, cx);
+                        });
+                    }
+                })
+                .ok();
+        }
+
+        // Delete the directory first (it may contain uncommitted files that
+        // prevent `git worktree remove` from succeeding even with --force),
+        // then clean up git's worktree registration.
+        let dir_removed = fs
+            .remove_dir(
                 &worktree_path,
                 fs::RemoveOptions {
                     recursive: true,
@@ -3422,8 +3432,24 @@ impl Sidebar {
                 },
             )
             .await
-            .is_ok()
-        };
+            .is_ok();
+
+        if dir_removed {
+            if let Some(main_repo) = &main_repo {
+                let receiver = main_repo.update(cx, |repo, _cx| {
+                    repo.remove_worktree(worktree_path.clone(), true)
+                });
+                match receiver.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        log::warn!("git worktree remove failed after directory deletion: {err}");
+                    }
+                    Err(_) => {
+                        log::warn!("git worktree remove was canceled after directory deletion");
+                    }
+                }
+            }
+        }
 
         if !dir_removed {
             let undo_ok = if commit_ok {
