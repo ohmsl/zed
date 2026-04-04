@@ -88,10 +88,7 @@ impl OpenAiSubscribedProvider {
             credentials_provider,
         });
 
-        let provider = Self {
-            http_client,
-            state,
-        };
+        let provider = Self { http_client, state };
 
         provider.load_credentials(cx);
 
