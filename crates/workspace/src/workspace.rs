@@ -3299,6 +3299,14 @@ impl Workspace {
         state.task.clone().unwrap()
     }
 
+    pub fn save_for_root_removal(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<bool>> {
+        self.save_all_internal(SaveIntent::Close, window, cx)
+    }
+
     fn save_all_internal(
         &mut self,
         mut save_intent: SaveIntent,

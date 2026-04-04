@@ -4,6 +4,7 @@ use acp_thread::ThreadStatus;
 use action_log::DiffStats;
 use agent_client_protocol::{self as acp};
 use agent_settings::AgentSettings;
+use agent_ui::thread_archive_cleanup;
 use agent_ui::thread_metadata_store::{ThreadMetadata, ThreadMetadataStore};
 use agent_ui::threads_archive_view::{
     ThreadsArchiveView, ThreadsArchiveViewEvent, format_history_entry_timestamp,
@@ -2386,7 +2387,17 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.archive(session_id, cx));
+        let current_workspace = self.active_entry_workspace().cloned();
+        let Some(multi_workspace_handle) = window.window_handle().downcast::<MultiWorkspace>()
+        else {
+            return;
+        };
+        thread_archive_cleanup::archive_thread(
+            session_id,
+            current_workspace,
+            multi_workspace_handle,
+            cx,
+        );
 
         // If we're archiving the currently focused thread, move focus to the
         // nearest thread within the same project group. We never cross group
