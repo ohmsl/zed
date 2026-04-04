@@ -23,8 +23,7 @@ use util::ResultExt as _;
 
 use crate::provider::open_ai::{OpenAiResponseEventMapper, into_open_ai_response};
 
-const PROVIDER_ID: LanguageModelProviderId =
-    LanguageModelProviderId::new("openai-subscribed");
+const PROVIDER_ID: LanguageModelProviderId = LanguageModelProviderId::new("openai-subscribed");
 const PROVIDER_NAME: LanguageModelProviderName =
     LanguageModelProviderName::new("ChatGPT Subscription");
 
@@ -64,9 +63,7 @@ impl State {
     }
 
     fn email(&self) -> Option<&str> {
-        self.credentials
-            .as_ref()
-            .and_then(|c| c.email.as_deref())
+        self.credentials.as_ref().and_then(|c| c.email.as_deref())
     }
 
     fn is_signing_in(&self) -> bool {
@@ -93,7 +90,7 @@ impl OpenAiSubscribedProvider {
 
         let provider = Self {
             http_client,
-            state: state.clone(),
+            state,
         };
 
         provider.load_credentials(cx);
@@ -265,11 +262,8 @@ impl LanguageModelProvider for OpenAiSubscribedProvider {
     ) -> AnyView {
         let state = self.state.clone();
         let http_client = self.http_client.clone();
-        cx.new(|_cx| ConfigurationView {
-            state,
-            http_client,
-        })
-        .into()
+        cx.new(|_cx| ConfigurationView { state, http_client })
+            .into()
     }
 
     fn reset_credentials(&self, cx: &mut App) -> Task<Result<()>> {
@@ -458,7 +452,7 @@ async fn get_fresh_credentials(
 ) -> Result<CodexCredentials, LanguageModelCompletionError> {
     let creds = state
         .read_with(&*cx, |s, _| s.credentials.clone())
-        .map_err(|e| LanguageModelCompletionError::Other(e.into()))?
+        .map_err(LanguageModelCompletionError::Other)?
         .ok_or(LanguageModelCompletionError::NoApiKey {
             provider: PROVIDER_NAME,
         })?;
@@ -473,7 +467,7 @@ async fn get_fresh_credentials(
 
     let credentials_provider = state
         .read_with(&*cx, |s, _| s.credentials_provider.clone())
-        .map_err(|e| LanguageModelCompletionError::Other(e.into()))?;
+        .map_err(LanguageModelCompletionError::Other)?;
 
     let json = serde_json::to_vec(&refreshed)
         .map_err(|e| LanguageModelCompletionError::Other(e.into()))?;
@@ -487,7 +481,7 @@ async fn get_fresh_credentials(
         .update(cx, |s, _| {
             s.credentials = Some(refreshed.clone());
         })
-        .map_err(|e| LanguageModelCompletionError::Other(e.into()))?;
+        .map_err(LanguageModelCompletionError::Other)?;
 
     Ok(refreshed)
 }
@@ -632,9 +626,8 @@ async fn refresh_token(
     client: &Arc<dyn HttpClient>,
     refresh_token: &str,
 ) -> Result<CodexCredentials> {
-    let body = format!(
-        "grant_type=refresh_token&client_id={CLIENT_ID}&refresh_token={refresh_token}"
-    );
+    let body =
+        format!("grant_type=refresh_token&client_id={CLIENT_ID}&refresh_token={refresh_token}");
 
     let request = HttpRequest::builder()
         .method(Method::POST)
@@ -758,12 +751,12 @@ impl Render for ConfigurationView {
             let weak_state = self.state.downgrade();
             return v_flex()
                 .child(
-                    ConfiguredApiCard::new(SharedString::from(label)).on_click(
-                        cx.listener(move |_this, _, _window, cx| {
+                    ConfiguredApiCard::new(SharedString::from(label)).on_click(cx.listener(
+                        move |_this, _, _window, cx| {
                             let weak_state = weak_state.clone();
                             cx.spawn(async move |_this, cx| {
-                                let credentials_provider =
-                                    weak_state.read_with(&*cx, |s, _| s.credentials_provider.clone())?;
+                                let credentials_provider = weak_state
+                                    .read_with(&*cx, |s, _| s.credentials_provider.clone())?;
                                 credentials_provider
                                     .delete_credentials(CREDENTIALS_KEY, &*cx)
                                     .await
@@ -775,8 +768,8 @@ impl Render for ConfigurationView {
                                 anyhow::Ok(())
                             })
                             .detach();
-                        }),
-                    ),
+                        },
+                    )),
                 )
                 .into_any_element();
         }
