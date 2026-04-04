@@ -29,6 +29,8 @@ pub struct Request {
     pub prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -315,17 +317,20 @@ pub async fn stream_response(
     api_url: &str,
     api_key: &str,
     request: Request,
+    extra_headers: Vec<(String, String)>,
 ) -> Result<BoxStream<'static, Result<StreamEvent>>, RequestError> {
     let uri = format!("{api_url}/responses");
-    let request_builder = HttpRequest::builder()
+    let mut request_builder = HttpRequest::builder()
         .method(Method::POST)
         .uri(uri)
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {}", api_key.trim()));
+    for (name, value) in &extra_headers {
+        request_builder = request_builder.header(name.as_str(), value.as_str());
+    }
 
     let is_streaming = request.stream;
-    let request = request_builder
-        .body(AsyncBody::from(
+    let request = request_builder.body(AsyncBody::from(
             serde_json::to_string(&request).map_err(|e| RequestError::Other(e.into()))?,
         ))
         .map_err(|e| RequestError::Other(e.into()))?;

@@ -290,6 +290,7 @@ impl OpenAiLanguageModel {
                 &api_url,
                 &api_key,
                 request,
+                vec![],
             );
             let response = request.await?;
             Ok(response)
@@ -633,6 +634,7 @@ pub fn into_open_ai_response(
             effort,
             summary: Some(open_ai::responses::ReasoningSummaryMode::Auto),
         }),
+        store: None,
     }
 }
 
