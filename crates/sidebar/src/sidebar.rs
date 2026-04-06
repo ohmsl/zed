@@ -2465,6 +2465,18 @@ impl Sidebar {
             cx,
         );
 
+        let active_entry_desc = match &self.active_entry {
+            Some(ActiveEntry::Thread { session_id, .. }) => format!("Thread({:?})", session_id),
+            Some(ActiveEntry::Draft(_)) => "Draft".to_string(),
+            None => "None".to_string(),
+        };
+        log::info!(
+            "archive_thread: session_id={:?}, roots_to_delete={:?}, active_entry={}",
+            session_id,
+            outcome.roots_to_delete,
+            active_entry_desc,
+        );
+
         // If we're archiving the currently focused thread, move focus to the
         // nearest thread within the same project group. We never cross group
         // boundaries — if the group has no other threads, clear focus and open
@@ -2492,6 +2504,12 @@ impl Sidebar {
                         })?;
                 self.workspace_for_group(path_list, cx)
             });
+
+            log::info!(
+                "archive_thread: active thread matched. current_pos={:?}, group_workspace={}",
+                current_pos,
+                group_workspace.is_some(),
+            );
 
             // If the group's workspace is about to lose all its roots, find a
             // surviving workspace in the same window instead.
@@ -2544,6 +2562,12 @@ impl Sidebar {
                 })
             });
 
+            log::info!(
+                "archive_thread: safe_workspace={}, next_thread={}",
+                safe_workspace.is_some(),
+                next_thread.is_some(),
+            );
+
             if let Some(next) = next_thread {
                 let next_metadata = next.metadata.clone();
                 // Use the thread's own workspace when it has one open (e.g. an absorbed
@@ -2590,6 +2614,7 @@ impl Sidebar {
                     }
                 }
             } else {
+                log::info!("archive_thread: no next thread, using fallback");
                 let fallback = safe_workspace.or(group_workspace);
                 if let Some(workspace) = &fallback {
                     self.active_entry = Some(ActiveEntry::Draft(workspace.clone()));
