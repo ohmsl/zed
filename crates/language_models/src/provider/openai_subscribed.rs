@@ -603,14 +603,14 @@ async fn do_oauth_flow(
         .id_token
         .as_deref()
         .unwrap_or(tokens.access_token.as_str());
-    let account_id = extract_account_id(jwt);
+    let claims = extract_jwt_claims(jwt);
 
     Ok(CodexCredentials {
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
         expires_at_ms: now_ms() + tokens.expires_in * 1000,
-        account_id,
-        email: tokens.email,
+        account_id: claims.account_id,
+        email: claims.email.or(tokens.email),
     })
 }
 
@@ -738,41 +738,70 @@ async fn refresh_token(
         .id_token
         .as_deref()
         .unwrap_or(tokens.access_token.as_str());
-    let account_id = extract_account_id(jwt);
+    let claims = extract_jwt_claims(jwt);
 
     Ok(CodexCredentials {
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
         expires_at_ms: now_ms() + tokens.expires_in * 1000,
-        account_id,
-        email: tokens.email,
+        account_id: claims.account_id,
+        email: claims.email.or(tokens.email),
     })
 }
 
-/// Extract chatgpt_account_id from a JWT payload (base64url middle segment).
-/// Checks three claim locations, matching Roo Code's implementation.
-fn extract_account_id(jwt: &str) -> Option<String> {
-    let payload_b64 = jwt.split('.').nth(1)?;
-    let payload = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
-    let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+struct JwtClaims {
+    account_id: Option<String>,
+    email: Option<String>,
+}
 
-    if let Some(id) = claims.get("chatgpt_account_id").and_then(|v| v.as_str()) {
-        return Some(id.to_owned());
-    }
-    if let Some(id) = claims
-        .get("https://api.openai.com/auth")
-        .and_then(|v| v.get("chatgpt_account_id"))
+/// Extract claims from a JWT payload (base64url middle segment).
+/// Extracts `chatgpt_account_id` from three possible locations (matching Roo Code's
+/// implementation) and the `email` claim.
+fn extract_jwt_claims(jwt: &str) -> JwtClaims {
+    let Some(payload_b64) = jwt.split('.').nth(1) else {
+        return JwtClaims {
+            account_id: None,
+            email: None,
+        };
+    };
+    let Ok(payload) = URL_SAFE_NO_PAD.decode(payload_b64) else {
+        return JwtClaims {
+            account_id: None,
+            email: None,
+        };
+    };
+    let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&payload) else {
+        return JwtClaims {
+            account_id: None,
+            email: None,
+        };
+    };
+
+    let account_id = claims
+        .get("chatgpt_account_id")
         .and_then(|v| v.as_str())
-    {
-        return Some(id.to_owned());
-    }
-    claims
-        .get("organizations")
-        .and_then(|v| v.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|org| org.get("id"))
+        .or_else(|| {
+            claims
+                .get("https://api.openai.com/auth")
+                .and_then(|v| v.get("chatgpt_account_id"))
+                .and_then(|v| v.as_str())
+        })
+        .or_else(|| {
+            claims
+                .get("organizations")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|org| org.get("id"))
+                .and_then(|v| v.as_str())
+        })
+        .map(|s| s.to_owned());
+
+    let email = claims
+        .get("email")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_owned())
+        .map(|s| s.to_owned());
+
+    JwtClaims { account_id, email }
 }
 
 fn now_ms() -> u64 {
