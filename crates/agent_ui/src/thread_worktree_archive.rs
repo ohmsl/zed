@@ -694,7 +694,7 @@ async fn persist_worktree_state(
         .clone()
         .context("no worktree repo entity for persistence")?;
 
-    // Read original HEAD SHA before creating any WIP commits
+    // Step 0: Read original HEAD SHA before creating any WIP commits
     let original_commit_hash = worktree_repo
         .update(cx, |repo, _cx| repo.head_sha())
         .await
@@ -702,7 +702,7 @@ async fn persist_worktree_state(
         .context("failed to read original HEAD SHA")?
         .context("HEAD SHA is None before WIP commits")?;
 
-    // Create WIP commit #1 (staged state)
+    // Step 1: Create WIP commit #1 (staged state)
     let askpass = AskPassDelegate::new(cx, |_, _, _| {});
     let commit_rx = worktree_repo.update(cx, |repo, cx| {
         repo.commit(
@@ -738,7 +738,7 @@ async fn persist_worktree_state(
         }
     };
 
-    // Stage all files including untracked
+    // Step 2: Stage all files including untracked
     let stage_rx = worktree_repo.update(cx, |repo, _cx| repo.stage_all_including_untracked());
     if let Err(error) = stage_rx
         .await
@@ -752,7 +752,7 @@ async fn persist_worktree_state(
         return Err(error.context("failed to stage all files including untracked"));
     }
 
-    // Create WIP commit #2 (unstaged/untracked state)
+    // Step 3: Create WIP commit #2 (unstaged/untracked state)
     let askpass = AskPassDelegate::new(cx, |_, _, _| {});
     let commit_rx = worktree_repo.update(cx, |repo, cx| {
         repo.commit(
@@ -778,7 +778,7 @@ async fn persist_worktree_state(
         return Err(error);
     }
 
-    // Read HEAD SHA after WIP commits
+    // Step 4: Read HEAD SHA after WIP commits
     let head_sha_result = worktree_repo
         .update(cx, |repo, _cx| repo.head_sha())
         .await
@@ -796,7 +796,7 @@ async fn persist_worktree_state(
         }
     };
 
-    // Create DB record
+    // Step 5: Create DB record
     let store = cx.update(|cx| ThreadMetadataStore::global(cx));
     let worktree_path_str = root.root_path.to_string_lossy().to_string();
     let main_repo_path_str = root.main_repo_path.to_string_lossy().to_string();
@@ -827,7 +827,7 @@ async fn persist_worktree_state(
         }
     };
 
-    // Link all threads on this worktree to the archived record
+    // Step 6: Link all threads on this worktree to the archived record
     let session_ids: Vec<acp::SessionId> = store.read_with(cx, |store, _cx| {
         store
             .all_session_ids_for_path(&plan.folder_paths)
@@ -864,7 +864,7 @@ async fn persist_worktree_state(
         }
     }
 
-    // Create git ref on main repo (non-fatal)
+    // Step 7: Create git ref on main repo (non-fatal)
     let ref_name = archived_worktree_ref_name(archived_worktree_id);
     let main_repo_result = find_or_create_repository(&root.main_repo_path, cx).await;
     match main_repo_result {
@@ -963,15 +963,15 @@ pub async fn restore_worktree_via_git(
     row: &ArchivedGitWorktree,
     cx: &mut AsyncApp,
 ) -> Result<PathBuf> {
-    // Find the main repo entity and verify original_commit_hash exists
+    // Step 1: Find the main repo entity and verify original_commit_hash exists
     let (main_repo, _temp_project) = find_or_create_repository(&row.main_repo_path, cx).await?;
 
     let commit_exists = main_repo
         .update(cx, |repo, _cx| {
-            repo.commit_exists(row.original_commit_hash.clone())
+            repo.resolve_commit(row.original_commit_hash.clone())
         })
         .await
-        .map_err(|_| anyhow!("commit_exists check was canceled"))?
+        .map_err(|_| anyhow!("resolve_commit was canceled"))?
         .context("failed to check if original commit exists")?;
 
     if !commit_exists {
@@ -983,7 +983,7 @@ pub async fn restore_worktree_via_git(
         );
     }
 
-    // Check if worktree path already exists on disk
+    // Step 2: Check if worktree path already exists on disk
     let worktree_path = &row.worktree_path;
     let app_state = current_app_state(cx).context("no app state available")?;
     let already_exists = app_state.fs.metadata(worktree_path).await?.is_some();
@@ -1010,7 +1010,7 @@ pub async fn restore_worktree_via_git(
             true
         }
     } else {
-        // Create detached worktree at the unstaged commit
+        // Step 3: Create detached worktree at the unstaged commit
         let rx = main_repo.update(cx, |repo, _cx| {
             repo.create_worktree_detached(worktree_path.clone(), row.unstaged_commit_hash.clone())
         });
@@ -1024,10 +1024,10 @@ pub async fn restore_worktree_via_git(
         return Ok(worktree_path.clone());
     }
 
-    // Get the worktree's repo entity
+    // Step 4: Get the worktree's repo entity
     let (wt_repo, _temp_wt_project) = find_or_create_repository(worktree_path, cx).await?;
 
-    // Reset past the WIP commits to recover original state
+    // Step 5: Reset past the WIP commits to recover original state
     let mixed_reset_ok = {
         let rx = wt_repo.update(cx, |repo, cx| {
             repo.reset(row.staged_commit_hash.clone(), ResetMode::Mixed, cx)
@@ -1100,7 +1100,7 @@ pub async fn restore_worktree_via_git(
         }
     }
 
-    // Verify HEAD is at original_commit_hash
+    // Step 6: Verify HEAD is at original_commit_hash
     let current_head = wt_repo
         .update(cx, |repo, _cx| repo.head_sha())
         .await
@@ -1116,7 +1116,7 @@ pub async fn restore_worktree_via_git(
         );
     }
 
-    // Restore the branch
+    // Step 7: Restore the branch
     if let Some(branch_name) = &row.branch_name {
         // Check if the branch exists and points at original_commit_hash.
         // If it does, switch to it. If not, create a new branch there.
