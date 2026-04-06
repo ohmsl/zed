@@ -181,6 +181,12 @@ pub struct ArchivedGitWorktree {
     /// we had before archiving, including what was staged, what was unstaged, and
     /// what was committed.
     pub unstaged_commit_hash: String,
+    /// SHA of the commit that HEAD pointed at before we created the two WIP
+    /// commits during archival. After resetting past the WIP commits during
+    /// restore, HEAD should land back on this commit. It also serves as a
+    /// pre-restore sanity check (abort if this commit no longer exists in the
+    /// repo) and as a fallback target if the WIP resets fail.
+    pub original_commit_hash: String,
 }
 
 /// The store holds all metadata needed to show threads in the sidebar/the archive.
@@ -434,6 +440,7 @@ impl ThreadMetadataStore {
         branch_name: Option<String>,
         staged_commit_hash: String,
         unstaged_commit_hash: String,
+        original_commit_hash: String,
         cx: &App,
     ) -> Task<anyhow::Result<i64>> {
         let db = self.db.clone();
@@ -444,6 +451,7 @@ impl ThreadMetadataStore {
                 branch_name,
                 staged_commit_hash,
                 unstaged_commit_hash,
+                original_commit_hash,
             )
             .await
         })
@@ -743,6 +751,10 @@ impl Domain for ThreadMetadataDb {
             ALTER TABLE archived_git_worktrees ADD COLUMN unstaged_commit_hash TEXT;
             UPDATE archived_git_worktrees SET staged_commit_hash = commit_hash, unstaged_commit_hash = commit_hash WHERE staged_commit_hash IS NULL;
         ),
+        sql!(
+            ALTER TABLE archived_git_worktrees ADD COLUMN original_commit_hash TEXT;
+            UPDATE archived_git_worktrees SET original_commit_hash = commit_hash WHERE original_commit_hash IS NULL;
+        ),
     ];
 }
 
@@ -839,12 +851,13 @@ impl ThreadMetadataDb {
         branch_name: Option<String>,
         staged_commit_hash: String,
         unstaged_commit_hash: String,
+        original_commit_hash: String,
     ) -> anyhow::Result<i64> {
         self.write(move |conn| {
             let mut stmt = Statement::prepare(
                 conn,
-                "INSERT INTO archived_git_worktrees(worktree_path, main_repo_path, branch_name, commit_hash, staged_commit_hash, unstaged_commit_hash) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                "INSERT INTO archived_git_worktrees(worktree_path, main_repo_path, branch_name, commit_hash, staged_commit_hash, unstaged_commit_hash, original_commit_hash) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
                  RETURNING id",
             )?;
             let mut i = stmt.bind(&worktree_path, 1)?;
@@ -852,7 +865,8 @@ impl ThreadMetadataDb {
             i = stmt.bind(&branch_name, i)?;
             i = stmt.bind(&unstaged_commit_hash, i)?;
             i = stmt.bind(&staged_commit_hash, i)?;
-            stmt.bind(&unstaged_commit_hash, i)?;
+            i = stmt.bind(&unstaged_commit_hash, i)?;
+            stmt.bind(&original_commit_hash, i)?;
             stmt.maybe_row::<i64>()?.context("expected RETURNING id")
         })
         .await
@@ -881,7 +895,7 @@ impl ThreadMetadataDb {
         session_id: String,
     ) -> anyhow::Result<Vec<ArchivedGitWorktree>> {
         self.select_bound::<String, ArchivedGitWorktree>(
-            "SELECT a.id, a.worktree_path, a.main_repo_path, a.branch_name, a.staged_commit_hash, a.unstaged_commit_hash \
+            "SELECT a.id, a.worktree_path, a.main_repo_path, a.branch_name, a.staged_commit_hash, a.unstaged_commit_hash, a.original_commit_hash \
              FROM archived_git_worktrees a \
              JOIN thread_archived_worktrees t ON a.id = t.archived_worktree_id \
              WHERE t.session_id = ?1",
@@ -975,6 +989,7 @@ impl Column for ArchivedGitWorktree {
         let (branch_name, next): (Option<String>, i32) = Column::column(statement, next)?;
         let (staged_commit_hash, next): (String, i32) = Column::column(statement, next)?;
         let (unstaged_commit_hash, next): (String, i32) = Column::column(statement, next)?;
+        let (original_commit_hash, next): (String, i32) = Column::column(statement, next)?;
 
         Ok((
             ArchivedGitWorktree {
@@ -984,6 +999,7 @@ impl Column for ArchivedGitWorktree {
                 branch_name,
                 staged_commit_hash,
                 unstaged_commit_hash,
+                original_commit_hash,
             },
             next,
         ))
@@ -2132,6 +2148,7 @@ mod tests {
                     Some("feature-branch".to_string()),
                     "staged_aaa".to_string(),
                     "unstaged_bbb".to_string(),
+                    "original_000".to_string(),
                     cx,
                 )
             })
@@ -2160,6 +2177,7 @@ mod tests {
         assert_eq!(wt.branch_name.as_deref(), Some("feature-branch"));
         assert_eq!(wt.staged_commit_hash, "staged_aaa");
         assert_eq!(wt.unstaged_commit_hash, "unstaged_bbb");
+        assert_eq!(wt.original_commit_hash, "original_000");
     }
 
     #[gpui::test]
@@ -2175,6 +2193,7 @@ mod tests {
                     Some("main".to_string()),
                     "deadbeef".to_string(),
                     "deadbeef".to_string(),
+                    "original_000".to_string(),
                     cx,
                 )
             })
@@ -2215,6 +2234,7 @@ mod tests {
                     None,
                     "abc123".to_string(),
                     "abc123".to_string(),
+                    "original_000".to_string(),
                     cx,
                 )
             })
@@ -2267,6 +2287,7 @@ mod tests {
                     Some("branch-a".to_string()),
                     "staged_a".to_string(),
                     "unstaged_a".to_string(),
+                    "original_000".to_string(),
                     cx,
                 )
             })
@@ -2281,6 +2302,7 @@ mod tests {
                     Some("branch-b".to_string()),
                     "staged_b".to_string(),
                     "unstaged_b".to_string(),
+                    "original_000".to_string(),
                     cx,
                 )
             })
