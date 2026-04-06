@@ -46,6 +46,8 @@ pub struct ThreadItem {
     project_paths: Option<Arc<[PathBuf]>>,
     project_name: Option<SharedString>,
     worktrees: Vec<ThreadItemWorktreeInfo>,
+    pending_worktree_restore: bool,
+    on_cancel_restore: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
     on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
     on_hover: Box<dyn Fn(&bool, &mut Window, &mut App) + 'static>,
     action_slot: Option<AnyElement>,
@@ -78,6 +80,8 @@ impl ThreadItem {
             project_paths: None,
             project_name: None,
             worktrees: Vec::new(),
+            pending_worktree_restore: false,
+            on_cancel_restore: None,
             on_click: None,
             on_hover: Box::new(|_, _, _| {}),
             action_slot: None,
@@ -171,6 +175,19 @@ impl ThreadItem {
         self
     }
 
+    pub fn pending_worktree_restore(mut self, pending: bool) -> Self {
+        self.pending_worktree_restore = pending;
+        self
+    }
+
+    pub fn on_cancel_restore(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_cancel_restore = Some(Box::new(handler));
+        self
+    }
+
     pub fn hovered(mut self, hovered: bool) -> Self {
         self.hovered = hovered;
         self
@@ -211,7 +228,7 @@ impl ThreadItem {
 }
 
 impl RenderOnce for ThreadItem {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(mut self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let color = cx.theme().colors();
         let sidebar_base_bg = color
             .title_bar_background
@@ -359,7 +376,7 @@ impl RenderOnce for ThreadItem {
 
         let has_project_name = self.project_name.is_some();
         let has_project_paths = project_paths.is_some();
-        let has_worktree = !self.worktrees.is_empty();
+        let has_worktree = !self.worktrees.is_empty() || self.pending_worktree_restore;
         let has_timestamp = !self.timestamp.is_empty();
         let timestamp = self.timestamp;
 
@@ -486,6 +503,44 @@ impl RenderOnce for ThreadItem {
                                 })
                                 .into_any_element(),
                         );
+                    }
+
+                    if self.pending_worktree_restore {
+                        let on_cancel = self.on_cancel_restore.take();
+                        let restore_element = h_flex()
+                            .id(format!("{}-worktree-restore", self.id.clone()))
+                            .gap_1()
+                            .child(
+                                Icon::new(IconName::LoadCircle)
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Muted)
+                                    .with_rotate_animation(2),
+                            )
+                            .child(
+                                Label::new("Restoring worktree\u{2026}")
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .when_some(on_cancel, |this, on_cancel| {
+                                this.child(
+                                    IconButton::new(
+                                        format!("{}-cancel-restore", self.id.clone()),
+                                        IconName::Close,
+                                    )
+                                    .icon_size(IconSize::XSmall)
+                                    .icon_color(Color::Muted)
+                                    .tooltip(Tooltip::text("Cancel Restore"))
+                                    .on_click(
+                                        move |event, window, cx| {
+                                            cx.stop_propagation();
+                                            on_cancel(event, window, cx);
+                                        },
+                                    ),
+                                )
+                            })
+                            .tooltip(Tooltip::text("Restoring the Git worktree for this thread"))
+                            .into_any_element();
+                        worktree_labels.push(restore_element);
                     }
 
                     this.child(

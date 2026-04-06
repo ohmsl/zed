@@ -3300,6 +3300,14 @@ impl Workspace {
         state.task.clone().unwrap()
     }
 
+    pub fn save_for_root_removal(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<bool>> {
+        self.save_all_internal(SaveIntent::Close, window, cx)
+    }
+
     fn save_all_internal(
         &mut self,
         mut save_intent: SaveIntent,
@@ -8710,6 +8718,22 @@ pub async fn restore_multiworkspace(
             .update(cx, |multi_workspace, window, cx| {
                 if let Some(workspace) = multi_workspace.workspaces().first().cloned() {
                     multi_workspace.activate(workspace, window, cx);
+                }
+            })
+            .ok();
+    }
+
+    if !state.project_group_keys.is_empty() {
+        window_handle
+            .update(cx, |multi_workspace, _window, _cx| {
+                for serialized_key in &state.project_group_keys {
+                    let paths = PathList::deserialize(&serialized_key.path_list);
+                    let host = match &serialized_key.location {
+                        SerializedWorkspaceLocation::Local => None,
+                        SerializedWorkspaceLocation::Remote(opts) => Some(opts.clone()),
+                    };
+                    let key = ProjectGroupKey::new(host, paths);
+                    multi_workspace.add_project_group_key(key);
                 }
             })
             .ok();

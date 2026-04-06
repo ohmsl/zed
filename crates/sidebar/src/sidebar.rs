@@ -5,6 +5,7 @@ use action_log::DiffStats;
 use agent_client_protocol::{self as acp};
 use agent_settings::AgentSettings;
 use agent_ui::thread_metadata_store::{ThreadMetadata, ThreadMetadataStore};
+use agent_ui::thread_worktree_archive;
 use agent_ui::threads_archive_view::{
     ThreadsArchiveView, ThreadsArchiveViewEvent, format_history_entry_timestamp,
 };
@@ -16,8 +17,8 @@ use chrono::{DateTime, Utc};
 use editor::Editor;
 use feature_flags::{AgentV2FeatureFlag, FeatureFlagViewExt as _};
 use gpui::{
-    Action as _, AnyElement, App, Context, Entity, FocusHandle, Focusable, KeyContext, ListState,
-    Pixels, Render, SharedString, WeakEntity, Window, WindowHandle, linear_color_stop,
+    Action as _, AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, KeyContext,
+    ListState, Pixels, Render, SharedString, WeakEntity, Window, WindowHandle, linear_color_stop,
     linear_gradient, list, prelude::*, px,
 };
 use menu::{
@@ -34,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use settings::Settings as _;
 use std::collections::{HashMap, HashSet};
 use std::mem;
+use std::path::PathBuf;
 use std::rc::Rc;
 use theme::ActiveTheme;
 use ui::{
@@ -45,8 +47,8 @@ use util::ResultExt as _;
 use util::path_list::{PathList, SerializedPathList};
 use workspace::{
     AddFolderToProject, CloseWindow, FocusWorkspaceSidebar, MultiWorkspace, MultiWorkspaceEvent,
-    Open, Sidebar as WorkspaceSidebar, SidebarSide, ToggleWorkspaceSidebar, Workspace, WorkspaceId,
-    sidebar_side_context_menu,
+    Open, Sidebar as WorkspaceSidebar, SidebarSide, Toast, ToggleWorkspaceSidebar, Workspace,
+    WorkspaceId, notifications::NotificationId, sidebar_side_context_menu,
 };
 
 use zed_actions::OpenRecent;
@@ -2182,33 +2184,127 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        ThreadMetadataStore::global(cx)
-            .update(cx, |store, cx| store.unarchive(&metadata.session_id, cx));
+        let session_id = metadata.session_id.clone();
 
-        if !metadata.folder_paths.paths().is_empty() {
-            let path_list = metadata.folder_paths.clone();
-            if let Some(workspace) = self.find_current_workspace_for_path_list(&path_list, cx) {
+        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.unarchive(&session_id, cx));
+
+        if metadata.folder_paths.paths().is_empty() {
+            let active_workspace = self.multi_workspace.upgrade().and_then(|w| {
+                w.read(cx)
+                    .workspaces()
+                    .get(w.read(cx).active_workspace_index())
+                    .cloned()
+            });
+
+            if let Some(workspace) = active_workspace {
                 self.activate_thread_locally(&metadata, &workspace, window, cx);
-            } else if let Some((target_window, workspace)) =
-                self.find_open_workspace_for_path_list(&path_list, cx)
-            {
-                self.activate_thread_in_other_window(metadata, workspace, target_window, cx);
-            } else {
-                self.open_workspace_and_activate_thread(metadata, path_list, window, cx);
             }
             return;
         }
 
-        let active_workspace = self.multi_workspace.upgrade().and_then(|w| {
-            w.read(cx)
-                .workspaces()
-                .get(w.read(cx).active_workspace_index())
-                .cloned()
-        });
+        let store = ThreadMetadataStore::global(cx);
+        let task = store
+            .read(cx)
+            .get_archived_worktrees_for_thread(&session_id.0, cx);
+        let path_list = metadata.folder_paths.clone();
 
-        if let Some(workspace) = active_workspace {
-            self.activate_thread_locally(&metadata, &workspace, window, cx);
-        }
+        cx.spawn_in(window, async move |this, cx| {
+            let archived_worktrees = task.await?;
+
+            if archived_worktrees.is_empty() {
+                this.update_in(cx, |this, window, cx| {
+                    if let Some(workspace) =
+                        this.find_current_workspace_for_path_list(&path_list, cx)
+                    {
+                        this.activate_thread_locally(&metadata, &workspace, window, cx);
+                    } else if let Some((target_window, workspace)) =
+                        this.find_open_workspace_for_path_list(&path_list, cx)
+                    {
+                        this.activate_thread_in_other_window(
+                            metadata,
+                            workspace,
+                            target_window,
+                            cx,
+                        );
+                    } else {
+                        this.open_workspace_and_activate_thread(metadata, path_list, window, cx);
+                    }
+                })?;
+                return anyhow::Ok(());
+            }
+
+            let first = &archived_worktrees[0];
+            let main_repo_path = first.main_repo_path.clone();
+
+            cx.update(|_window, cx| {
+                store.update(cx, |store, cx| {
+                    store.set_pending_worktree_restore(&session_id, Some(main_repo_path), cx);
+                });
+            })?;
+
+            let mut path_replacements: Vec<(PathBuf, PathBuf)> = Vec::new();
+            for row in &archived_worktrees {
+                match thread_worktree_archive::restore_worktree_via_git(row, &mut *cx).await {
+                    Ok(restored_path) => {
+                        thread_worktree_archive::cleanup_archived_worktree_record(row, &mut *cx)
+                            .await;
+                        path_replacements.push((row.worktree_path.clone(), restored_path));
+                    }
+                    Err(error) => {
+                        log::error!("Failed to restore worktree: {error:#}");
+                        cx.update(|_window, cx| {
+                            store.update(cx, |store, cx| {
+                                store.set_pending_worktree_restore(&session_id, None, cx);
+                            });
+                        })?;
+                        this.update_in(cx, |this, _window, cx| {
+                            if let Some(multi_workspace) = this.multi_workspace.upgrade() {
+                                let workspace = multi_workspace.read(cx).workspace().clone();
+                                workspace.update(cx, |workspace, cx| {
+                                    struct RestoreWorktreeErrorToast;
+                                    workspace.show_toast(
+                                        Toast::new(
+                                            NotificationId::unique::<RestoreWorktreeErrorToast>(),
+                                            format!("Failed to restore worktree: {error:#}"),
+                                        )
+                                        .autohide(),
+                                        cx,
+                                    );
+                                });
+                            }
+                        })
+                        .ok();
+                        return anyhow::Ok(());
+                    }
+                }
+            }
+
+            if !path_replacements.is_empty() {
+                cx.update(|_window, cx| {
+                    store.update(cx, |store, cx| {
+                        store.complete_worktree_restore(&session_id, &path_replacements, cx);
+                    });
+                })?;
+
+                let updated_metadata =
+                    cx.update(|_window, cx| store.read(cx).entry(&session_id).cloned())?;
+
+                if let Some(updated_metadata) = updated_metadata {
+                    let new_paths = updated_metadata.folder_paths.clone();
+                    this.update_in(cx, |this, window, cx| {
+                        this.open_workspace_and_activate_thread(
+                            updated_metadata,
+                            new_paths,
+                            window,
+                            cx,
+                        );
+                    })?;
+                }
+            }
+
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
     }
 
     fn expand_selected_entry(
@@ -2357,7 +2453,17 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.archive(session_id, cx));
+        let current_workspace = self.active_entry_workspace().cloned();
+        let Some(multi_workspace_handle) = window.window_handle().downcast::<MultiWorkspace>()
+        else {
+            return;
+        };
+        thread_worktree_archive::archive_thread(
+            session_id,
+            current_workspace,
+            multi_workspace_handle,
+            cx,
+        );
 
         // If we're archiving the currently focused thread, move focus to the
         // nearest thread within the same project group. We never cross group
@@ -2821,6 +2927,18 @@ impl Sidebar {
                     })
                     .collect(),
             )
+            .pending_worktree_restore(thread.metadata.pending_worktree_restore.is_some())
+            .when(thread.metadata.pending_worktree_restore.is_some(), |this| {
+                let session_id = thread.metadata.session_id.clone();
+                this.on_cancel_restore(cx.listener(
+                    move |_this, _event: &ClickEvent, _window, cx| {
+                        let store = ThreadMetadataStore::global(cx);
+                        store.update(cx, |store, cx| {
+                            store.set_pending_worktree_restore(&session_id, None, cx);
+                        });
+                    },
+                ))
+            })
             .timestamp(timestamp)
             .highlight_positions(thread.highlight_positions.to_vec())
             .title_generating(thread.is_title_generating)

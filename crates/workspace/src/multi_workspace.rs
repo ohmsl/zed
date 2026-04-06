@@ -309,6 +309,10 @@ impl MultiWorkspace {
         self.sidebar.as_deref()
     }
 
+    pub fn window_id(&self) -> WindowId {
+        self.window_id
+    }
+
     pub fn set_sidebar_overlay(&mut self, overlay: Option<AnyView>, cx: &mut Context<Self>) {
         self.sidebar_overlay = overlay;
         cx.notify();
