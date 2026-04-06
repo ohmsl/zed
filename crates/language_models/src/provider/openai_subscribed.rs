@@ -206,7 +206,6 @@ impl LanguageModelProvider for OpenAiSubscribedProvider {
     }
 }
 
-// --- Models available through the Codex backend ---
 //
 // The ChatGPT Subscription provider routes requests to chatgpt.com/backend-api/codex,
 // which only supports a subset of OpenAI models. This list is maintained separately
@@ -310,8 +309,6 @@ impl ChatGptModel {
         }
     }
 }
-
-// --- Language model ---
 
 struct OpenAiSubscribedLanguageModel {
     id: LanguageModelId,
@@ -465,8 +462,6 @@ impl LanguageModel for OpenAiSubscribedLanguageModel {
     }
 }
 
-// --- Credential refresh ---
-
 async fn get_fresh_credentials(
     state: &gpui::WeakEntity<State>,
     http_client: &Arc<dyn HttpClient>,
@@ -556,8 +551,6 @@ async fn get_fresh_credentials(
         .await
         .map_err(|e| LanguageModelCompletionError::Other(anyhow::anyhow!("{e}")))
 }
-
-// --- OAuth PKCE flow ---
 
 #[derive(Deserialize)]
 struct TokenResponse {
@@ -927,8 +920,6 @@ fn do_sign_out(state: &gpui::WeakEntity<State>, cx: &mut App) {
     })
     .detach();
 }
-
-// --- Configuration view ---
 
 struct ConfigurationView {
     state: Entity<State>,
