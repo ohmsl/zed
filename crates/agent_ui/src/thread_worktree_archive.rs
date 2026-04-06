@@ -1115,7 +1115,9 @@ pub async fn restore_worktree_via_git(
         // Check if the branch exists and points at original_commit_hash.
         // If it does, switch to it. If not, create a new branch there.
         let rx = wt_repo.update(cx, |repo, _cx| repo.change_branch(branch_name.clone()));
-        if matches!(rx.await, Ok(Ok(()))) {
+        let switched = matches!(rx.await, Ok(Ok(())));
+
+        if switched {
             // Verify the branch actually points at original_commit_hash after switching
             let head_after_switch = wt_repo
                 .update(cx, |repo, _cx| repo.head_sha())
