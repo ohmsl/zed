@@ -61,6 +61,10 @@ impl ResizableColumnsState {
         }
     }
 
+    pub fn cols(&self) -> usize {
+        self.widths.cols()
+    }
+
     pub fn resize_behavior(&self) -> &TableRow<TableResizeBehavior> {
         &self.resize_behavior
     }
