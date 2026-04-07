@@ -110,6 +110,11 @@ enum SidebarView {
     Archive(Entity<ThreadsArchiveView>),
 }
 
+enum ArchiveStatus {
+    Success,
+    UserCancelledPrompt,
+}
+
 #[derive(Clone, Debug)]
 enum ActiveEntry {
     Thread {
@@ -2190,12 +2195,10 @@ impl Sidebar {
         ThreadMetadataStore::global(cx).update(cx, |store, cx| store.unarchive(&session_id, cx));
 
         if metadata.folder_paths.paths().is_empty() {
-            let active_workspace = self.multi_workspace.upgrade().and_then(|w| {
-                w.read(cx)
-                    .workspaces()
-                    .get(w.read(cx).active_workspace_index())
-                    .cloned()
-            });
+            let active_workspace = self
+                .multi_workspace
+                .upgrade()
+                .map(|w| w.read(cx).workspace().clone());
 
             if let Some(workspace) = active_workspace {
                 self.activate_thread_locally(&metadata, &workspace, window, cx);
@@ -2455,12 +2458,83 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        thread_worktree_archive::archive_thread(
-            session_id,
-            self.active_entry_workspace().cloned(),
-            window.window_handle().downcast::<MultiWorkspace>(),
-            cx,
-        );
+        // --- Determine if worktree cleanup is needed (must come before archive call) ---
+        let metadata = ThreadMetadataStore::global(cx)
+            .read(cx)
+            .entry(session_id)
+            .cloned();
+
+        let window_handle = window.window_handle().downcast::<MultiWorkspace>();
+        let current_workspace = self.active_entry_workspace().cloned();
+
+        let in_flight = metadata.as_ref().and_then(|metadata| {
+            let window_handle = window_handle?;
+            let workspaces = thread_worktree_archive::all_open_workspaces(cx);
+            let roots: Vec<_> = metadata
+                .folder_paths
+                .ordered_paths()
+                .filter_map(|path| thread_worktree_archive::build_root_plan(path, &workspaces, cx))
+                .filter(|plan| {
+                    !thread_worktree_archive::path_is_referenced_by_other_unarchived_threads(
+                        session_id,
+                        &plan.root_path,
+                        cx,
+                    )
+                })
+                .collect();
+
+            if roots.is_empty() {
+                return None;
+            }
+
+            let (cancel_tx, cancel_rx) = smol::channel::bounded(1);
+            let folder_paths = metadata.folder_paths.clone();
+            let current_workspace = current_workspace.clone();
+            let session_id = session_id.clone();
+
+            let task = cx.spawn(async move |_this, cx| {
+                let result = Self::archive_worktree(
+                    roots,
+                    folder_paths,
+                    current_workspace,
+                    window_handle,
+                    cancel_rx,
+                    cx,
+                )
+                .await;
+
+                match result {
+                    Ok(ArchiveStatus::Success) => {
+                        cx.update(|cx| {
+                            ThreadMetadataStore::global(cx).update(cx, |store, _cx| {
+                                store.cleanup_completed_archive(&session_id);
+                            });
+                        });
+                    }
+                    Ok(ArchiveStatus::UserCancelledPrompt) => {
+                        cx.update(|cx| {
+                            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                                store.unarchive(&session_id, cx);
+                            });
+                        });
+                    }
+                    Err(error) => {
+                        log::error!("Failed to archive worktree: {error:#}");
+                        cx.update(|cx| {
+                            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                                store.unarchive(&session_id, cx);
+                            });
+                        });
+                    }
+                }
+            });
+
+            Some((task, cancel_tx))
+        });
+
+        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+            store.archive(session_id, in_flight, cx);
+        });
 
         // If we're archiving the currently focused thread, move focus to the
         // nearest thread within the same project group. We never cross group
@@ -2569,6 +2643,122 @@ impl Sidebar {
                 }
             }
         }
+    }
+
+    async fn archive_worktree(
+        roots: Vec<thread_worktree_archive::RootPlan>,
+        folder_paths: PathList,
+        workspace: Option<Entity<Workspace>>,
+        window: WindowHandle<MultiWorkspace>,
+        cancel_rx: smol::channel::Receiver<()>,
+        cx: &mut gpui::AsyncApp,
+    ) -> anyhow::Result<ArchiveStatus> {
+        // Step 1: Prompt user to save/discard dirty items
+        if let Some(workspace) = &workspace {
+            let has_dirty_items = workspace.read_with(cx, |workspace, cx| {
+                workspace.items(cx).any(|item| item.is_dirty(cx))
+            });
+
+            if has_dirty_items {
+                window
+                    .update(cx, |multi_workspace, window, cx| {
+                        window.activate_window();
+                        multi_workspace.activate(workspace.clone(), window, cx);
+                    })
+                    .log_err();
+            }
+
+            let save_task = window.update(cx, |_multi_workspace, window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.prompt_to_save_or_discard_dirty_items(window, cx)
+                })
+            })?;
+
+            // Race the save prompt against cancellation
+            let mut save_future = std::pin::pin!(save_task);
+            let mut cancel_future = std::pin::pin!(cancel_rx.recv());
+            let user_confirmed =
+                futures::future::select(&mut save_future, &mut cancel_future).await;
+
+            match user_confirmed {
+                futures::future::Either::Left((result, _)) => {
+                    if !result.unwrap_or(false) {
+                        return Ok(ArchiveStatus::UserCancelledPrompt);
+                    }
+                }
+                futures::future::Either::Right(_) => {
+                    return Ok(ArchiveStatus::UserCancelledPrompt);
+                }
+            }
+        }
+
+        // Step 2: Close the workspace via MultiWorkspace::remove.
+        // Hold a strong Project reference so persist/remove can still work.
+        let project = workspace
+            .as_ref()
+            .map(|workspace| workspace.read_with(cx, |workspace, _cx| workspace.project().clone()));
+        if let Some(workspace) = &workspace {
+            window
+                .update(cx, |multi_workspace, window, cx| {
+                    multi_workspace.remove(workspace, window, cx);
+                })
+                .log_err();
+        }
+
+        // Step 3: Iterate over roots - persist git state then remove
+        let mut completed_persists: Vec<(
+            thread_worktree_archive::PersistOutcome,
+            thread_worktree_archive::RootPlan,
+        )> = Vec::new();
+
+        for root in &roots {
+            // Check for cancellation before each root
+            if cancel_rx.try_recv().is_ok() {
+                for (outcome, completed_root) in completed_persists.iter().rev() {
+                    thread_worktree_archive::rollback_persist(outcome, completed_root, cx).await;
+                }
+                return Ok(ArchiveStatus::UserCancelledPrompt);
+            }
+
+            // Persist worktree state (git WIP commits + DB record)
+            if root.worktree_repo.is_some() {
+                match thread_worktree_archive::persist_worktree_state(root, &folder_paths, cx).await
+                {
+                    Ok(outcome) => {
+                        completed_persists.push((outcome, root.clone()));
+                    }
+                    Err(error) => {
+                        for (outcome, completed_root) in completed_persists.iter().rev() {
+                            thread_worktree_archive::rollback_persist(outcome, completed_root, cx)
+                                .await;
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+
+            // Remove the root (remove from projects + delete git worktree from disk)
+            if let Err(error) = thread_worktree_archive::remove_root(root.clone(), cx).await {
+                // Rollback the persist for this root if we just did one
+                if let Some((outcome, completed_root)) = completed_persists.last() {
+                    if completed_root.root_path == root.root_path {
+                        thread_worktree_archive::rollback_persist(outcome, completed_root, cx)
+                            .await;
+                        completed_persists.pop();
+                    }
+                }
+                // Roll back all prior persists
+                for (outcome, completed_root) in completed_persists.iter().rev() {
+                    thread_worktree_archive::rollback_persist(outcome, completed_root, cx).await;
+                }
+                return Err(error);
+            }
+        }
+
+        // Keep project alive until we're done
+        drop(project);
+
+        Ok(ArchiveStatus::Success)
     }
 
     fn remove_selected_thread(

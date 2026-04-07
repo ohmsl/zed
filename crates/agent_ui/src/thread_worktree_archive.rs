@@ -6,7 +6,7 @@ use std::{
 use agent_client_protocol as acp;
 use anyhow::{Context as _, Result, anyhow};
 use git::repository::{AskPassDelegate, CommitOptions, ResetMode};
-use gpui::{App, AsyncApp, Entity, Task, WindowHandle};
+use gpui::{App, AsyncApp, Entity, Task};
 use project::{
     LocalProjectFlags, Project, WorktreeId,
     git_store::{Repository, resolve_git_worktree_to_main_repo},
@@ -502,25 +502,7 @@ pub async fn restore_worktree_via_git(
     row: &ArchivedGitWorktree,
     cx: &mut AsyncApp,
 ) -> Result<PathBuf> {
-    // Find the main repo entity and verify original_commit_hash exists
     let (main_repo, _temp_project) = find_or_create_repository(&row.main_repo_path, cx).await?;
-
-    let commit_exists = main_repo
-        .update(cx, |repo, _cx| {
-            repo.resolve_commit(row.original_commit_hash.clone())
-        })
-        .await
-        .map_err(|_| anyhow!("resolve_commit was canceled"))?
-        .context("failed to check if original commit exists")?;
-
-    if !commit_exists {
-        anyhow::bail!(
-            "Original commit {} no longer exists in the repository — \
-             cannot restore worktree. The git history this archive depends on may have been \
-             rewritten or garbage-collected.",
-            row.original_commit_hash
-        );
-    }
 
     // Check if worktree path already exists on disk
     let worktree_path = &row.worktree_path;
@@ -717,33 +699,10 @@ pub fn all_open_workspaces(cx: &App) -> Vec<Entity<Workspace>> {
         .flat_map(|multi_workspace| {
             multi_workspace
                 .read(cx)
-                .map(|multi_workspace| multi_workspace.workspaces().to_vec())
+                .map(|multi_workspace| multi_workspace.workspaces().cloned().collect::<Vec<_>>())
                 .unwrap_or_default()
         })
         .collect()
-}
-
-fn window_for_workspace(
-    workspace: &Entity<Workspace>,
-    cx: &App,
-) -> Option<WindowHandle<MultiWorkspace>> {
-    cx.windows()
-        .into_iter()
-        .filter_map(|window| window.downcast::<MultiWorkspace>())
-        .find(|window| {
-            window
-                .read(cx)
-                .map(|multi_workspace| multi_workspace.workspaces().contains(workspace))
-                .unwrap_or(false)
-        })
-}
-
-fn window_for_workspace_async(
-    workspace: &Entity<Workspace>,
-    cx: &mut AsyncApp,
-) -> Option<WindowHandle<MultiWorkspace>> {
-    let workspace = workspace.clone();
-    cx.update(|cx| window_for_workspace(&workspace, cx))
 }
 
 fn current_app_state(cx: &mut AsyncApp) -> Option<Arc<AppState>> {

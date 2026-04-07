@@ -4664,7 +4664,7 @@ async fn test_archived_threads_excluded_from_sidebar_entries(cx: &mut TestAppCon
 
     cx.update(|_, cx| {
         ThreadMetadataStore::global(cx).update(cx, |store, cx| {
-            store.archive(&archived_thread_session_id, cx)
+            store.archive(&archived_thread_session_id, None, cx)
         })
     });
     cx.run_until_parked();

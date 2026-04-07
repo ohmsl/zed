@@ -1,5 +1,4 @@
 use std::{
-    future::Future,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -427,23 +426,17 @@ impl ThreadMetadataStore {
         }
     }
 
-    pub fn archive<F, Fut>(
+    pub fn archive(
         &mut self,
         session_id: &acp::SessionId,
-        task_builder: Option<F>,
+        in_flight: Option<(Task<()>, smol::channel::Sender<()>)>,
         cx: &mut Context<Self>,
-    ) where
-        F: FnOnce(smol::channel::Receiver<()>) -> Fut,
-        Fut: Future<Output = ()> + 'static,
-    {
+    ) {
         self.update_archived(session_id, true, cx);
 
-        if let Some(task_builder) = task_builder {
-            let (cancel_tx, cancel_rx) = smol::channel::bounded(1);
-            let future = task_builder(cancel_rx);
-            let task = cx.foreground_executor().spawn(future);
+        if let Some(in_flight) = in_flight {
             self.in_flight_archives
-                .insert(session_id.clone(), (task, cancel_tx));
+                .insert(session_id.clone(), in_flight);
         }
     }
 
@@ -1907,14 +1900,11 @@ mod tests {
         cx.update(|cx| {
             let store = ThreadMetadataStore::global(cx);
             store.update(cx, |store, cx| {
-                store.archive(
-                    &acp::SessionId::new("session-1"),
-                    None::<fn(smol::channel::Receiver<()>) -> std::future::Ready<()>>,
-                    cx,
-                );
+                store.archive(&acp::SessionId::new("session-1"), None, cx);
             });
         });
 
+        // Thread 1 should now be archived
         cx.run_until_parked();
 
         cx.update(|cx| {
@@ -1988,11 +1978,7 @@ mod tests {
         cx.update(|cx| {
             let store = ThreadMetadataStore::global(cx);
             store.update(cx, |store, cx| {
-                store.archive(
-                    &acp::SessionId::new("session-2"),
-                    None::<fn(smol::channel::Receiver<()>) -> std::future::Ready<()>>,
-                    cx,
-                );
+                store.archive(&acp::SessionId::new("session-2"), None, cx);
             });
         });
 
@@ -2092,11 +2078,7 @@ mod tests {
         cx.update(|cx| {
             let store = ThreadMetadataStore::global(cx);
             store.update(cx, |store, cx| {
-                store.archive(
-                    &acp::SessionId::new("session-1"),
-                    None::<fn(smol::channel::Receiver<()>) -> std::future::Ready<()>>,
-                    cx,
-                );
+                store.archive(&acp::SessionId::new("session-1"), None, cx);
             });
         });
 
@@ -2144,11 +2126,7 @@ mod tests {
         cx.update(|cx| {
             let store = ThreadMetadataStore::global(cx);
             store.update(cx, |store, cx| {
-                store.archive(
-                    &acp::SessionId::new("nonexistent"),
-                    None::<fn(smol::channel::Receiver<()>) -> std::future::Ready<()>>,
-                    cx,
-                );
+                store.archive(&acp::SessionId::new("nonexistent"), None, cx);
             });
         });
 
@@ -2177,11 +2155,7 @@ mod tests {
             let store = ThreadMetadataStore::global(cx);
             store.update(cx, |store, cx| {
                 store.save(metadata.clone(), cx);
-                store.archive(
-                    &session_id,
-                    None::<fn(smol::channel::Receiver<()>) -> std::future::Ready<()>>,
-                    cx,
-                );
+                store.archive(&session_id, None, cx);
             });
         });
 
