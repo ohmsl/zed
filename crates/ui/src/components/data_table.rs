@@ -871,10 +871,7 @@ impl RenderOnce for Table {
                 });
 
         let table = div()
-            .when_some(
-                if is_resizable { None } else { table_width },
-                |this, width| this.w(width),
-            )
+            .when_some(table_width, |this, width| this.w(width))
             .h_full()
             .v_flex()
             .when_some(self.headers.take(), |this, headers| {
@@ -1018,7 +1015,6 @@ impl RenderOnce for Table {
                     .overflow_x_scroll()
                     .flex_grow()
                     .h_full()
-                    .when_some(table_width, |this, width| this.w(width))
                     .track_scroll(&state.read(cx).horizontal_scroll_handle)
                     .child(table);
 

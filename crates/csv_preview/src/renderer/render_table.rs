@@ -1,9 +1,7 @@
 use crate::types::TableCell;
 use gpui::{AnyElement, Entity};
 use std::ops::Range;
-use ui::{
-    ColumnWidthConfig, ResizableColumnsState, Table, UncheckedTableRow, div, prelude::*,
-};
+use ui::{ColumnWidthConfig, ResizableColumnsState, Table, UncheckedTableRow, div, prelude::*};
 
 use crate::{
     CsvPreviewView,
