@@ -36,9 +36,6 @@ The **Zed Model Provider** toggle controls whether members can use Zed's
   [Providers](../ai/llm-providers.md) or use
   [external agents](../ai/external-agents.md) for AI features.
 
-This toggle only affects Zed's hosted model service. Members using their own
-API keys or external agents are not affected.
-
 ## Edit Predictions
 
 The **Edit Prediction** settings in Data & Privacy control
