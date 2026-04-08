@@ -640,6 +640,7 @@ async fn open_remote_worktree(
         paths,
         app_state,
         window_to_use,
+        None,
         cx,
     )
     .await?;

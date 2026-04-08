@@ -2962,6 +2962,7 @@ impl AgentPanel {
                     all_paths,
                     app_state,
                     window_handle,
+                    None,
                     cx,
                 )
                 .await?;
