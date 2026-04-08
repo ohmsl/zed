@@ -6303,4 +6303,216 @@ mod tests {
             );
         });
     }
+
+    #[gpui::test]
+    async fn test_worktree_creation_for_remote_project(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let app_state = cx.update(|cx| {
+            cx.update_flags(true, vec!["agent-v2".to_string()]);
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+
+            let app_state = workspace::AppState::test(cx);
+            workspace::init(app_state.clone(), cx);
+            app_state
+        });
+
+        server_cx.update(|cx| {
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+        });
+
+        // Set up the remote server side with a git repo.
+        let server_fs = FakeFs::new(server_cx.executor());
+        server_fs
+            .insert_tree(
+                "/project",
+                json!({
+                    ".git": {},
+                    "src": {
+                        "main.rs": "fn main() {}"
+                    }
+                }),
+            )
+            .await;
+        server_fs.set_branch_name(Path::new("/project/.git"), Some("main"));
+
+        // Create a mock remote connection.
+        let (opts, server_session, _) = remote::RemoteClient::fake_server(cx, server_cx);
+
+        server_cx.update(remote_server::HeadlessProject::init);
+        let server_executor = server_cx.executor();
+        let _headless = server_cx.new(|cx| {
+            remote_server::HeadlessProject::new(
+                remote_server::HeadlessAppState {
+                    session: server_session,
+                    fs: server_fs.clone(),
+                    http_client: Arc::new(http_client::BlockedHttpClient),
+                    node_runtime: node_runtime::NodeRuntime::unavailable(),
+                    languages: Arc::new(language::LanguageRegistry::new(server_executor.clone())),
+                    extension_host_proxy: Arc::new(extension::ExtensionHostProxy::new()),
+                    startup_time: Instant::now(),
+                },
+                false,
+                cx,
+            )
+        });
+
+        // Connect the client side and build a remote project.
+        // Use a separate Client to avoid double-registering proto handlers
+        // (Workspace::test_new creates its own WorkspaceStore from the
+        // project's client).
+        let remote_client = remote::RemoteClient::connect_mock(opts, cx).await;
+        let project = cx.update(|cx| {
+            let project_client = client::Client::new(
+                Arc::new(clock::FakeSystemClock::new()),
+                http_client::FakeHttpClient::with_404_response(),
+                cx,
+            );
+            let user_store = cx.new(|cx| client::UserStore::new(project_client.clone(), cx));
+            project::Project::remote(
+                remote_client,
+                project_client,
+                node_runtime::NodeRuntime::unavailable(),
+                user_store,
+                app_state.languages.clone(),
+                app_state.fs.clone(),
+                false,
+                cx,
+            )
+        });
+
+        // Open the remote path as a worktree in the project.
+        let worktree_path = Path::new("/project");
+        project
+            .update(cx, |project, cx| {
+                project.find_or_create_worktree(worktree_path, true, cx)
+            })
+            .await
+            .expect("should be able to open remote worktree");
+        cx.run_until_parked();
+
+        // Verify the project is indeed remote.
+        project.read_with(cx, |project, cx| {
+            assert!(!project.is_local(), "project should be remote, not local");
+            assert!(
+                project.remote_connection_options(cx).is_some(),
+                "project should have remote connection options"
+            );
+        });
+
+        // Create the workspace and agent panel.
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        multi_workspace
+            .update(cx, |multi_workspace, _, cx| {
+                multi_workspace.open_sidebar(cx);
+            })
+            .unwrap();
+
+        let workspace = multi_workspace
+            .read_with(cx, |mw, _cx| mw.workspace().clone())
+            .unwrap();
+
+        workspace.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+        });
+
+        // Register a callback so new workspaces also get an AgentPanel.
+        cx.update(|cx| {
+            cx.observe_new(
+                |workspace: &mut Workspace,
+                 window: Option<&mut Window>,
+                 cx: &mut Context<Workspace>| {
+                    if let Some(window) = window {
+                        let panel = cx.new(|cx| AgentPanel::new(workspace, None, window, cx));
+                        workspace.add_panel(panel, window, cx);
+                    }
+                },
+            )
+            .detach();
+        });
+
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        cx.run_until_parked();
+
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, None, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+
+        cx.run_until_parked();
+
+        // Open a thread.
+        panel.update_in(cx, |panel, window, cx| {
+            panel.open_external_thread_with_server(
+                Rc::new(StubAgentServer::default_response()),
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        // Set start_thread_in to LinkedWorktree to bypass git worktree
+        // creation and directly test workspace opening for a known path.
+        let linked_path = PathBuf::from("/project");
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_start_thread_in(
+                &StartThreadIn::LinkedWorktree {
+                    path: linked_path.clone(),
+                    display_name: "project".to_string(),
+                },
+                window,
+                cx,
+            );
+        });
+
+        // Trigger worktree creation.
+        let content = vec![acp::ContentBlock::Text(acp::TextContent::new(
+            "Hello from remote test",
+        ))];
+        panel.update_in(cx, |panel, window, cx| {
+            panel.handle_worktree_requested(
+                content,
+                WorktreeCreationArgs::Linked {
+                    worktree_path: linked_path,
+                },
+                window,
+                cx,
+            );
+        });
+
+        cx.run_until_parked();
+
+        // The new workspace should have been created and its project
+        // should also be remote (have remote connection options).
+        multi_workspace
+            .read_with(cx, |multi_workspace, cx| {
+                assert!(
+                    multi_workspace.workspaces().count() > 1,
+                    "expected a new workspace to have been created, found {}",
+                    multi_workspace.workspaces().count(),
+                );
+
+                let new_workspace = multi_workspace
+                    .workspaces()
+                    .find(|ws| ws.entity_id() != workspace.entity_id())
+                    .expect("should find the new workspace");
+
+                let new_project = new_workspace.read(cx).project().clone();
+                assert!(
+                    !new_project.read(cx).is_local(),
+                    "the new workspace's project should be remote, not local"
+                );
+                assert!(
+                    new_project.read(cx).remote_connection_options(cx).is_some(),
+                    "the new workspace's project should have remote connection options",
+                );
+            })
+            .unwrap();
+    }
 }
