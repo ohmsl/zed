@@ -62,6 +62,75 @@ fn has_thread_entry(sidebar: &Sidebar, session_id: &acp::SessionId) -> bool {
         .any(|entry| matches!(entry, ListEntry::Thread(t) if &t.metadata.session_id == session_id))
 }
 
+#[track_caller]
+fn assert_remote_project_integration_sidebar_state(
+    sidebar: &mut Sidebar,
+    main_thread_id: &acp::SessionId,
+    remote_thread_id: &acp::SessionId,
+) {
+    let mut project_headers = sidebar.contents.entries.iter().filter_map(|entry| {
+        if let ListEntry::ProjectHeader { label, .. } = entry {
+            Some(label.as_ref())
+        } else {
+            None
+        }
+    });
+
+    let Some(project_header) = project_headers.next() else {
+        panic!("expected exactly one sidebar project header named `project`, found none");
+    };
+    assert_eq!(
+        project_header, "project",
+        "expected the only sidebar project header to be `project`"
+    );
+    if let Some(unexpected_header) = project_headers.next() {
+        panic!(
+            "expected exactly one sidebar project header named `project`, found extra header `{unexpected_header}`"
+        );
+    }
+
+    let mut saw_main_thread = false;
+    let mut saw_remote_thread = false;
+    for entry in &sidebar.contents.entries {
+        match entry {
+            ListEntry::ProjectHeader { label, .. } => {
+                assert_eq!(
+                    label.as_ref(),
+                    "project",
+                    "expected the only sidebar project header to be `project`"
+                );
+            }
+            ListEntry::Thread(thread) if &thread.metadata.session_id == main_thread_id => {
+                saw_main_thread = true;
+            }
+            ListEntry::Thread(thread) if &thread.metadata.session_id == remote_thread_id => {
+                saw_remote_thread = true;
+            }
+            ListEntry::Thread(thread) => {
+                let title = thread.metadata.title.as_ref();
+                panic!(
+                    "unexpected sidebar thread while simulating remote project integration flicker: title=`{title}`"
+                );
+            }
+            ListEntry::ViewMore { .. } => {
+                panic!(
+                    "unexpected `View More` entry while simulating remote project integration flicker"
+                );
+            }
+            ListEntry::DraftThread { .. } | ListEntry::NewThread { .. } => {}
+        }
+    }
+
+    assert!(
+        saw_main_thread,
+        "expected the sidebar to keep showing `Main Thread` under `project`"
+    );
+    assert!(
+        saw_remote_thread,
+        "expected the sidebar to keep showing `Worktree Thread` under `project`"
+    );
+}
+
 async fn init_test_project(
     worktree_path: &str,
     cx: &mut TestAppContext,
@@ -5704,7 +5773,7 @@ mod property_test {
 }
 
 #[gpui::test]
-async fn test_clicking_closed_remote_thread_opens_remote_workspace(
+async fn test_remote_project_integration_does_not_briefly_render_as_separate_project(
     cx: &mut TestAppContext,
     server_cx: &mut TestAppContext,
 ) {
@@ -5823,8 +5892,9 @@ async fn test_clicking_closed_remote_thread_opens_remote_workspace(
 
     // Save a thread for the main remote workspace (folder_paths match
     // the open workspace, so it will be classified as Open).
+    let main_thread_id = acp::SessionId::new(Arc::from("main-thread"));
     save_thread_metadata(
-        acp::SessionId::new(Arc::from("main-thread")),
+        main_thread_id.clone(),
         "Main Thread".into(),
         chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
         None,
@@ -5856,42 +5926,26 @@ async fn test_clicking_closed_remote_thread_opens_remote_workspace(
     });
     cx.run_until_parked();
 
-    focus_sidebar(&sidebar, cx);
+    let main_thread_id_for_observer = main_thread_id.clone();
+    let remote_thread_id_for_observer = remote_thread_id.clone();
 
-    // Both threads (main workspace + linked worktree) should appear
-    // under the same project group header in the sidebar.
-    let entries = visible_entries_as_strings(&sidebar, cx);
-    let group_headers: Vec<&String> = entries
-        .iter()
-        .filter(|e| e.starts_with('v') || e.starts_with('>'))
-        .collect();
-    assert_eq!(
-        group_headers.len(),
-        1,
-        "both threads should be under a single project group, got entries: {entries:?}"
-    );
-
-    let _thread_index = sidebar.read_with(cx, |sidebar, _cx| {
-        sidebar
-            .contents
-            .entries
-            .iter()
-            .position(|entry| {
-                matches!(
-                    entry,
-                    ListEntry::Thread(t) if &t.metadata.session_id == &remote_thread_id
-                )
+    sidebar
+        .update(cx, |_, cx| {
+            cx.observe_self(move |sidebar, _cx| {
+                assert_remote_project_integration_sidebar_state(
+                    sidebar,
+                    &main_thread_id_for_observer,
+                    &remote_thread_id_for_observer,
+                );
             })
-            .expect("remote thread should still be in sidebar")
-    });
+        })
+        .detach();
 
     // Simulate what happens in production when a new remote workspace
     // is opened for a linked worktree: insert_workspace() computes
-    // project_group_key() before root_repo_common_dir is populated
-    // (it arrives asynchronously via UpdateWorktree proto messages).
+    // project_group_key() before root_repo_common_dir is populated.
     // The fallback uses abs_path(), producing key ("/project-wt-1")
-    // instead of the correct ("/project"). We reproduce this by
-    // directly adding the stale key to the MultiWorkspace.
+    // instead of the correct ("/project").
     let remote_host = project.read_with(cx, |p, cx| p.remote_connection_options(cx));
     let stale_key = ProjectGroupKey::new(
         remote_host,
@@ -5901,25 +5955,20 @@ async fn test_clicking_closed_remote_thread_opens_remote_workspace(
         mw.add_project_group_key(stale_key);
     });
 
+    // Force the sidebar to rebuild immediately from the current
+    // MultiWorkspace state so the observer can detect transient
+    // duplicate headers instead of only checking the final settled view.
+    sidebar.update(cx, |sidebar, cx| {
+        sidebar.update_entries(cx);
+    });
+
     cx.run_until_parked();
 
-    // After adding the linked worktree workspace, the sidebar should
-    // still show all threads under a SINGLE project group — not
-    // duplicate headers. This fails when root_repo_common_dir hasn't
-    // been populated yet for the new remote worktree, causing
-    // project_group_key() to fall back to abs_path() and produce a
-    // different key.
-    let entries_after = visible_entries_as_strings(&sidebar, cx);
-    let group_headers_after: Vec<&String> = entries_after
-        .iter()
-        .filter(|e| e.starts_with('v') || e.starts_with('>'))
-        .collect();
-    assert_eq!(
-        group_headers_after.len(),
-        1,
-        "after adding a linked worktree workspace, all threads should \
-         still be under a single project group, but got {} groups.\n\
-         Entries: {entries_after:#?}",
-        group_headers_after.len(),
-    );
+    sidebar.update(cx, |sidebar, _cx| {
+        assert_remote_project_integration_sidebar_state(
+            sidebar,
+            &main_thread_id,
+            &remote_thread_id,
+        );
+    });
 }

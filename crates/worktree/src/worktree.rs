@@ -2437,9 +2437,12 @@ impl Snapshot {
         self.entries_by_path.edit(entries_by_path_edits, ());
         self.entries_by_id.edit(entries_by_id_edits, ());
 
-        self.root_repo_common_dir = update
+        if let Some(dir) = update
             .root_repo_common_dir
-            .map(|p| SanitizedPath::new_arc(Path::new(&p)));
+            .map(|p| SanitizedPath::new_arc(Path::new(&p)))
+        {
+            self.root_repo_common_dir = Some(dir);
+        }
 
         self.scan_id = update.scan_id as usize;
         if update.is_last_update {
