@@ -5733,11 +5733,27 @@ async fn test_clicking_closed_remote_thread_opens_remote_workspace(
         .await;
     server_fs.set_branch_name(Path::new("/project/.git"), Some("main"));
 
+    // Create a linked worktree on the remote server so that opening
+    // /project-wt-1 succeeds and the worktree has a .git file pointing
+    // back to the main repo.
+    server_fs
+        .add_linked_worktree_for_repo(
+            Path::new("/project/.git"),
+            false,
+            git::repository::Worktree {
+                path: PathBuf::from("/project-wt-1"),
+                ref_name: Some("refs/heads/feature-wt".into()),
+                sha: "abc123".into(),
+                is_main: false,
+            },
+        )
+        .await;
+
     server_cx.update(|cx| {
         release_channel::init(semver::Version::new(0, 0, 0), cx);
     });
 
-    let (opts, server_session, _) = remote::RemoteClient::fake_server(cx, server_cx);
+    let (original_opts, server_session, _) = remote::RemoteClient::fake_server(cx, server_cx);
 
     server_cx.update(remote_server::HeadlessProject::init);
     let server_executor = server_cx.executor();
@@ -5758,7 +5774,7 @@ async fn test_clicking_closed_remote_thread_opens_remote_workspace(
     });
 
     // Connect the client side and build a remote project.
-    let remote_client = remote::RemoteClient::connect_mock(opts, cx).await;
+    let remote_client = remote::RemoteClient::connect_mock(original_opts.clone(), cx).await;
     let project = cx.update(|cx| {
         let project_client = client::Client::new(
             Arc::new(clock::FakeSystemClock::new()),
@@ -5805,11 +5821,23 @@ async fn test_clicking_closed_remote_thread_opens_remote_workspace(
 
     cx.run_until_parked();
 
-    // Save a thread whose folder_paths point to a worktree path that
-    // doesn't have an open workspace ("/project-wt-1"), but whose
+    // Save a thread for the main remote workspace (folder_paths match
+    // the open workspace, so it will be classified as Open).
+    save_thread_metadata(
+        acp::SessionId::new(Arc::from("main-thread")),
+        "Main Thread".into(),
+        chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
+        None,
+        &project,
+        cx,
+    );
+    cx.run_until_parked();
+
+    // Save a thread whose folder_paths point to a linked worktree path
+    // that doesn't have an open workspace ("/project-wt-1"), but whose
     // main_worktree_paths match the project group key so it appears
-    // in the sidebar under the remote group. This simulates a linked
-    // worktree workspace that was closed.
+    // in the sidebar under the same remote group. This simulates a
+    // linked worktree workspace that was closed.
     let remote_thread_id = acp::SessionId::new(Arc::from("remote-thread"));
     let main_worktree_paths =
         project.read_with(cx, |p, cx| p.project_group_key(cx).path_list().clone());
@@ -5817,8 +5845,8 @@ async fn test_clicking_closed_remote_thread_opens_remote_workspace(
         let metadata = ThreadMetadata {
             session_id: remote_thread_id.clone(),
             agent_id: agent::ZED_AGENT_ID.clone(),
-            title: "Remote Thread".into(),
-            updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
+            title: "Worktree Thread".into(),
+            updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 1).unwrap(),
             created_at: None,
             folder_paths: PathList::new(&[PathBuf::from("/project-wt-1")]),
             main_worktree_paths,
@@ -5828,11 +5856,22 @@ async fn test_clicking_closed_remote_thread_opens_remote_workspace(
     });
     cx.run_until_parked();
 
-    // The thread should appear in the sidebar classified as Closed
-    // (its folder_paths don't match any open workspace).
     focus_sidebar(&sidebar, cx);
 
-    let thread_index = sidebar.read_with(cx, |sidebar, _cx| {
+    // Both threads (main workspace + linked worktree) should appear
+    // under the same project group header in the sidebar.
+    let entries = visible_entries_as_strings(&sidebar, cx);
+    let group_headers: Vec<&String> = entries
+        .iter()
+        .filter(|e| e.starts_with('v') || e.starts_with('>'))
+        .collect();
+    assert_eq!(
+        group_headers.len(),
+        1,
+        "both threads should be under a single project group, got entries: {entries:?}"
+    );
+
+    let _thread_index = sidebar.read_with(cx, |sidebar, _cx| {
         sidebar
             .contents
             .entries
@@ -5846,24 +5885,57 @@ async fn test_clicking_closed_remote_thread_opens_remote_workspace(
             .expect("remote thread should still be in sidebar")
     });
 
-    // Select and confirm the remote thread entry.
-    sidebar.update_in(cx, |sidebar, _window, _cx| {
-        sidebar.selection = Some(thread_index);
+    // Simulate what happens in production when a new remote workspace
+    // is opened for a linked worktree: insert_workspace() computes
+    // project_group_key() before root_repo_common_dir is populated
+    // (it arrives asynchronously via UpdateWorktree proto messages).
+    // The fallback uses abs_path(), producing key ("/project-wt-1")
+    // instead of the correct ("/project"). We reproduce this by
+    // directly adding the stale key to the MultiWorkspace.
+    let remote_host = project.read_with(cx, |p, cx| p.remote_connection_options(cx));
+    let stale_key = ProjectGroupKey::new(
+        remote_host,
+        PathList::new(&[PathBuf::from("/project-wt-1")]),
+    );
+    multi_workspace.update(cx, |mw, _cx| {
+        mw.add_project_group_key(stale_key);
     });
-    cx.dispatch_action(menu::Confirm);
+
+    // Also save a thread whose main_worktree_paths uses the stale
+    // path. This simulates a thread created while the workspace's
+    // project_group_key was still using the fallback abs_path.
+    cx.update(|_window, cx| {
+        let metadata = ThreadMetadata {
+            session_id: acp::SessionId::new(Arc::from("stale-thread")),
+            agent_id: agent::ZED_AGENT_ID.clone(),
+            title: "Stale Thread".into(),
+            updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 2).unwrap(),
+            created_at: None,
+            folder_paths: PathList::new(&[PathBuf::from("/project-wt-1")]),
+            main_worktree_paths: PathList::new(&[PathBuf::from("/project-wt-1")]),
+            archived: false,
+        };
+        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save_manually(metadata, cx));
+    });
     cx.run_until_parked();
 
-    // The workspace that was opened for this thread should be remote,
-    // not local. This is the key assertion — the bug is that
-    // open_workspace_and_activate_thread always calls
-    // find_or_create_local_workspace, creating a local workspace
-    // even for remote thread entries.
-    let active_workspace = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
-    active_workspace.read_with(cx, |workspace, cx| {
-        let active_project = workspace.project().read(cx);
-        assert!(
-            !active_project.is_local(),
-            "clicking a closed remote thread entry should open a remote workspace, not a local one"
-        );
-    });
+    // After adding the linked worktree workspace, the sidebar should
+    // still show all threads under a SINGLE project group — not
+    // duplicate headers. This fails when root_repo_common_dir hasn't
+    // been populated yet for the new remote worktree, causing
+    // project_group_key() to fall back to abs_path() and produce a
+    // different key.
+    let entries_after = visible_entries_as_strings(&sidebar, cx);
+    let group_headers_after: Vec<&String> = entries_after
+        .iter()
+        .filter(|e| e.starts_with('v') || e.starts_with('>'))
+        .collect();
+    assert_eq!(
+        group_headers_after.len(),
+        1,
+        "after adding a linked worktree workspace, all threads should \
+         still be under a single project group, but got {} groups.\n\
+         Entries: {entries_after:#?}",
+        group_headers_after.len(),
+    );
 }

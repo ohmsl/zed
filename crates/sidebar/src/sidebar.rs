@@ -162,6 +162,17 @@ enum ThreadEntryWorkspace {
     },
 }
 
+impl ThreadEntryWorkspace {
+    fn is_remote(&self, cx: &App) -> bool {
+        match self {
+            ThreadEntryWorkspace::Open(workspace) => {
+                !workspace.read(cx).project().read(cx).is_local()
+            }
+            ThreadEntryWorkspace::Closed { host, .. } => host.is_some(),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct WorktreeInfo {
     name: SharedString,
@@ -2903,10 +2914,13 @@ impl Sidebar {
                 .unwrap_or(thread.metadata.updated_at),
         );
 
+        let is_remote = thread.workspace.is_remote(cx);
+
         ThreadItem::new(id, title)
             .base_bg(sidebar_bg)
             .icon(thread.icon)
             .status(thread.status)
+            .is_remote(is_remote)
             .when_some(thread.icon_from_external_svg.clone(), |this, svg| {
                 this.custom_icon_from_external_svg(svg)
             })
