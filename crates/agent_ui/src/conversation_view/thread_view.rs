@@ -326,13 +326,9 @@ pub struct ThreadView {
     pub add_context_menu_handle: PopoverMenuHandle<ContextMenu>,
     pub thinking_effort_menu_handle: PopoverMenuHandle<ContextMenu>,
     pub project: WeakEntity<Project>,
-    pub recent_history_entries: Vec<AgentSessionInfo>,
-    pub hovered_recent_history_item: Option<usize>,
     pub show_external_source_prompt_warning: bool,
     pub show_codex_windows_warning: bool,
     pub generating_indicator_in_list: bool,
-    pub history: Option<Entity<ThreadHistory>>,
-    pub _history_subscription: Option<Subscription>,
 }
 impl Focusable for ThreadView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -386,12 +382,6 @@ impl ThreadView {
 
         let has_commands = !session_capabilities.read().available_commands().is_empty();
         let placeholder = placeholder_text(agent_display_name.as_ref(), has_commands);
-
-        let history_subscription = history.as_ref().map(|h| {
-            cx.observe(h, |this, history, cx| {
-                this.update_recent_history_from_cache(&history, cx);
-            })
-        });
 
         let mut should_auto_submit = false;
         let mut show_external_source_prompt_warning = false;
@@ -500,11 +490,6 @@ impl ThreadView {
             }));
         }));
 
-        let recent_history_entries = history
-            .as_ref()
-            .map(|h| h.read(cx).get_recent_sessions(3))
-            .unwrap_or_default();
-
         let mut this = Self {
             id,
             parent_id,
@@ -567,11 +552,7 @@ impl ThreadView {
             add_context_menu_handle: PopoverMenuHandle::default(),
             thinking_effort_menu_handle: PopoverMenuHandle::default(),
             project,
-            recent_history_entries,
-            hovered_recent_history_item: None,
             show_external_source_prompt_warning,
-            history,
-            _history_subscription: history_subscription,
             show_codex_windows_warning,
             generating_indicator_in_list: false,
         };
@@ -8274,16 +8255,6 @@ impl ThreadView {
             .title("Resumed Session")
             .description(description)
             .into_any_element()
-    }
-
-    fn update_recent_history_from_cache(
-        &mut self,
-        history: &Entity<ThreadHistory>,
-        cx: &mut Context<Self>,
-    ) {
-        self.recent_history_entries = history.read(cx).get_recent_sessions(3);
-        self.hovered_recent_history_item = None;
-        cx.notify();
     }
 
     fn render_codex_windows_warning(&self, cx: &mut Context<Self>) -> Callout {
