@@ -9,9 +9,9 @@ use agent_ui::thread_worktree_archive;
 use agent_ui::threads_archive_view::{
     ThreadsArchiveView, ThreadsArchiveViewEvent, format_history_entry_timestamp,
 };
-use agent_ui::{AcpThreadImportOnboarding, ThreadImportModal};
 use agent_ui::{
-    Agent, AgentPanel, AgentPanelEvent, DEFAULT_THREAD_TITLE, NewThread, RemoveSelectedThread,
+    AcpThreadImportOnboarding, Agent, AgentPanel, AgentPanelEvent, DEFAULT_THREAD_TITLE, DraftId,
+    NewThread, RemoveSelectedThread, ThreadImportModal,
 };
 use chrono::{DateTime, Utc};
 use editor::Editor;
@@ -121,19 +121,28 @@ enum ActiveEntry {
         session_id: acp::SessionId,
         workspace: Entity<Workspace>,
     },
-    Draft(Entity<Workspace>),
+    Draft {
+        /// `None` for untracked drafts (e.g., from Cmd-N keyboard shortcut
+        /// that goes directly through the AgentPanel).
+        id: Option<DraftId>,
+        workspace: Entity<Workspace>,
+    },
 }
 
 impl ActiveEntry {
     fn workspace(&self) -> &Entity<Workspace> {
         match self {
             ActiveEntry::Thread { workspace, .. } => workspace,
-            ActiveEntry::Draft(workspace) => workspace,
+            ActiveEntry::Draft { workspace, .. } => workspace,
         }
     }
 
     fn is_active_thread(&self, session_id: &acp::SessionId) -> bool {
         matches!(self, ActiveEntry::Thread { session_id: id, .. } if id == session_id)
+    }
+
+    fn is_active_draft(&self, draft_id: DraftId) -> bool {
+        matches!(self, ActiveEntry::Draft { id: Some(id), .. } if *id == draft_id)
     }
 
     fn matches_entry(&self, entry: &ListEntry) -> bool {
@@ -142,11 +151,23 @@ impl ActiveEntry {
                 thread.metadata.session_id == *session_id
             }
             (
-                ActiveEntry::Draft(_),
-                ListEntry::DraftThread {
-                    workspace: None, ..
+                ActiveEntry::Draft {
+                    id,
+                    workspace: active_ws,
                 },
-            ) => true,
+                ListEntry::DraftThread {
+                    draft_id,
+                    workspace: entry_ws,
+                    ..
+                },
+            ) => match (id, draft_id) {
+                // Both have DraftIds — compare directly.
+                (Some(active_id), Some(entry_id)) => *active_id == *entry_id,
+                // Both untracked — match by workspace identity.
+                (None, None) => entry_ws.as_ref().is_some_and(|ws| ws == active_ws),
+                // Mixed tracked/untracked — never match.
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -245,9 +266,10 @@ enum ListEntry {
         key: ProjectGroupKey,
         is_fully_expanded: bool,
     },
-    /// The user's active draft thread. Shows a prefix of the currently-typed
-    /// prompt, or "Untitled Thread" if the prompt is empty.
     DraftThread {
+        /// `None` for placeholder entries in empty groups with no open
+        /// workspace. `Some` for drafts backed by an AgentPanel.
+        draft_id: Option<DraftId>,
         key: project::ProjectGroupKey,
         workspace: Option<Entity<Workspace>>,
         worktrees: Vec<WorktreeInfo>,
@@ -273,15 +295,7 @@ impl ListEntry {
                 ThreadEntryWorkspace::Open(ws) => vec![ws.clone()],
                 ThreadEntryWorkspace::Closed { .. } => Vec::new(),
             },
-            ListEntry::DraftThread { workspace, .. } => {
-                if let Some(ws) = workspace {
-                    vec![ws.clone()]
-                } else {
-                    // workspace: None means this is the active draft,
-                    // which always lives on the current workspace.
-                    vec![multi_workspace.workspace().clone()]
-                }
-            }
+            ListEntry::DraftThread { workspace, .. } => workspace.iter().cloned().collect(),
             ListEntry::ProjectHeader { key, .. } => multi_workspace
                 .workspaces_for_project_group(key, cx)
                 .cloned()
@@ -675,21 +689,10 @@ impl Sidebar {
         cx.subscribe_in(
             agent_panel,
             window,
-            |this, agent_panel, event: &AgentPanelEvent, _window, cx| match event {
+            |this, _agent_panel, event: &AgentPanelEvent, _window, cx| match event {
                 AgentPanelEvent::ActiveViewChanged => {
-                    let is_new_draft = agent_panel
-                        .read(cx)
-                        .active_conversation_view()
-                        .is_some_and(|cv| cv.read(cx).parent_id(cx).is_none());
-                    if is_new_draft {
-                        if let Some(active_workspace) = this
-                            .multi_workspace
-                            .upgrade()
-                            .map(|mw| mw.read(cx).workspace().clone())
-                        {
-                            this.active_entry = Some(ActiveEntry::Draft(active_workspace));
-                        }
-                    }
+                    // active_entry is fully derived during
+                    // rebuild_contents — just trigger a rebuild.
                     this.observe_draft_editor(cx);
                     this.update_entries(cx);
                 }
@@ -747,26 +750,6 @@ impl Sidebar {
                     cx.notify();
                 })
             });
-    }
-
-    fn active_draft_text(&self, cx: &App) -> Option<SharedString> {
-        let mw = self.multi_workspace.upgrade()?;
-        let workspace = mw.read(cx).workspace();
-        let panel = workspace.read(cx).panel::<AgentPanel>(cx)?;
-        let conversation_view = panel.read(cx).active_conversation_view()?;
-        let thread_view = conversation_view.read(cx).active_thread()?;
-        let raw = thread_view.read(cx).message_editor.read(cx).text(cx);
-        let cleaned = Self::clean_mention_links(&raw);
-        let mut text: String = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-        if text.is_empty() {
-            None
-        } else {
-            const MAX_CHARS: usize = 250;
-            if let Some((truncate_at, _)) = text.char_indices().nth(MAX_CHARS) {
-                text.truncate(truncate_at);
-            }
-            Some(text.into())
-        }
     }
 
     fn clean_mention_links(input: &str) -> String {
@@ -889,9 +872,22 @@ impl Sidebar {
                                     .is_some_and(|id| id == session_id)
                         } else {
                             false
-                        };
+                        } || self
+                            .pending_remote_thread_activation
+                            .is_some();
+
                         if !preserving_thread {
-                            self.active_entry = Some(ActiveEntry::Draft(active_ws.clone()));
+                            // The active panel shows a draft. Read
+                            // the draft ID from the AgentPanel (may be
+                            // None for untracked drafts from Cmd-N).
+                            let draft_id = active_ws
+                                .read(cx)
+                                .panel::<AgentPanel>(cx)
+                                .and_then(|p| p.read(cx).active_draft_id());
+                            self.active_entry = Some(ActiveEntry::Draft {
+                                id: draft_id,
+                                workspace: active_ws.clone(),
+                            });
                         }
                     }
                 } else if let Some(session_id) =
@@ -1221,9 +1217,6 @@ impl Sidebar {
                     entries.push(thread.into());
                 }
             } else {
-                let is_draft_for_group = is_active
-                    && matches!(&self.active_entry, Some(ActiveEntry::Draft(ws)) if group_workspaces.contains(ws));
-
                 project_header_indices.push(entries.len());
                 entries.push(ListEntry::ProjectHeader {
                     key: group_key.clone(),
@@ -1239,66 +1232,49 @@ impl Sidebar {
                     continue;
                 }
 
-                // Emit a DraftThread entry when the active draft belongs to this group.
-                if is_draft_for_group {
-                    if let Some(ActiveEntry::Draft(draft_ws)) = &self.active_entry {
-                        let ws_worktree_paths = ThreadWorktreePaths::from_project(
-                            draft_ws.read(cx).project().read(cx),
-                            cx,
-                        );
-                        let worktrees = worktree_info_from_thread_paths(&ws_worktree_paths);
-                        entries.push(ListEntry::DraftThread {
-                            key: group_key.clone(),
-                            workspace: None,
-                            worktrees,
-                        });
-                    }
-                }
-
-                // Emit a DraftThread for each open linked worktree workspace
-                // that has no threads. Skip the specific workspace that is
-                // showing the active draft (it already has a DraftThread entry
-                // from the block above).
+                // Emit DraftThread entries by reading draft IDs from
+                // each workspace's AgentPanel in this group.
                 {
-                    let draft_ws_id = if is_draft_for_group {
-                        self.active_entry.as_ref().and_then(|e| match e {
-                            ActiveEntry::Draft(ws) => Some(ws.entity_id()),
-                            _ => None,
-                        })
-                    } else {
-                        None
-                    };
-                    let thread_store = ThreadMetadataStore::global(cx);
+                    let mut group_draft_ids: Vec<(DraftId, Entity<Workspace>)> = Vec::new();
                     for ws in group_workspaces {
-                        if Some(ws.entity_id()) == draft_ws_id {
-                            continue;
+                        if let Some(panel) = ws.read(cx).panel::<AgentPanel>(cx) {
+                            let ids = panel.read(cx).draft_ids();
+                            if !ids.is_empty() {
+                                dbg!(
+                                    "found drafts in panel",
+                                    group_key.display_name(&Default::default()),
+                                    ids.len()
+                                );
+                            }
+                            for draft_id in ids {
+                                group_draft_ids.push((draft_id, ws.clone()));
+                            }
                         }
-                        let ws_worktree_paths =
-                            ThreadWorktreePaths::from_project(ws.read(cx).project().read(cx), cx);
-                        let has_linked_worktrees =
-                            worktree_info_from_thread_paths(&ws_worktree_paths)
-                                .iter()
-                                .any(|wt| wt.kind == ui::WorktreeKind::Linked);
-                        if !has_linked_worktrees {
-                            continue;
-                        }
-                        let ws_path_list = workspace_path_list(ws, cx);
-                        let store = thread_store.read(cx);
-                        let has_threads = store.entries_for_path(&ws_path_list).next().is_some()
-                            || store
-                                .entries_for_main_worktree_path(&ws_path_list)
-                                .next()
-                                .is_some();
-                        if has_threads {
-                            continue;
-                        }
-                        let worktrees = worktree_info_from_thread_paths(&ws_worktree_paths);
+                    }
 
+                    // For empty groups with no drafts, emit a
+                    // placeholder DraftThread.
+                    if !has_threads && group_draft_ids.is_empty() {
                         entries.push(ListEntry::DraftThread {
+                            draft_id: None,
                             key: group_key.clone(),
-                            workspace: Some(ws.clone()),
-                            worktrees,
+                            workspace: group_workspaces.first().cloned(),
+                            worktrees: Vec::new(),
                         });
+                    } else {
+                        for (draft_id, ws) in &group_draft_ids {
+                            let ws_worktree_paths = ThreadWorktreePaths::from_project(
+                                ws.read(cx).project().read(cx),
+                                cx,
+                            );
+                            let worktrees = worktree_info_from_thread_paths(&ws_worktree_paths);
+                            entries.push(ListEntry::DraftThread {
+                                draft_id: Some(*draft_id),
+                                key: group_key.clone(),
+                                workspace: Some(ws.clone()),
+                                worktrees,
+                            });
+                        }
                     }
                 }
 
@@ -1457,15 +1433,35 @@ impl Sidebar {
                 is_fully_expanded,
             } => self.render_view_more(ix, key, *is_fully_expanded, is_selected, cx),
             ListEntry::DraftThread {
+                draft_id,
                 key,
                 workspace,
                 worktrees,
             } => {
-                if workspace.is_some() {
-                    self.render_new_thread(ix, key, worktrees, workspace.as_ref(), is_selected, cx)
-                } else {
-                    self.render_draft_thread(ix, is_active, worktrees, is_selected, cx)
-                }
+                // TODO DL: Maybe these can derived somewhere else? Maybe in update or rebuild?
+                let group_has_threads = self
+                    .contents
+                    .entries
+                    .iter()
+                    .any(|e| matches!(e, ListEntry::ProjectHeader { key: hk, has_threads: true, .. } if hk == key));
+                // Count drafts in the AgentPanel for this group's workspaces.
+                let sibling_draft_count = workspace
+                    .as_ref()
+                    .and_then(|ws| ws.read(cx).panel::<AgentPanel>(cx))
+                    .map(|p| p.read(cx).draft_ids().len())
+                    .unwrap_or(0);
+                let can_dismiss = group_has_threads || sibling_draft_count > 1;
+                self.render_draft_thread(
+                    ix,
+                    *draft_id,
+                    key,
+                    workspace.as_ref(),
+                    is_active,
+                    worktrees,
+                    is_selected,
+                    can_dismiss,
+                    cx,
+                )
             }
         };
 
@@ -1533,12 +1529,6 @@ impl Sidebar {
             (IconName::ChevronDown, "Collapse Project")
         };
 
-        let has_new_thread_entry = self
-            .contents
-            .entries
-            .get(ix + 1)
-            .is_some_and(|entry| matches!(entry, ListEntry::DraftThread { .. }));
-
         let key_for_toggle = key.clone();
         let key_for_collapse = key.clone();
         let view_more_expanded = self.expanded_groups.contains_key(key);
@@ -1560,20 +1550,15 @@ impl Sidebar {
 
         let base_bg = color.background.blend(sidebar_base_bg);
 
-        let hover_color = color
+        let hover_base = color
             .element_active
             .blend(color.element_background.opacity(0.2));
-        let hover_bg = base_bg.blend(hover_color);
-
-        let effective_hover = if !has_threads && is_active {
-            base_bg
-        } else {
-            hover_bg
-        };
+        let hover_solid = base_bg.blend(hover_base);
+        let real_hover_color = if is_active { base_bg } else { hover_solid };
 
         let group_name_for_gradient = group_name.clone();
         let gradient_overlay = move || {
-            GradientFade::new(base_bg, effective_hover, effective_hover)
+            GradientFade::new(base_bg, real_hover_color, real_hover_color)
                 .width(px(64.0))
                 .right(px(-2.0))
                 .gradient_stop(0.75)
@@ -1686,6 +1671,10 @@ impl Sidebar {
                     .child({
                         let key = key.clone();
                         let focus_handle = self.focus_handle.clone();
+
+                        // TODO DL: Hitting this button for the first time after compiling the app on a non-activated workspace
+                        // is currently NOT creating a draft. It activates the workspace but it requires a second click to
+                        // effectively create the draft.
                         IconButton::new(
                             SharedString::from(format!(
                                 "{id_prefix}project-header-new-thread-{ix}",
@@ -1723,7 +1712,7 @@ impl Sidebar {
                 } else {
                     let key = key.clone();
                     this.cursor_pointer()
-                        .when(!is_active, |this| this.hover(|s| s.bg(hover_color)))
+                        .when(!is_active, |this| this.hover(|s| s.bg(hover_solid)))
                         .tooltip(Tooltip::text("Open Workspace"))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             if let Some(workspace) = this.multi_workspace.upgrade().and_then(|mw| {
@@ -1733,16 +1722,17 @@ impl Sidebar {
                                     cx,
                                 )
                             }) {
-                                this.active_entry = Some(ActiveEntry::Draft(workspace.clone()));
-                                if let Some(multi_workspace) = this.multi_workspace.upgrade() {
-                                    multi_workspace.update(cx, |multi_workspace, cx| {
-                                        multi_workspace.activate(workspace.clone(), window, cx);
-                                    });
-                                }
-                                if AgentPanel::is_visible(&workspace, cx) {
-                                    workspace.update(cx, |workspace, cx| {
-                                        workspace.focus_panel::<AgentPanel>(window, cx);
-                                    });
+                                // Find an existing draft for this group
+                                // and activate it, rather than creating
+                                // a new one.
+                                let draft_id = workspace
+                                    .read(cx)
+                                    .panel::<AgentPanel>(cx)
+                                    .and_then(|p| p.read(cx).draft_ids().first().copied());
+                                if let Some(draft_id) = draft_id {
+                                    this.activate_draft(draft_id, &workspace, window, cx);
+                                } else {
+                                    this.create_new_thread(&workspace, window, cx);
                                 }
                             } else {
                                 this.open_workspace_for_group(&key, window, cx);
@@ -2183,16 +2173,19 @@ impl Sidebar {
                     self.expand_thread_group(&key, cx);
                 }
             }
-            ListEntry::DraftThread { key, workspace, .. } => {
+            ListEntry::DraftThread {
+                draft_id,
+                key,
+                workspace,
+                ..
+            } => {
+                let draft_id = *draft_id;
                 let key = key.clone();
                 let workspace = workspace.clone();
-                if let Some(workspace) = workspace.or_else(|| {
-                    self.multi_workspace.upgrade().and_then(|mw| {
-                        mw.read(cx)
-                            .workspace_for_paths(key.path_list(), key.host().as_ref(), cx)
-                    })
-                }) {
-                    self.create_new_thread(&workspace, window, cx);
+                if let Some(draft_id) = draft_id {
+                    if let Some(workspace) = workspace {
+                        self.activate_draft(draft_id, &workspace, window, cx);
+                    }
                 } else {
                     self.open_workspace_for_group(&key, window, cx);
                 }
@@ -2370,10 +2363,10 @@ impl Sidebar {
         };
 
         let pending_session_id = metadata.session_id.clone();
-        let is_remote = project_group_key.host().is_some();
-        if is_remote {
-            self.pending_remote_thread_activation = Some(pending_session_id.clone());
-        }
+        // Mark the pending thread activation so rebuild_contents
+        // preserves the Thread active_entry during loading (prevents
+        // spurious draft flash).
+        self.pending_remote_thread_activation = Some(pending_session_id.clone());
 
         let host = project_group_key.host();
         let provisional_key = Some(project_group_key.clone());
@@ -2397,7 +2390,7 @@ impl Sidebar {
             // failures or cancellations do not leave a stale connection modal behind.
             remote_connection::dismiss_connection_modal(&modal_workspace, cx);
 
-            if result.is_err() || is_remote {
+            if result.is_err() {
                 this.update(cx, |this, _cx| {
                     if this.pending_remote_thread_activation.as_ref() == Some(&pending_session_id) {
                         this.pending_remote_thread_activation = None;
@@ -3007,11 +3000,7 @@ impl Sidebar {
 
         if let Some(workspace) = fallback_workspace {
             self.activate_workspace(&workspace, window, cx);
-            if let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx) {
-                panel.update(cx, |panel, cx| {
-                    panel.new_thread(&NewThread, window, cx);
-                });
-            }
+            self.create_new_thread(&workspace, window, cx);
         }
     }
 
@@ -3138,32 +3127,15 @@ impl Sidebar {
                 self.archive_thread(&session_id, window, cx);
             }
             Some(ListEntry::DraftThread {
+                draft_id: Some(draft_id),
                 workspace: Some(workspace),
                 ..
             }) => {
-                self.remove_worktree_workspace(workspace.clone(), window, cx);
+                let draft_id = *draft_id;
+                let workspace = workspace.clone();
+                self.remove_draft(draft_id, &workspace, window, cx);
             }
             _ => {}
-        }
-    }
-
-    fn remove_worktree_workspace(
-        &mut self,
-        workspace: Entity<Workspace>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(multi_workspace) = self.multi_workspace.upgrade() {
-            multi_workspace
-                .update(cx, |mw, cx| {
-                    mw.remove(
-                        [workspace],
-                        |this, _window, _cx| gpui::Task::ready(Ok(this.workspace().clone())),
-                        window,
-                        cx,
-                    )
-                })
-                .detach_and_log_err(cx);
         }
     }
 
@@ -3747,20 +3719,149 @@ impl Sidebar {
             return;
         };
 
-        self.active_entry = Some(ActiveEntry::Draft(workspace.clone()));
-
         multi_workspace.update(cx, |multi_workspace, cx| {
             multi_workspace.activate(workspace.clone(), window, cx);
         });
 
-        workspace.update(cx, |workspace, cx| {
-            if let Some(agent_panel) = workspace.panel::<AgentPanel>(cx) {
-                agent_panel.update(cx, |panel, cx| {
-                    panel.new_thread(&NewThread, window, cx);
+        // TODO DL: The reason why the new thread icon button doesn't create a draft item for non-activated workspaces
+        // might be here. We're only calling activate after getting the workspace?
+
+        let draft_id = workspace.update(cx, |workspace, cx| {
+            let panel = workspace.panel::<AgentPanel>(cx)?;
+            let draft_id = panel.update(cx, |panel, cx| {
+                let id = panel.create_draft(window, cx);
+                panel.activate_draft(id, true, window, cx);
+                id
+            });
+            workspace.focus_panel::<AgentPanel>(window, cx);
+            Some(draft_id)
+        });
+
+        if let Some(draft_id) = draft_id {
+            self.active_entry = Some(ActiveEntry::Draft {
+                id: Some(draft_id),
+                workspace: workspace.clone(),
+            });
+        }
+    }
+
+    fn activate_draft(
+        &mut self,
+        draft_id: DraftId,
+        workspace: &Entity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(multi_workspace) = self.multi_workspace.upgrade() {
+            multi_workspace.update(cx, |mw, cx| {
+                mw.activate(workspace.clone(), window, cx);
+            });
+        }
+
+        workspace.update(cx, |ws, cx| {
+            if let Some(panel) = ws.panel::<AgentPanel>(cx) {
+                panel.update(cx, |panel, cx| {
+                    panel.activate_draft(draft_id, true, window, cx);
                 });
             }
-            workspace.focus_panel::<AgentPanel>(window, cx);
+            ws.focus_panel::<AgentPanel>(window, cx);
         });
+
+        self.active_entry = Some(ActiveEntry::Draft {
+            id: Some(draft_id),
+            workspace: workspace.clone(),
+        });
+
+        self.observe_draft_editor(cx);
+    }
+
+    fn remove_draft(
+        &mut self,
+        draft_id: DraftId,
+        workspace: &Entity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        workspace.update(cx, |ws, cx| {
+            if let Some(panel) = ws.panel::<AgentPanel>(cx) {
+                panel.update(cx, |panel, _cx| {
+                    panel.remove_draft(draft_id);
+                });
+            }
+        });
+
+        let was_active = self
+            .active_entry
+            .as_ref()
+            .is_some_and(|e| e.is_active_draft(draft_id));
+
+        if was_active {
+            let mut switched = false;
+            let group_key = workspace.read(cx).project_group_key(cx);
+
+            // Try the nearest draft in the same panel (prefer the
+            // next one in creation order, fall back to the previous).
+            if let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx) {
+                let ids = panel.read(cx).draft_ids();
+                let sibling = ids
+                    .iter()
+                    .find(|id| id.0 > draft_id.0)
+                    .or_else(|| ids.last());
+                if let Some(&sibling_id) = sibling {
+                    self.activate_draft(sibling_id, workspace, window, cx);
+                    switched = true;
+                }
+            }
+
+            // No sibling draft — try the first thread in the group.
+            if !switched {
+                let first_thread = self.contents.entries.iter().find_map(|entry| {
+                    if let ListEntry::Thread(thread) = entry {
+                        if let ThreadEntryWorkspace::Open(ws) = &thread.workspace {
+                            if ws.read(cx).project_group_key(cx) == group_key {
+                                return Some((thread.metadata.clone(), ws.clone()));
+                            }
+                        }
+                    }
+                    None
+                });
+                if let Some((metadata, ws)) = first_thread {
+                    self.activate_thread(metadata, &ws, false, window, cx);
+                    switched = true;
+                }
+            }
+
+            if !switched {
+                self.active_entry = None;
+            }
+        }
+
+        self.update_entries(cx);
+    }
+
+    /// Reads a draft's prompt text from its ConversationView in the AgentPanel.
+    fn read_draft_text(
+        &self,
+        draft_id: DraftId,
+        workspace: &Entity<Workspace>,
+        cx: &App,
+    ) -> Option<SharedString> {
+        let panel = workspace.read(cx).panel::<AgentPanel>(cx)?;
+        let raw = panel.read(cx).draft_editor_text(draft_id, cx)?;
+        let cleaned = Self::clean_mention_links(&raw);
+        let mut text: String = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        if text.is_empty() {
+            return None;
+        }
+
+        const MAX_CHARS: usize = 250;
+
+        if let Some((truncate_at, _)) = text.char_indices().nth(MAX_CHARS) {
+            text.truncate(truncate_at);
+        }
+
+        Some(text.into())
     }
 
     fn active_project_group_key(&self, cx: &App) -> Option<ProjectGroupKey> {
@@ -3996,111 +4097,86 @@ impl Sidebar {
     fn render_draft_thread(
         &self,
         ix: usize,
+        draft_id: Option<DraftId>,
+        key: &ProjectGroupKey,
+        workspace: Option<&Entity<Workspace>>,
         is_active: bool,
         worktrees: &[WorktreeInfo],
         is_selected: bool,
+        can_dismiss: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let label: SharedString = if is_active {
-            self.active_draft_text(cx)
-                .unwrap_or_else(|| "New Thread".into())
-        } else {
-            "New Thread".into()
-        };
+        let label: SharedString = draft_id
+            .and_then(|id| workspace.and_then(|ws| self.read_draft_text(id, ws, cx)))
+            .unwrap_or_else(|| "Draft Thread".into());
 
         let id = SharedString::from(format!("draft-thread-btn-{}", ix));
-
-        let thread_item = ThreadItem::new(id, label)
-            .icon(IconName::Plus)
-            .icon_color(Color::Custom(cx.theme().colors().icon_muted.opacity(0.8)))
-            .worktrees(
-                worktrees
-                    .iter()
-                    .map(|wt| ThreadItemWorktreeInfo {
-                        name: wt.name.clone(),
-                        full_path: wt.full_path.clone(),
-                        highlight_positions: wt.highlight_positions.clone(),
-                        kind: wt.kind,
-                    })
-                    .collect(),
-            )
-            .selected(true)
-            .focused(is_selected)
-            .on_click(cx.listener(|this, _, window, cx| {
-                if let Some(workspace) = this.active_workspace(cx) {
-                    if !AgentPanel::is_visible(&workspace, cx) {
-                        workspace.update(cx, |workspace, cx| {
-                            workspace.focus_panel::<AgentPanel>(window, cx);
-                        });
-                    }
-                }
-            }));
-
-        div()
-            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                cx.stop_propagation();
+        let worktrees = worktrees
+            .iter()
+            .map(|worktree| ThreadItemWorktreeInfo {
+                name: worktree.name.clone(),
+                full_path: worktree.full_path.clone(),
+                highlight_positions: worktree.highlight_positions.clone(),
+                kind: worktree.kind,
             })
-            .child(thread_item)
-            .into_any_element()
-    }
+            .collect();
 
-    fn render_new_thread(
-        &self,
-        ix: usize,
-        key: &ProjectGroupKey,
-        worktrees: &[WorktreeInfo],
-        workspace: Option<&Entity<Workspace>>,
-        is_selected: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let label: SharedString = DEFAULT_THREAD_TITLE.into();
+        let is_hovered = self.hovered_thread_index == Some(ix);
         let key = key.clone();
+        let workspace_for_click = workspace.cloned();
+        let workspace_for_remove = workspace.cloned();
 
-        let id = SharedString::from(format!("new-thread-btn-{}", ix));
-
-        let mut thread_item = ThreadItem::new(id, label)
-            .icon(IconName::Plus)
-            .icon_color(Color::Custom(cx.theme().colors().icon_muted.opacity(0.8)))
-            .worktrees(
-                worktrees
-                    .iter()
-                    .map(|wt| ThreadItemWorktreeInfo {
-                        name: wt.name.clone(),
-                        full_path: wt.full_path.clone(),
-                        highlight_positions: wt.highlight_positions.clone(),
-                        kind: wt.kind,
-                    })
-                    .collect(),
-            )
-            .selected(false)
+        ThreadItem::new(id, label)
+            .icon(IconName::Pencil)
+            .icon_color(Color::Custom(cx.theme().colors().icon_muted.opacity(0.4)))
+            .worktrees(worktrees)
+            .selected(is_active)
             .focused(is_selected)
+            .hovered(is_hovered)
+            .on_hover(cx.listener(move |this, is_hovered: &bool, _window, cx| {
+                if *is_hovered {
+                    this.hovered_thread_index = Some(ix);
+                } else if this.hovered_thread_index == Some(ix) {
+                    this.hovered_thread_index = None;
+                }
+                cx.notify();
+            }))
             .on_click(cx.listener(move |this, _, window, cx| {
-                this.selection = None;
-                if let Some(workspace) = this.multi_workspace.upgrade().and_then(|mw| {
-                    mw.read(cx)
-                        .workspace_for_paths(key.path_list(), key.host().as_ref(), cx)
-                }) {
-                    this.create_new_thread(&workspace, window, cx);
+                if let Some(draft_id) = draft_id {
+                    if let Some(workspace) = &workspace_for_click {
+                        this.activate_draft(draft_id, workspace, window, cx);
+                    }
                 } else {
+                    // Placeholder for a group with no workspace — open it.
                     this.open_workspace_for_group(&key, window, cx);
                 }
-            }));
-
-        // Linked worktree DraftThread entries can be dismissed, which removes
-        // the workspace from the multi-workspace.
-        if let Some(workspace) = workspace.cloned() {
-            thread_item = thread_item.action_slot(
-                IconButton::new("close-worktree-workspace", IconName::Close)
-                    .icon_size(IconSize::Small)
-                    .icon_color(Color::Muted)
-                    .tooltip(Tooltip::text("Close Workspace"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.remove_worktree_workspace(workspace.clone(), window, cx);
-                    })),
-            );
-        }
-
-        thread_item.into_any_element()
+            }))
+            .when(can_dismiss && draft_id.is_some(), |this| {
+                let draft_id = draft_id.unwrap();
+                this.action_slot(
+                    div()
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .child(
+                            IconButton::new(
+                                SharedString::from(format!("close-draft-{}", ix)),
+                                IconName::Close,
+                            )
+                            .icon_size(IconSize::Small)
+                            .icon_color(Color::Muted)
+                            .tooltip(Tooltip::text("Remove Draft"))
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    if let Some(workspace) = &workspace_for_remove {
+                                        this.remove_draft(draft_id, workspace, window, cx);
+                                    }
+                                },
+                            )),
+                        ),
+                )
+            })
+            .into_any_element()
     }
 
     fn render_no_results(&self, cx: &mut Context<Self>) -> impl IntoElement {
