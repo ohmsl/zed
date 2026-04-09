@@ -1538,11 +1538,6 @@ impl Sidebar {
             .entries
             .get(ix + 1)
             .is_some_and(|entry| matches!(entry, ListEntry::DraftThread { .. }));
-        let show_new_thread_button = !has_new_thread_entry && !self.has_filter_query(cx);
-        let workspace = self.multi_workspace.upgrade().and_then(|mw| {
-            mw.read(cx)
-                .workspace_for_paths(key.path_list(), key.host().as_ref(), cx)
-        });
 
         let key_for_toggle = key.clone();
         let key_for_collapse = key.clone();
@@ -1688,37 +1683,39 @@ impl Sidebar {
                             })),
                         )
                     })
-                    .when_some(
-                        workspace.filter(|_| show_new_thread_button),
-                        |this, workspace| {
-                            let key = key.clone();
-                            let focus_handle = self.focus_handle.clone();
-                            this.child(
-                                IconButton::new(
-                                    SharedString::from(format!(
-                                        "{id_prefix}project-header-new-thread-{ix}",
-                                    )),
-                                    IconName::Plus,
-                                )
-                                .icon_size(IconSize::Small)
-                                .tooltip(move |_, cx| {
-                                    Tooltip::for_action_in(
-                                        "New Thread",
-                                        &NewThread,
-                                        &focus_handle,
-                                        cx,
-                                    )
-                                })
-                                .on_click(cx.listener(
-                                    move |this, _, window, cx| {
-                                        this.collapsed_groups.remove(&key);
-                                        this.selection = None;
-                                        this.create_new_thread(&workspace, window, cx);
-                                    },
-                                )),
-                            )
-                        },
-                    ),
+                    .child({
+                        let key = key.clone();
+                        let focus_handle = self.focus_handle.clone();
+                        IconButton::new(
+                            SharedString::from(format!(
+                                "{id_prefix}project-header-new-thread-{ix}",
+                            )),
+                            IconName::Plus,
+                        )
+                        .icon_size(IconSize::Small)
+                        .tooltip(move |_, cx| {
+                            Tooltip::for_action_in("New Thread", &NewThread, &focus_handle, cx)
+                        })
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.collapsed_groups.remove(&key);
+                                this.selection = None;
+                                if let Some(workspace) =
+                                    this.multi_workspace.upgrade().and_then(|mw| {
+                                        mw.read(cx).workspace_for_paths(
+                                            key.path_list(),
+                                            key.host().as_ref(),
+                                            cx,
+                                        )
+                                    })
+                                {
+                                    this.create_new_thread(&workspace, window, cx);
+                                } else {
+                                    this.open_workspace_for_group(&key, window, cx);
+                                }
+                            },
+                        ))
+                    }),
             )
             .map(|this| {
                 if !has_threads && is_active {
