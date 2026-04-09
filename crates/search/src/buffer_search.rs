@@ -24,6 +24,7 @@ use gpui::{
 };
 use language::{Language, LanguageRegistry};
 use project::{
+    git_store::branch_diff::{BranchDiff, DiffBase},
     search::SearchQuery,
     search_history::{SearchHistory, SearchHistoryCursor},
 };
@@ -31,11 +32,14 @@ use project::{
 use fs::Fs;
 use settings::{DiffViewStyle, Settings, update_settings_file};
 use std::{any::TypeId, sync::Arc};
-use zed_actions::{outline::ToggleOutline, workspace::CopyPath, workspace::CopyRelativePath};
+use zed_actions::{
+    git as git_actions, outline::ToggleOutline, workspace::CopyPath, workspace::CopyRelativePath,
+};
 
 use ui::{
-    BASE_REM_SIZE_IN_PX, IconButtonShape, PlatformStyle, TextSize, Tooltip, prelude::*,
-    render_modifiers, utils::SearchInputWidth,
+    BASE_REM_SIZE_IN_PX, IconButtonShape, PlatformStyle, TextSize, ToggleButtonGroup,
+    ToggleButtonGroupStyle, ToggleButtonSimple, Tooltip, prelude::*, render_modifiers,
+    utils::SearchInputWidth,
 };
 use util::{ResultExt, paths::PathMatcher};
 use workspace::{
@@ -59,6 +63,12 @@ pub enum Event {
     Dismissed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectDiffMode {
+    Uncommitted,
+    Unstaged,
+}
+
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| BufferSearchBar::register(workspace))
         .detach();
@@ -69,6 +79,7 @@ pub struct BufferSearchBar {
     query_editor_focused: bool,
     replacement_editor: Entity<Editor>,
     replacement_editor_focused: bool,
+    active_item: Option<Box<dyn ItemHandle>>,
     active_searchable_item: Option<Box<dyn SearchableItemHandle>>,
     active_match_index: Option<usize>,
     #[cfg(target_os = "macos")]
@@ -93,6 +104,8 @@ pub struct BufferSearchBar {
     scroll_handle: ScrollHandle,
     regex_language: Option<Arc<Language>>,
     splittable_editor: Option<WeakEntity<SplittableEditor>>,
+    project_diff_mode: Option<ProjectDiffMode>,
+    _branch_diff_subscription: Option<Subscription>,
     _splittable_editor_subscription: Option<Subscription>,
 }
 
@@ -109,7 +122,7 @@ impl Render for BufferSearchBar {
                 .and_then(|weak| weak.upgrade())
                 .map(|splittable_editor| {
                     let is_split = splittable_editor.read(cx).is_split();
-                    let focus_handle = splittable_editor.focus_handle(cx);
+                    let split_focus_handle = splittable_editor.focus_handle(cx);
                     h_flex()
                         .gap_1()
                         .child(
@@ -137,7 +150,7 @@ impl Render for BufferSearchBar {
                                         .into_any()
                                 }))
                                 .on_click({
-                                    let focus_handle = focus_handle.clone();
+                                    let focus_handle = split_focus_handle.clone();
                                     move |_, window, cx| {
                                         if window.modifiers().secondary() {
                                             update_settings_file(
@@ -182,6 +195,7 @@ impl Render for BufferSearchBar {
                                         .into_any()
                                 }))
                                 .on_click({
+                                    let focus_handle = split_focus_handle.clone();
                                     move |_, window, cx| {
                                         if window.modifiers().secondary() {
                                             update_settings_file(
@@ -201,6 +215,51 @@ impl Render for BufferSearchBar {
                                     }
                                 }),
                         )
+                        .when_some(self.project_diff_mode, |this, project_diff_mode| {
+                            let uncommitted_focus = split_focus_handle.clone();
+                            let unstaged_focus = split_focus_handle.clone();
+
+                            this.child(
+                                ToggleButtonGroup::single_row(
+                                    "project-diff-mode",
+                                    [
+                                        ToggleButtonSimple::new(
+                                            "Unstaged",
+                                            cx.listener(move |this, _, window, cx| {
+                                                this.project_diff_mode =
+                                                    Some(ProjectDiffMode::Unstaged);
+                                                unstaged_focus.focus(window, cx);
+                                                window.dispatch_action(
+                                                    git_actions::ViewUnstagedChanges.boxed_clone(),
+                                                    cx,
+                                                );
+                                            }),
+                                        ),
+                                        ToggleButtonSimple::new(
+                                            "Uncommitted",
+                                            cx.listener(move |this, _, window, cx| {
+                                                this.project_diff_mode =
+                                                    Some(ProjectDiffMode::Uncommitted);
+                                                uncommitted_focus.focus(window, cx);
+                                                window.dispatch_action(
+                                                    git_actions::ViewUncommittedChanges
+                                                        .boxed_clone(),
+                                                    cx,
+                                                );
+                                            }),
+                                        ),
+                                    ],
+                                )
+                                .style(ToggleButtonGroupStyle::Outlined)
+                                .auto_width()
+                                .selected_index(
+                                    match project_diff_mode {
+                                        ProjectDiffMode::Unstaged => 0,
+                                        ProjectDiffMode::Uncommitted => 1,
+                                    },
+                                ),
+                            )
+                        })
                 })
         } else {
             None
@@ -620,20 +679,37 @@ impl ToolbarItemView for BufferSearchBar {
         cx: &mut Context<Self>,
     ) -> ToolbarItemLocation {
         cx.notify();
+        self.active_item = item.map(ItemHandle::boxed_clone);
         self.active_searchable_item_subscriptions.take();
         self.active_searchable_item.take();
         self.splittable_editor = None;
+        self.project_diff_mode = None;
+        self._branch_diff_subscription = None;
         self._splittable_editor_subscription = None;
 
         self.pending_search.take();
+        self.refresh_project_diff_mode(cx);
 
         if let Some(splittable_editor) = item
             .and_then(|item| item.act_as_type(TypeId::of::<SplittableEditor>(), cx))
             .and_then(|entity| entity.downcast::<SplittableEditor>().ok())
         {
             self._splittable_editor_subscription =
-                Some(cx.observe(&splittable_editor, |_, _, cx| cx.notify()));
+                Some(cx.observe(&splittable_editor, |this, _, cx| {
+                    this.refresh_project_diff_mode(cx);
+                    cx.notify();
+                }));
             self.splittable_editor = Some(splittable_editor.downgrade());
+        }
+
+        if let Some(branch_diff) = item
+            .and_then(|item| item.act_as_type(TypeId::of::<BranchDiff>(), cx))
+            .and_then(|entity| entity.downcast::<BranchDiff>().ok())
+        {
+            self._branch_diff_subscription = Some(cx.observe(&branch_diff, |this, _, cx| {
+                this.refresh_project_diff_mode(cx);
+                cx.notify();
+            }));
         }
 
         if let Some(searchable_item_handle) =
@@ -717,6 +793,20 @@ impl ToolbarItemView for BufferSearchBar {
 impl BufferSearchBar {
     pub fn query_editor_focused(&self) -> bool {
         self.query_editor_focused
+    }
+
+    fn refresh_project_diff_mode(&mut self, cx: &App) {
+        self.project_diff_mode = self.active_item.as_ref().and_then(|item| {
+            let branch_diff = item
+                .act_as_type(TypeId::of::<BranchDiff>(), cx)?
+                .downcast::<BranchDiff>()
+                .ok()?;
+            match branch_diff.read(cx).diff_base() {
+                DiffBase::Head => Some(ProjectDiffMode::Uncommitted),
+                DiffBase::Index => Some(ProjectDiffMode::Unstaged),
+                _ => None,
+            }
+        });
     }
 
     pub fn register(registrar: &mut impl SearchActionsRegistrar) {
@@ -868,6 +958,7 @@ impl BufferSearchBar {
             query_editor_focused: false,
             replacement_editor,
             replacement_editor_focused: false,
+            active_item: None,
             active_searchable_item: None,
             active_searchable_item_subscriptions: None,
             #[cfg(target_os = "macos")]
@@ -891,6 +982,8 @@ impl BufferSearchBar {
             scroll_handle: ScrollHandle::new(),
             regex_language: None,
             splittable_editor: None,
+            project_diff_mode: None,
+            _branch_diff_subscription: None,
             _splittable_editor_subscription: None,
         }
     }
