@@ -251,6 +251,32 @@ fn save_thread_metadata(
     cx.run_until_parked();
 }
 
+fn save_thread_metadata_with_main_paths(
+    session_id: &str,
+    title: &str,
+    folder_paths: PathList,
+    main_worktree_paths: PathList,
+    cx: &mut TestAppContext,
+) {
+    let session_id = acp::SessionId::new(Arc::from(session_id));
+    let title = SharedString::from(title.to_string());
+    let updated_at = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap();
+    let metadata = ThreadMetadata {
+        session_id,
+        agent_id: agent::ZED_AGENT_ID.clone(),
+        title,
+        updated_at,
+        created_at: None,
+        folder_paths,
+        main_worktree_paths,
+        archived: false,
+    };
+    cx.update(|cx| {
+        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save_manually(metadata, cx));
+    });
+    cx.run_until_parked();
+}
+
 fn focus_sidebar(sidebar: &Entity<Sidebar>, cx: &mut gpui::VisualTestContext) {
     sidebar.update_in(cx, |_, window, cx| {
         cx.focus_self(window);
@@ -2789,14 +2815,15 @@ async fn test_worktree_add_key_collision_removes_duplicate_workspace(cx: &mut Te
     cx.run_until_parked();
 
     // Both project groups should be visible.
-    let entries = visible_entries_as_strings(&sidebar, cx);
-    assert!(
-        entries.iter().any(|e| e.contains("[project-a]")),
-        "should show project-a group: {entries:?}"
-    );
-    assert!(
-        entries.iter().any(|e| e.contains("[project-a, project-b]")),
-        "should show project-a,b group: {entries:?}"
+    assert_eq!(
+        visible_entries_as_strings(&sidebar, cx),
+        vec![
+            //
+            "v [project-a, project-b]",
+            "  Thread B",
+            "v [project-a]",
+            "  Thread A",
+        ]
     );
 
     let workspace_b_id = workspace_b.entity_id();
@@ -2839,18 +2866,14 @@ async fn test_worktree_add_key_collision_removes_duplicate_workspace(cx: &mut Te
     sidebar.update_in(cx, |sidebar, _window, cx| sidebar.update_entries(cx));
     cx.run_until_parked();
 
-    let entries = visible_entries_as_strings(&sidebar, cx);
-    assert!(
-        entries.iter().any(|e| e.contains("Thread A")),
-        "Thread A should be visible: {entries:?}"
-    );
-    assert!(
-        entries.iter().any(|e| e.contains("Thread B")),
-        "Thread B should be visible: {entries:?}"
-    );
-    assert!(
-        entries.iter().filter(|e| e.contains("[project-a")).count() == 1,
-        "should have exactly 1 project header: {entries:?}"
+    assert_eq!(
+        visible_entries_as_strings(&sidebar, cx),
+        vec![
+            //
+            "v [project-a, project-b]",
+            "  Thread A",
+            "  Thread B",
+        ]
     );
 }
 
@@ -3412,13 +3435,21 @@ async fn test_git_worktree_added_live_updates_sidebar(cx: &mut TestAppContext) {
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
     let sidebar = setup_sidebar(&multi_workspace, cx);
 
-    // Save a thread against a worktree path that doesn't exist yet.
-    save_named_thread_metadata("wt-thread", "Worktree Thread", &worktree_project, cx).await;
+    // Save a thread against a worktree path with the correct main
+    // worktree association (as if the git state had been resolved).
+    save_thread_metadata_with_main_paths(
+        "wt-thread",
+        "Worktree Thread",
+        PathList::new(&[PathBuf::from("/wt/rosewood")]),
+        PathList::new(&[PathBuf::from("/project")]),
+        cx,
+    );
 
     multi_workspace.update_in(cx, |_, _window, cx| cx.notify());
     cx.run_until_parked();
 
-    // Thread is not visible yet — no worktree knows about this path.
+    // Thread is not visible yet — the linked worktree hasn't been
+    // discovered by any workspace's git state.
     assert_eq!(
         visible_entries_as_strings(&sidebar, cx),
         vec![
@@ -3699,7 +3730,7 @@ async fn test_multi_worktree_thread_shows_multiple_chips(cx: &mut TestAppContext
         vec![
             //
             "v [project_a, project_b]",
-            "  Cross Worktree Thread {olivetti}, {selectric}",
+            "  Cross Worktree Thread {project_a:olivetti}, {project_b:selectric}",
         ]
     );
 }

@@ -477,7 +477,7 @@ impl ThreadMetadataStore {
         }
     }
 
-    pub fn migrate_main_worktree_paths(
+    pub fn update_main_worktree_paths(
         &mut self,
         old_paths: &PathList,
         new_paths: PathList,

@@ -563,12 +563,9 @@ impl MultiWorkspace {
         cx.subscribe_in(&project, window, {
             let workspace = workspace.downgrade();
             move |this, _project, event, _window, cx| match event {
-                project::Event::WorktreeAdded(_) | project::Event::WorktreeRemoved(_) => {
-                    if let Some(workspace) = workspace.upgrade() {
-                        this.handle_workspace_key_change(&workspace, cx);
-                    }
-                }
-                project::Event::WorktreeUpdatedRootRepoCommonDir(_) => {
+                project::Event::WorktreeAdded(_)
+                | project::Event::WorktreeRemoved(_)
+                | project::Event::WorktreeUpdatedRootRepoCommonDir(_) => {
                     if let Some(workspace) = workspace.upgrade() {
                         this.handle_workspace_key_change(&workspace, cx);
                     }
@@ -1407,7 +1404,8 @@ impl MultiWorkspace {
         );
 
         let cached_ids: HashSet<EntityId> = self.workspace_group_keys.keys().copied().collect();
-        let workspace_ids: HashSet<EntityId> = self.workspaces().map(|ws| ws.entity_id()).collect();
+        let workspace_ids: HashSet<EntityId> =
+            self.workspaces.iter().map(|ws| ws.entity_id()).collect();
         anyhow::ensure!(
             cached_ids == workspace_ids,
             "workspace_group_keys entity IDs don't match workspaces.\n\
