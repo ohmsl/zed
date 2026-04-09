@@ -24,6 +24,7 @@ markdown_preview.workspace = true
 release_channel.workspace = true
 semver.workspace = true
 serde.workspace = true
+settings.workspace = true
 serde_json.workspace = true
 smol.workspace = true
 telemetry.workspace = true

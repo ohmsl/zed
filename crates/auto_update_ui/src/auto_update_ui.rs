@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use agent_settings::{AgentSettings, WindowLayout};
@@ -6,12 +8,14 @@ use db::kvp::Dismissable;
 use editor::{Editor, MultiBuffer};
 use fs::Fs;
 use gpui::{
-    App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Window, actions, prelude::*,
+    App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Subscription, Window, actions,
+    prelude::*,
 };
 use markdown_preview::markdown_preview_view::{MarkdownPreviewMode, MarkdownPreviewView};
 use release_channel::{AppVersion, ReleaseChannel};
 use semver::Version;
 use serde::Deserialize;
+use settings::SettingsStore;
 use smol::io::AsyncReadExt;
 use ui::{AnnouncementToast, ListBulletItem, ParallelAgentsIllustration, prelude::*};
 use util::{ResultExt as _, maybe};
@@ -207,12 +211,43 @@ fn announcement_for_version(version: &Version, cx: &App) -> Option<AnnouncementC
                         let already_agent_layout =
                             matches!(AgentSettings::get_layout(cx), WindowLayout::Agent(_));
 
-                        if !already_agent_layout {
-                            AgentSettings::set_layout(WindowLayout::Agent(None), fs.clone(), cx);
-                        }
-
                         window.dispatch_action(Box::new(FocusWorkspaceSidebar), cx);
-                        window.dispatch_action(Box::new(zed_actions::assistant::ToggleFocus), cx);
+
+                        if already_agent_layout {
+                            window
+                                .dispatch_action(Box::new(zed_actions::assistant::ToggleFocus), cx);
+                        } else {
+                            AgentSettings::set_layout(WindowLayout::Agent(None), fs.clone(), cx);
+
+                            // Focus the agent panel after the layout change takes
+                            // effect.  `set_layout` writes to the settings file
+                            // asynchronously; dispatching ToggleFocus before the
+                            // file is reloaded would open the agent panel in its
+                            // old dock position and the subsequent panel migration
+                            // can leave the wrong panel visible.  Global observers
+                            // fire in registration order, so by the time this
+                            // observer runs the panel-migration observers (registered
+                            // at workspace creation) have already moved every panel.
+                            let window_handle = window.window_handle();
+                            let subscription = Rc::new(RefCell::new(None::<Subscription>));
+                            let subscription_ref = subscription.clone();
+                            *subscription.borrow_mut() =
+                                Some(cx.observe_global::<SettingsStore>(move |cx| {
+                                    if matches!(
+                                        AgentSettings::get_layout(cx),
+                                        WindowLayout::Agent(_)
+                                    ) {
+                                        cx.update_window(window_handle, |_, window, cx| {
+                                            window.dispatch_action(
+                                                Box::new(zed_actions::assistant::ToggleFocus),
+                                                cx,
+                                            );
+                                        })
+                                        .ok();
+                                        subscription_ref.borrow_mut().take();
+                                    }
+                                }));
+                        }
                     })),
                     on_dismiss: Some(Arc::new(|cx| {
                         ParallelAgentAnnouncement::set_dismissed(true, cx)
