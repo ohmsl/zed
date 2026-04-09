@@ -621,9 +621,16 @@ impl MultiWorkspace {
             .cloned()
             .collect();
 
-        for ws in &duplicate_workspaces {
-            self.detach_workspace(ws, cx);
-            self.workspaces.retain(|w| w != ws);
+        if duplicate_workspaces.contains(&active_workspace) {
+            // The active workspace is among the duplicates — drop the
+            // incoming workspace instead so the user stays where they are.
+            self.detach_workspace(workspace, cx);
+            self.workspaces.retain(|w| w != workspace);
+        } else {
+            for ws in &duplicate_workspaces {
+                self.detach_workspace(ws, cx);
+                self.workspaces.retain(|w| w != ws);
+            }
         }
 
         // Propagate folder adds/removes to linked worktree siblings

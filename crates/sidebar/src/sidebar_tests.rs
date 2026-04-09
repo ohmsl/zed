@@ -2878,39 +2878,139 @@ async fn test_worktree_add_key_collision_removes_duplicate_workspace(cx: &mut Te
 }
 
 #[gpui::test]
-async fn test_worktree_collision_removes_active_workspace(cx: &mut TestAppContext) {
+async fn test_worktree_collision_keeps_active_workspace(cx: &mut TestAppContext) {
     // When workspace A adds a folder that makes it collide with workspace B,
-    // and B is the *active* workspace, B should still be removed and the
-    // active workspace should fall back to A.
-    let (fs, project_a) = init_multi_project_test(&["/project-a", "/project-b"], cx).await;
-    let (multi_workspace, cx) =
-        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
-    let _sidebar = setup_sidebar(&multi_workspace, cx);
+    // and B is the *active* workspace, A (the incoming one) should be
+    // dropped so the user stays on B. A linked worktree sibling of A
+    // should migrate into B's group.
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
 
-    // Create workspace B with both worktrees [/project-a, /project-b].
+    // Set up /project-a with a linked worktree.
+    fs.insert_tree(
+        "/project-a",
+        serde_json::json!({
+            ".git": {
+                "worktrees": {
+                    "feature": {
+                        "commondir": "../../",
+                        "HEAD": "ref: refs/heads/feature",
+                    },
+                },
+            },
+            "src": {},
+        }),
+    )
+    .await;
+    fs.insert_tree(
+        "/wt-feature",
+        serde_json::json!({
+            ".git": "gitdir: /project-a/.git/worktrees/feature",
+            "src": {},
+        }),
+    )
+    .await;
+    fs.add_linked_worktree_for_repo(
+        Path::new("/project-a/.git"),
+        false,
+        git::repository::Worktree {
+            path: PathBuf::from("/wt-feature"),
+            ref_name: Some("refs/heads/feature".into()),
+            sha: "aaa".into(),
+            is_main: false,
+        },
+    )
+    .await;
+    fs.insert_tree("/project-b", serde_json::json!({ ".git": {}, "src": {} }))
+        .await;
+    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+
+    let project_a = project::Project::test(fs.clone(), ["/project-a".as_ref()], cx).await;
+    project_a.update(cx, |p, cx| p.git_scans_complete(cx)).await;
+
+    // Linked worktree sibling of A.
+    let project_wt = project::Project::test(fs.clone(), ["/wt-feature".as_ref()], cx).await;
+    project_wt
+        .update(cx, |p, cx| p.git_scans_complete(cx))
+        .await;
+
+    // Workspace B has both folders already.
     let project_b = project::Project::test(
         fs.clone() as Arc<dyn Fs>,
         ["/project-a".as_ref(), "/project-b".as_ref()],
         cx,
     )
     .await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+
+    // Add agent panels to all workspaces.
+    let workspace_a_entity = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    add_agent_panel(&workspace_a_entity, cx);
+
+    // Add the linked worktree workspace (sibling of A).
+    let workspace_wt = multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_wt.clone(), window, cx)
+    });
+    add_agent_panel(&workspace_wt, cx);
+    cx.run_until_parked();
+
+    // Add workspace B (will become active).
     let workspace_b = multi_workspace.update_in(cx, |mw, window, cx| {
         mw.test_add_workspace(project_b.clone(), window, cx)
     });
+    add_agent_panel(&workspace_b, cx);
     cx.run_until_parked();
 
-    // Workspace B is now active (test_add_workspace calls activate).
-    let workspace_a = multi_workspace.read_with(cx, |mw, _| {
-        mw.workspaces()
-            .find(|ws| ws.entity_id() != workspace_b.entity_id())
-            .unwrap()
-            .clone()
-    });
+    // Save threads in each group.
+    save_named_thread_metadata("thread-a", "Thread A", &project_a, cx).await;
+    save_thread_metadata_with_main_paths(
+        "thread-wt",
+        "Worktree Thread",
+        PathList::new(&[PathBuf::from("/wt-feature")]),
+        PathList::new(&[PathBuf::from("/project-a")]),
+        cx,
+    );
+    save_named_thread_metadata("thread-b", "Thread B", &project_b, cx).await;
+
+    sidebar.update_in(cx, |sidebar, _window, cx| sidebar.update_entries(cx));
+    cx.run_until_parked();
+
+    // B is active, A and wt-feature are in one group, B in another.
     assert_eq!(
         multi_workspace.read_with(cx, |mw, _| mw.workspace().entity_id()),
         workspace_b.entity_id(),
-        "workspace B should be active before the collision"
+        "workspace B should be active"
     );
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert_eq!(mw.project_group_keys().count(), 2, "should have 2 groups");
+        assert_eq!(mw.workspaces().count(), 3, "should have 3 workspaces");
+    });
+
+    assert_eq!(
+        visible_entries_as_strings(&sidebar, cx),
+        vec![
+            //
+            "v [project-a, project-b]",
+            "  [~ Draft] (active)",
+            "  Thread B",
+            "v [project-a]",
+            "  Thread A",
+            "  Worktree Thread {wt-feature}",
+        ]
+    );
+
+    let workspace_a = multi_workspace.read_with(cx, |mw, _| {
+        mw.workspaces()
+            .find(|ws| {
+                ws.entity_id() != workspace_b.entity_id()
+                    && ws.entity_id() != workspace_wt.entity_id()
+            })
+            .unwrap()
+            .clone()
+    });
 
     // Add /project-b to workspace A's project, causing a collision with B.
     project_a
@@ -2921,20 +3021,66 @@ async fn test_worktree_collision_removes_active_workspace(cx: &mut TestAppContex
         .expect("should add worktree");
     cx.run_until_parked();
 
-    // Workspace B should have been removed.
+    // Workspace A (the incoming duplicate) should have been dropped.
     multi_workspace.read_with(cx, |mw, _cx| {
         let workspace_ids: Vec<_> = mw.workspaces().map(|ws| ws.entity_id()).collect();
         assert!(
-            !workspace_ids.contains(&workspace_b.entity_id()),
-            "workspace B should have been removed"
+            !workspace_ids.contains(&workspace_a.entity_id()),
+            "workspace A should have been dropped"
         );
     });
 
-    // The active workspace should now be A (the one that changed).
+    // The active workspace should still be B.
     assert_eq!(
         multi_workspace.read_with(cx, |mw, _| mw.workspace().entity_id()),
-        workspace_a.entity_id(),
-        "workspace A should be active after collision removed B"
+        workspace_b.entity_id(),
+        "workspace B should still be active"
+    );
+
+    // The linked worktree sibling should have migrated into B's group
+    // (it got the folder add and now shares the same key).
+    multi_workspace.read_with(cx, |mw, _cx| {
+        let workspace_ids: Vec<_> = mw.workspaces().map(|ws| ws.entity_id()).collect();
+        assert!(
+            workspace_ids.contains(&workspace_wt.entity_id()),
+            "linked worktree workspace should still exist"
+        );
+        assert_eq!(
+            mw.project_group_keys().count(),
+            1,
+            "should have 1 group after merge"
+        );
+        assert_eq!(
+            mw.workspaces().count(),
+            2,
+            "should have 2 workspaces (B + linked worktree)"
+        );
+    });
+
+    // The linked worktree workspace should have gotten the new folder.
+    let wt_worktree_count =
+        project_wt.read_with(cx, |project, cx| project.visible_worktrees(cx).count());
+    assert_eq!(
+        wt_worktree_count, 2,
+        "linked worktree project should have gotten /project-b"
+    );
+
+    // After: everything merged under one group. Thread A migrated,
+    // worktree thread shows its chip, B's thread and draft remain.
+    sidebar.update_in(cx, |sidebar, _window, cx| sidebar.update_entries(cx));
+    cx.run_until_parked();
+
+    assert_eq!(
+        visible_entries_as_strings(&sidebar, cx),
+        vec![
+            //
+            "v [project-a, project-b]",
+            "  [~ Draft] (active)",
+            "  [+ New Thread {project-a:wt-feature}]",
+            "  Thread A",
+            "  Worktree Thread {project-a:wt-feature}",
+            "  Thread B",
+        ]
     );
 }
 
