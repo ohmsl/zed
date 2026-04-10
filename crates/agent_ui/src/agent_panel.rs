@@ -1331,7 +1331,6 @@ impl AgentPanel {
     /// The draft is NOT activated — call `activate_draft` to show it.
     pub fn create_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) -> DraftId {
         let id = DraftId::next(cx);
-
         let workspace = self.workspace.clone();
         let project = self.project.clone();
         let fs = self.fs.clone();
@@ -1342,47 +1341,9 @@ impl AgentPanel {
             self.selected_agent.clone()
         };
         let server = agent.server(fs, thread_store);
-
-        let thread_store = server
-            .clone()
-            .downcast::<agent::NativeAgentServer>()
-            .is_some()
-            .then(|| self.thread_store.clone());
-
-        let connection_store = self.connection_store.clone();
-
-        let conversation_view = cx.new(|cx| {
-            crate::ConversationView::new(
-                server,
-                connection_store,
-                agent,
-                None,
-                None,
-                None,
-                None,
-                workspace,
-                project,
-                thread_store,
-                self.prompt_store.clone(),
-                window,
-                cx,
-            )
-        });
-
-        cx.observe(&conversation_view, |this, server_view, cx| {
-            let is_active = this
-                .active_conversation_view()
-                .is_some_and(|active| active.entity_id() == server_view.entity_id());
-            if is_active {
-                cx.emit(AgentPanelEvent::ActiveViewChanged);
-                this.serialize(cx);
-            } else {
-                cx.emit(AgentPanelEvent::BackgroundThreadChanged);
-            }
-            cx.notify();
-        })
-        .detach();
-
+        let conversation_view = self.create_agent_thread(
+            server, None, None, None, None, workspace, project, agent, window, cx,
+        );
         self.draft_threads.insert(id, conversation_view);
         id
     }
@@ -1539,7 +1500,7 @@ impl AgentPanel {
         });
 
         let server = agent.server(fs, thread_store);
-        self.create_agent_thread(
+        let conversation_view = self.create_agent_thread(
             server,
             resume_session_id,
             work_dirs,
@@ -1548,6 +1509,11 @@ impl AgentPanel {
             workspace,
             project,
             agent,
+            window,
+            cx,
+        );
+        self.set_active_view(
+            ActiveView::AgentThread { conversation_view },
             focus,
             window,
             cx,
@@ -2667,10 +2633,9 @@ impl AgentPanel {
         workspace: WeakEntity<Workspace>,
         project: Entity<Project>,
         agent: Agent,
-        focus: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Entity<ConversationView> {
         if self.selected_agent != agent {
             self.selected_agent = agent.clone();
             self.serialize(cx);
@@ -2725,12 +2690,7 @@ impl AgentPanel {
         })
         .detach();
 
-        self.set_active_view(
-            ActiveView::AgentThread { conversation_view },
-            focus,
-            window,
-            cx,
-        );
+        conversation_view
     }
 
     fn active_thread_has_messages(&self, cx: &App) -> bool {
@@ -4884,8 +4844,14 @@ impl AgentPanel {
             id: server.agent_id(),
         };
 
-        self.create_agent_thread(
-            server, None, None, None, None, workspace, project, ext_agent, true, window, cx,
+        let conversation_view = self.create_agent_thread(
+            server, None, None, None, None, workspace, project, ext_agent, window, cx,
+        );
+        self.set_active_view(
+            ActiveView::AgentThread { conversation_view },
+            true,
+            window,
+            cx,
         );
     }
 
