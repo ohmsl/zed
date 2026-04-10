@@ -3521,8 +3521,16 @@ async fn test_sending_message_from_draft_removes_draft(cx: &mut TestAppContext) 
         assert_active_draft(sidebar, &workspace, "should be on draft before sending");
     });
 
-    // Now send a message from the draft. Set up the connection to
-    // respond so the thread gets content.
+    // Simulate what happens when a draft sends its first message:
+    // the AgentPanel's MessageSentOrQueued handler removes the draft
+    // from `draft_threads`, then the sidebar rebuilds. We can't use
+    // the NativeAgentServer in tests, so replicate the key steps:
+    // remove the draft, open a real thread with a stub connection,
+    // and send.
+    let draft_id = panel.read_with(cx, |panel, _| panel.active_draft_id().unwrap());
+    panel.update_in(cx, |panel, _window, _cx| {
+        panel.remove_draft(draft_id);
+    });
     let draft_connection = StubAgentConnection::new();
     draft_connection.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(
         acp::ContentChunk::new("World".into()),
@@ -5949,6 +5957,12 @@ async fn test_archive_thread_active_entry_management(cx: &mut TestAppContext) {
     let panel_b = add_agent_panel(&workspace_b, cx);
     cx.run_until_parked();
 
+    // Explicitly create a draft on workspace_b so the sidebar tracks one.
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.create_new_thread(&workspace_b, window, cx);
+    });
+    cx.run_until_parked();
+
     // --- Scenario 1: archive a thread in the non-active workspace ---
 
     // Create a thread in project-a (non-active — project-b is active).
@@ -7591,6 +7605,12 @@ async fn test_activating_workspace_with_draft_does_not_create_extras(cx: &mut Te
     let _panel_b = add_agent_panel(&workspace_b, cx);
     cx.run_until_parked();
 
+    // Explicitly create a draft on workspace_b so the sidebar tracks one.
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.create_new_thread(&workspace_b, window, cx);
+    });
+    cx.run_until_parked();
+
     // Count project-b's drafts.
     let count_b_drafts = |cx: &mut gpui::VisualTestContext| {
         let entries = visible_entries_as_strings(&sidebar, cx);
@@ -7865,8 +7885,9 @@ mod property_test {
                 let panel =
                     workspace.read_with(cx, |workspace, cx| workspace.panel::<AgentPanel>(cx));
                 if let Some(panel) = panel {
-                    let connection = StubAgentConnection::new();
-                    open_thread_with_connection(&panel, connection, cx);
+                    panel.update_in(cx, |panel, window, cx| {
+                        panel.new_thread(&NewThread, window, cx);
+                    });
                     cx.run_until_parked();
                 }
                 workspace.update_in(cx, |workspace, window, cx| {
@@ -8283,11 +8304,29 @@ mod property_test {
 
         let active_workspace = multi_workspace.read(cx).workspace();
 
-        // 1. active_entry must always be Some after rebuild_contents.
-        let entry = sidebar
-            .active_entry
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("active_entry must always be Some"))?;
+        // 1. active_entry should be Some when the panel has content.
+        //    It may be None when the panel is uninitialized (no drafts,
+        //    no threads), which is fine.
+        //    It may also temporarily point at a different workspace
+        //    when the workspace just changed and the new panel has no
+        //    content yet.
+        let panel = active_workspace.read(cx).panel::<AgentPanel>(cx).unwrap();
+        let panel_has_content = panel.read(cx).active_draft_id().is_some()
+            || panel.read(cx).active_conversation_view().is_some();
+
+        let Some(entry) = sidebar.active_entry.as_ref() else {
+            if panel_has_content {
+                anyhow::bail!("active_entry is None but panel has content (draft or thread)");
+            }
+            return Ok(());
+        };
+
+        // If the entry workspace doesn't match the active workspace
+        // and the panel has no content, this is a transient state that
+        // will resolve when the panel gets content.
+        if entry.workspace().entity_id() != active_workspace.entity_id() && !panel_has_content {
+            return Ok(());
+        }
 
         // 2. The entry's workspace must agree with the multi-workspace's
         //    active workspace.
@@ -8299,7 +8338,6 @@ mod property_test {
         );
 
         // 3. The entry must match the agent panel's current state.
-        let panel = active_workspace.read(cx).panel::<AgentPanel>(cx).unwrap();
         if panel.read(cx).active_draft_id().is_some() {
             anyhow::ensure!(
                 matches!(entry, ActiveEntry::Draft { .. }),

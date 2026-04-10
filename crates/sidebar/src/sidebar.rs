@@ -596,10 +596,6 @@ impl Sidebar {
         cx.emit(workspace::SidebarEvent::SerializeNeeded);
     }
 
-    fn active_entry_workspace(&self) -> Option<&Entity<Workspace>> {
-        self.active_entry.as_ref().map(|entry| entry.workspace())
-    }
-
     fn is_active_workspace(&self, workspace: &Entity<Workspace>, cx: &App) -> bool {
         self.multi_workspace
             .upgrade()
@@ -649,10 +645,10 @@ impl Sidebar {
         cx.subscribe_in(
             workspace,
             window,
-            |this, _workspace, event: &workspace::Event, window, cx| {
+            |this, _workspace, event: &workspace::Event, _window, cx| {
                 if let workspace::Event::PanelAdded(view) = event {
                     if let Ok(agent_panel) = view.clone().downcast::<AgentPanel>() {
-                        this.subscribe_to_agent_panel(&agent_panel, window, cx);
+                        this.subscribe_to_agent_panel(&agent_panel, _window, cx);
                     }
                 }
             },
@@ -892,7 +888,8 @@ impl Sidebar {
                         workspace: active_ws.clone(),
                     });
                 }
-                // else: conversation is mid-load (no session_id yet), keep previous active_entry
+                // else: conversation is mid-load or panel is
+                // uninitialized — keep previous active_entry.
             }
         }
 
@@ -2986,7 +2983,7 @@ impl Sidebar {
         // No neighbor or its workspace isn't open — fall back to a new
         // draft. Use the group workspace (main project) rather than the
         // active entry workspace, which may be a linked worktree that is
-        // about to be cleaned up.
+        // about to be cleaned up or already removed.
         let fallback_workspace = thread_folder_paths
             .and_then(|folder_paths| {
                 let mw = self.multi_workspace.upgrade()?;
@@ -2995,7 +2992,11 @@ impl Sidebar {
                 let group_key = thread_workspace.read(cx).project_group_key(cx);
                 mw.workspace_for_paths(group_key.path_list(), None, cx)
             })
-            .or_else(|| self.active_entry_workspace().cloned());
+            .or_else(|| {
+                self.multi_workspace
+                    .upgrade()
+                    .map(|mw| mw.read(cx).workspace().clone())
+            });
 
         if let Some(workspace) = fallback_workspace {
             self.activate_workspace(&workspace, window, cx);
