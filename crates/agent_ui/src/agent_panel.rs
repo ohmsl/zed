@@ -2456,6 +2456,11 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.selected_agent != agent {
+            self.selected_agent = agent.clone();
+            self.serialize(cx);
+        }
+
         if let Some(store) = ThreadMetadataStore::try_global(cx) {
             store.update(cx, |store, cx| store.unarchive(&session_id, cx));
         }
@@ -3585,7 +3590,7 @@ impl AgentPanel {
                             .action("Toggle Threads Sidebar", Box::new(ToggleWorkspaceSidebar));
 
                         if has_auth_methods {
-                            menu = menu.action("Reauthenticate", Box::new(ReauthenticateAgent))
+                            menu = menu.action("Reauthenticate", Box::new(ReauthenticateAgent));
                         }
 
                         menu

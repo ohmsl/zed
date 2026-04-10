@@ -343,6 +343,10 @@ impl ConversationView {
         }
     }
 
+    pub fn connection_key(&self) -> &Agent {
+        &self.connection_key
+    }
+
     pub fn pending_tool_call<'a>(
         &'a self,
         cx: &'a App,

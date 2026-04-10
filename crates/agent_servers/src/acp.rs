@@ -2,7 +2,7 @@ use acp_thread::{
     AgentConnection, AgentSessionInfo, AgentSessionList, AgentSessionListRequest,
     AgentSessionListResponse,
 };
-use acp_tools::AcpConnectionRegistry;
+
 use action_log::ActionLog;
 use agent_client_protocol::{self as acp, Agent as _, ErrorCode};
 use anyhow::anyhow;
@@ -188,6 +188,10 @@ pub async fn connect(
 const MINIMUM_SUPPORTED_VERSION: acp::ProtocolVersion = acp::ProtocolVersion::V1;
 
 impl AcpConnection {
+    pub fn client_connection(&self) -> &Rc<acp::ClientSideConnection> {
+        &self.connection
+    }
+
     pub async fn stdio(
         agent_id: AgentId,
         project: Entity<Project>,
@@ -286,12 +290,6 @@ impl AcpConnection {
         });
 
         let connection = Rc::new(connection);
-
-        cx.update(|cx| {
-            AcpConnectionRegistry::default_global(cx).update(cx, |registry, cx| {
-                registry.set_active_connection(agent_id.clone(), &connection, cx)
-            });
-        });
 
         let response = connection
             .initialize(
