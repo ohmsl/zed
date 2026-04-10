@@ -2808,6 +2808,14 @@ async fn test_worktree_add_key_collision_removes_duplicate_workspace(cx: &mut Te
     });
     cx.run_until_parked();
 
+    // Switch back to workspace A so it's the active workspace when the collision happens.
+    let workspace_a =
+        multi_workspace.read_with(cx, |mw, _| mw.workspaces().next().unwrap().clone());
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.activate(workspace_a, window, cx);
+    });
+    cx.run_until_parked();
+
     // Save a thread against workspace B [/project-a, /project-b].
     save_named_thread_metadata("thread-b", "Thread B", &project_b, cx).await;
 
@@ -3594,13 +3602,14 @@ async fn test_git_worktree_added_live_updates_sidebar(cx: &mut TestAppContext) {
     multi_workspace.update_in(cx, |_, _window, cx| cx.notify());
     cx.run_until_parked();
 
-    // Thread is not visible yet — the linked worktree hasn't been
-    // discovered by any workspace's git state.
+    // Thread is visible because its main_worktree_paths match the group.
+    // The chip name is derived from the path even before git discovery.
     assert_eq!(
         visible_entries_as_strings(&sidebar, cx),
         vec![
             //
             "v [project]",
+            "  Worktree Thread {rosewood}",
         ]
     );
 

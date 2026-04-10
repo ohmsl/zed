@@ -1024,18 +1024,6 @@ impl Sidebar {
                         }
                     };
 
-                let main_path_list = group_key.path_list();
-
-                // Skip threads whose folder_paths include a linked worktree
-                // that hasn't been discovered by any workspace's git state.
-                let has_unbacked_linked_worktree = |row: &ThreadMetadata| -> bool {
-                    let main_paths = main_path_list.paths();
-                    row.folder_paths.paths().iter().any(|path| {
-                        let is_main = main_paths.iter().any(|mp| mp.as_path() == path.as_path());
-                        !is_main && !linked_to_main.contains_key(&**path)
-                    })
-                };
-
                 // Main code path: one query per group via main_worktree_paths.
                 // The main_worktree_paths column is set on all new threads and
                 // points to the group's canonical paths regardless of which
@@ -1046,9 +1034,6 @@ impl Sidebar {
                     .cloned()
                 {
                     if !seen_session_ids.insert(row.session_id.clone()) {
-                        continue;
-                    }
-                    if has_unbacked_linked_worktree(&row) {
                         continue;
                     }
                     let workspace = resolve_workspace(&row);
