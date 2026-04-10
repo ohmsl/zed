@@ -457,10 +457,10 @@ impl ThreadsDatabase {
 
         let title = thread.title.to_string();
         let updated_at = thread.updated_at.to_rfc3339();
-        let parent_id = thread
+        let parent_id: Option<Arc<str>> = thread
             .subagent_context
             .as_ref()
-            .map(|ctx| ctx.parent_thread_id.0.clone());
+            .map(|ctx| Arc::from(ctx.parent_thread_id.0.to_string()));
         let serialized_folder_paths = folder_paths.serialize();
         let (folder_paths_str, folder_paths_order_str): (Option<String>, Option<String>) =
             if folder_paths.is_empty() {

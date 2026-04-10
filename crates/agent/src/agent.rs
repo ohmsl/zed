@@ -26,7 +26,7 @@ pub use tools::*;
 
 use acp_thread::{
     AcpThread, AgentModelSelector, AgentSessionInfo, AgentSessionList, AgentSessionListRequest,
-    AgentSessionListResponse, TokenUsageRatio, UserMessageId,
+    AgentSessionListResponse, ThreadId, TokenUsageRatio, UserMessageId,
 };
 use agent_client_protocol as acp;
 use anyhow::{Context as _, Result, anyhow};
@@ -328,8 +328,9 @@ impl NativeAgent {
         let connection = Rc::new(NativeAgentConnection(cx.entity()));
 
         let thread = thread_handle.read(cx);
-        let session_id = thread.id().clone();
-        let parent_session_id = thread.parent_thread_id();
+        let thread_id = thread.id();
+        let session_id = thread.session_id().clone();
+        let parent_thread_id = thread.parent_thread_id();
         let title = thread.title();
         let draft_prompt = thread.draft_prompt().map(Vec::from);
         let scroll_position = thread.ui_scroll_position();
@@ -339,12 +340,13 @@ impl NativeAgent {
         let prompt_capabilities_rx = thread.prompt_capabilities_rx.clone();
         let acp_thread = cx.new(|cx| {
             let mut acp_thread = acp_thread::AcpThread::new(
-                parent_session_id,
+                parent_thread_id,
                 title,
                 None,
                 connection,
                 project.clone(),
                 action_log.clone(),
+                thread_id,
                 session_id.clone(),
                 prompt_capabilities_rx,
                 cx,
@@ -658,7 +660,7 @@ impl NativeAgent {
         _: &TitleUpdated,
         cx: &mut Context<Self>,
     ) {
-        let session_id = thread.read(cx).id();
+        let session_id = thread.read(cx).session_id();
         let Some(session) = self.sessions.get(session_id) else {
             return;
         };
@@ -683,7 +685,7 @@ impl NativeAgent {
         usage: &TokenUsageUpdated,
         cx: &mut Context<Self>,
     ) {
-        let Some(session) = self.sessions.get(thread.read(cx).id()) else {
+        let Some(session) = self.sessions.get(thread.read(cx).session_id()) else {
             return;
         };
         session.acp_thread.update(cx, |acp_thread, cx| {
@@ -905,6 +907,7 @@ impl NativeAgent {
 
                 Ok(cx.new(|cx| {
                     let mut thread = Thread::from_db(
+                        ThreadId::new(),
                         id.clone(),
                         db_thread,
                         project_state.project.clone(),
@@ -958,16 +961,11 @@ impl NativeAgent {
         let thread = self.open_thread(id.clone(), project, cx);
         cx.spawn(async move |this, cx| {
             let acp_thread = thread.await?;
-            let result = this
-                .update(cx, |this, cx| {
-                    this.sessions
-                        .get(&id)
-                        .unwrap()
-                        .thread
-                        .update(cx, |thread, cx| thread.summary(cx))
-                })?
-                .await
-                .context("Failed to generate summary")?;
+            let summary_task = this.update(cx, |this, cx| {
+                let session = this.sessions.get(&id).context("session not found")?;
+                anyhow::Ok(session.thread.update(cx, |thread, cx| thread.summary(cx)))
+            })??;
+            let result = summary_task.await.context("Failed to generate summary")?;
             drop(acp_thread);
             Ok(result)
         })
@@ -978,8 +976,8 @@ impl NativeAgent {
             return;
         }
 
-        let id = thread.read(cx).id().clone();
-        let Some(session) = self.sessions.get_mut(&id) else {
+        let session_id = thread.read(cx).session_id().clone();
+        let Some(session) = self.sessions.get_mut(&session_id) else {
             return;
         };
 
@@ -1010,7 +1008,7 @@ impl NativeAgent {
             };
             let db_thread = db_thread.await;
             database
-                .save_thread(id, db_thread, folder_paths)
+                .save_thread(session_id, db_thread, folder_paths)
                 .await
                 .log_err();
             thread_store.update(cx, |store, cx| store.reload(cx));
@@ -1155,7 +1153,7 @@ impl NativeAgentConnection {
         let Some((thread, acp_thread)) = self.0.update(cx, |agent, _cx| {
             agent
                 .sessions
-                .get_mut(&session_id)
+                .get(&session_id)
                 .map(|s| (s.thread.clone(), s.acp_thread.clone()))
         }) else {
             return Task::ready(Err(anyhow!("Session not found")));
@@ -1788,7 +1786,7 @@ impl NativeThreadEnvironment {
         };
         let parent_thread = parent_thread_entity.read(cx);
         let current_depth = parent_thread.depth();
-        let parent_session_id = parent_thread.id().clone();
+        let parent_session_id = parent_thread.session_id().clone();
 
         if current_depth >= MAX_SUBAGENT_DEPTH {
             return Err(anyhow!(
@@ -1803,7 +1801,7 @@ impl NativeThreadEnvironment {
             thread
         });
 
-        let session_id = subagent_thread.read(cx).id().clone();
+        let subagent_thread_id = subagent_thread.read(cx).id();
 
         let acp_thread = self
             .agent
@@ -1821,12 +1819,12 @@ impl NativeThreadEnvironment {
         telemetry::event!(
             "Subagent Started",
             session = parent_thread_entity.read(cx).id().to_string(),
-            subagent_session = session_id.to_string(),
+            subagent_session = subagent_thread_id.to_string(),
             depth,
             is_resumed = false,
         );
 
-        self.prompt_subagent(session_id, subagent_thread, acp_thread)
+        self.prompt_subagent(subagent_thread_id, subagent_thread, acp_thread)
     }
 
     pub(crate) fn resume_subagent_thread(
@@ -1834,12 +1832,17 @@ impl NativeThreadEnvironment {
         session_id: acp::SessionId,
         cx: &mut App,
     ) -> Result<Rc<dyn SubagentHandle>> {
-        let (subagent_thread, acp_thread) = self.agent.update(cx, |agent, _cx| {
+        let (subagent_thread, acp_thread, thread_id) = self.agent.update(cx, |agent, _cx| {
             let session = agent
                 .sessions
                 .get(&session_id)
                 .ok_or_else(|| anyhow!("No subagent session found with id {session_id}"))?;
-            anyhow::Ok((session.thread.clone(), session.acp_thread.clone()))
+            let thread_id = session.thread.read(_cx).id();
+            anyhow::Ok((
+                session.thread.clone(),
+                session.acp_thread.clone(),
+                thread_id,
+            ))
         })??;
 
         let depth = subagent_thread.read(cx).depth();
@@ -1854,12 +1857,12 @@ impl NativeThreadEnvironment {
             );
         }
 
-        self.prompt_subagent(session_id, subagent_thread, acp_thread)
+        self.prompt_subagent(thread_id, subagent_thread, acp_thread)
     }
 
     fn prompt_subagent(
         &self,
-        session_id: acp::SessionId,
+        thread_id: ThreadId,
         subagent_thread: Entity<Thread>,
         acp_thread: Entity<acp_thread::AcpThread>,
     ) -> Result<Rc<dyn SubagentHandle>> {
@@ -1867,7 +1870,7 @@ impl NativeThreadEnvironment {
             anyhow::bail!("Parent thread no longer exists".to_string());
         };
         Ok(Rc::new(NativeSubagentHandle::new(
-            session_id,
+            thread_id,
             subagent_thread,
             acp_thread,
             parent_thread_entity,
@@ -1931,7 +1934,7 @@ enum SubagentPromptResult {
 }
 
 pub struct NativeSubagentHandle {
-    session_id: acp::SessionId,
+    thread_id: ThreadId,
     parent_thread: WeakEntity<Thread>,
     subagent_thread: Entity<Thread>,
     acp_thread: Entity<acp_thread::AcpThread>,
@@ -1939,13 +1942,13 @@ pub struct NativeSubagentHandle {
 
 impl NativeSubagentHandle {
     fn new(
-        session_id: acp::SessionId,
+        thread_id: ThreadId,
         subagent_thread: Entity<Thread>,
         acp_thread: Entity<acp_thread::AcpThread>,
         parent_thread_entity: Entity<Thread>,
     ) -> Self {
         NativeSubagentHandle {
-            session_id,
+            thread_id,
             subagent_thread,
             parent_thread: parent_thread_entity.downgrade(),
             acp_thread,
@@ -1954,8 +1957,12 @@ impl NativeSubagentHandle {
 }
 
 impl SubagentHandle for NativeSubagentHandle {
-    fn id(&self) -> acp::SessionId {
-        self.session_id.clone()
+    fn id(&self) -> ThreadId {
+        self.thread_id
+    }
+
+    fn session_id(&self, cx: &App) -> acp::SessionId {
+        self.subagent_thread.read(cx).session_id().clone()
     }
 
     fn num_entries(&self, cx: &App) -> usize {
@@ -1965,7 +1972,7 @@ impl SubagentHandle for NativeSubagentHandle {
     fn send(&self, message: String, cx: &AsyncApp) -> Task<Result<String>> {
         let thread = self.subagent_thread.clone();
         let acp_thread = self.acp_thread.clone();
-        let subagent_session_id = self.session_id.clone();
+        let subagent_thread_id = self.thread_id;
         let parent_thread = self.parent_thread.clone();
 
         cx.spawn(async move |cx| {
@@ -2065,7 +2072,7 @@ impl SubagentHandle for NativeSubagentHandle {
 
             parent_thread
                 .update(cx, |parent_thread, cx| {
-                    parent_thread.unregister_running_subagent(&subagent_session_id, cx)
+                    parent_thread.unregister_running_subagent(subagent_thread_id, cx)
                 })
                 .ok();
 

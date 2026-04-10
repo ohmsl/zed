@@ -157,12 +157,17 @@ impl crate::TerminalHandle for FakeTerminalHandle {
 }
 
 struct FakeSubagentHandle {
+    thread_id: acp_thread::ThreadId,
     session_id: acp::SessionId,
     send_task: Shared<Task<String>>,
 }
 
 impl SubagentHandle for FakeSubagentHandle {
-    fn id(&self) -> acp::SessionId {
+    fn id(&self) -> acp_thread::ThreadId {
+        self.thread_id
+    }
+
+    fn session_id(&self, _cx: &App) -> acp::SessionId {
         self.session_id.clone()
     }
 

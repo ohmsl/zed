@@ -219,7 +219,7 @@ impl Conversation {
         cx: &'a App,
     ) -> Option<(acp::SessionId, acp::ToolCallId, &'a PermissionOptions)> {
         let thread = self.threads.get(session_id)?;
-        let is_subagent = thread.read(cx).parent_session_id().is_some();
+        let is_subagent = thread.read(cx).parent_thread_id().is_some();
         let (thread, tool_id) = if is_subagent {
             let id = self.permission_requests.get(session_id)?.iter().next()?;
             (thread, id)
@@ -246,7 +246,7 @@ impl Conversation {
             .iter()
             .filter_map(|(session_id, tool_call_ids)| {
                 let thread = self.threads.get(session_id)?;
-                if thread.read(cx).parent_session_id().is_some() && !tool_call_ids.is_empty() {
+                if thread.read(cx).parent_thread_id().is_some() && !tool_call_ids.is_empty() {
                     Some((session_id.clone(), tool_call_ids.len()))
                 } else {
                     None
@@ -1250,7 +1250,7 @@ impl ConversationView {
         cx: &mut Context<Self>,
     ) {
         let thread_id = thread.read(cx).session_id().clone();
-        let is_subagent = thread.read(cx).parent_session_id().is_some();
+        let is_subagent = thread.read(cx).parent_thread_id().is_some();
         match event {
             AcpThreadEvent::NewEntry => {
                 let len = thread.read(cx).entries().len();

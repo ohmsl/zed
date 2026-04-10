@@ -734,6 +734,7 @@ mod test_support {
             cx: &mut gpui::App,
         ) -> Entity<AcpThread> {
             let action_log = cx.new(|_| ActionLog::new(project.clone()));
+            let thread_id = ThreadId::new();
             let thread = cx.new(|cx| {
                 AcpThread::new(
                     None,
@@ -742,6 +743,7 @@ mod test_support {
                     self.clone(),
                     project,
                     action_log,
+                    thread_id,
                     session_id.clone(),
                     watch::Receiver::constant(
                         acp::PromptCapabilities::new()

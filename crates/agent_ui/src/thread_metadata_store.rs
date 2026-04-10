@@ -879,7 +879,7 @@ impl ThreadMetadataStore {
 
         cx.observe_new::<acp_thread::AcpThread>(move |thread, _window, cx| {
             // Don't track subagent threads in the sidebar.
-            if thread.parent_session_id().is_some() {
+            if thread.parent_thread_id().is_some() {
                 return;
             }
 
@@ -965,7 +965,7 @@ impl ThreadMetadataStore {
         cx: &mut Context<Self>,
     ) {
         // Don't track subagent threads in the sidebar.
-        if thread.read(cx).parent_session_id().is_some() {
+        if thread.read(cx).parent_thread_id().is_some() {
             return;
         }
 

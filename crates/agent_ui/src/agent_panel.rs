@@ -3955,7 +3955,7 @@ impl AgentPanel {
                             let thread = active_thread.read(cx);
 
                             if !thread.is_empty() {
-                                let session_id = thread.id().clone();
+                                let session_id = thread.session_id().clone();
                                 this.item(
                                     ContextMenuEntry::new("New From Summary")
                                         .icon(IconName::ThreadFromSummary)

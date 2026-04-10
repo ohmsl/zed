@@ -36,6 +36,26 @@ use util::path_list::PathList;
 use util::{ResultExt, get_default_system_shell_preferring_bash, paths::PathStyle};
 use uuid::Uuid;
 
+/// A unique identifier for a conversation thread, allocated by Zed.
+///
+/// This is the internal identity type used throughout the application for
+/// bookkeeping. It is distinct from `acp::SessionId`, which is allocated
+/// by the agent and used for the wire protocol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ThreadId(pub Uuid);
+
+impl ThreadId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl std::fmt::Display for ThreadId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Key used in ACP ToolCall meta to store the tool's programmatic name.
 /// This is a workaround since ACP's ToolCall doesn't have a dedicated name field.
 pub const TOOL_NAME_META_KEY: &str = "tool_name";
@@ -1017,9 +1037,10 @@ struct RunningTurn {
 }
 
 pub struct AcpThread {
+    thread_id: ThreadId,
     session_id: acp::SessionId,
     work_dirs: Option<PathList>,
-    parent_session_id: Option<acp::SessionId>,
+    parent_thread_id: Option<ThreadId>,
     title: Option<SharedString>,
     provisional_title: Option<SharedString>,
     entries: Vec<AgentThreadEntry>,
@@ -1184,12 +1205,13 @@ impl Error for LoadError {}
 
 impl AcpThread {
     pub fn new(
-        parent_session_id: Option<acp::SessionId>,
+        parent_thread_id: Option<ThreadId>,
         title: Option<SharedString>,
         work_dirs: Option<PathList>,
         connection: Rc<dyn AgentConnection>,
         project: Entity<Project>,
         action_log: Entity<ActionLog>,
+        thread_id: ThreadId,
         session_id: acp::SessionId,
         mut prompt_capabilities_rx: watch::Receiver<acp::PromptCapabilities>,
         cx: &mut Context<Self>,
@@ -1206,7 +1228,8 @@ impl AcpThread {
         });
 
         Self {
-            parent_session_id,
+            thread_id,
+            parent_thread_id,
             work_dirs,
             action_log,
             shared_buffers: Default::default(),
@@ -1233,8 +1256,12 @@ impl AcpThread {
         }
     }
 
-    pub fn parent_session_id(&self) -> Option<&acp::SessionId> {
-        self.parent_session_id.as_ref()
+    pub fn thread_id(&self) -> ThreadId {
+        self.thread_id
+    }
+
+    pub fn parent_thread_id(&self) -> Option<ThreadId> {
+        self.parent_thread_id
     }
 
     pub fn prompt_capabilities(&self) -> acp::PromptCapabilities {
@@ -1845,7 +1872,7 @@ impl AcpThread {
 
         let agent_telemetry_id = self.connection().telemetry_id();
         let session = self.session_id();
-        let parent_session_id = self.parent_session_id();
+        let parent_thread_id = self.parent_thread_id();
         if let ToolCallStatus::Completed | ToolCallStatus::Failed = status {
             let status = if matches!(status, ToolCallStatus::Completed) {
                 "completed"
@@ -1856,7 +1883,7 @@ impl AcpThread {
                 "Agent Tool Call Completed",
                 agent_telemetry_id,
                 session,
-                parent_session_id,
+                parent_thread_id,
                 status
             );
         }
@@ -1960,7 +1987,7 @@ impl AcpThread {
 
     pub fn resolve_locations(&mut self, id: acp::ToolCallId, cx: &mut Context<Self>) {
         let project = self.project.clone();
-        let should_update_agent_location = self.parent_session_id.is_none();
+        let should_update_agent_location = self.parent_thread_id.is_none();
         let Some((_, tool_call)) = self.tool_call_mut(&id) else {
             return;
         };
@@ -2236,7 +2263,7 @@ impl AcpThread {
                 .await?;
 
             this.update(cx, |this, cx| {
-                if this.parent_session_id.is_none() {
+                if this.parent_thread_id.is_none() {
                     this.project
                         .update(cx, |project, cx| project.set_agent_location(None, cx));
                 }
@@ -2538,7 +2565,7 @@ impl AcpThread {
         let limit = limit.unwrap_or(u32::MAX);
         let project = self.project.clone();
         let action_log = self.action_log.clone();
-        let should_update_agent_location = self.parent_session_id.is_none();
+        let should_update_agent_location = self.parent_thread_id.is_none();
         cx.spawn(async move |this, cx| {
             let load = project.update(cx, |project, cx| {
                 let path = project
@@ -2613,7 +2640,7 @@ impl AcpThread {
     ) -> Task<Result<()>> {
         let project = self.project.clone();
         let action_log = self.action_log.clone();
-        let should_update_agent_location = self.parent_session_id.is_none();
+        let should_update_agent_location = self.parent_thread_id.is_none();
         cx.spawn(async move |this, cx| {
             let load = project.update(cx, |project, cx| {
                 let path = project

@@ -6,7 +6,7 @@ use crate::{
     SystemPromptTemplate, Template, Templates, TerminalTool, ToolPermissionDecision,
     UpdatePlanTool, WebSearchTool, decide_permission_from_settings,
 };
-use acp_thread::{MentionUri, UserMessageId};
+use acp_thread::{MentionUri, ThreadId, UserMessageId};
 use action_log::ActionLog;
 use feature_flags::{
     FeatureFlagAppExt as _, StreamingEditFileToolFeatureFlag, UpdatePlanToolFeatureFlag,
@@ -68,7 +68,7 @@ pub const MAX_SUBAGENT_DEPTH: u8 = 1;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SubagentContext {
     /// ID of the parent thread
-    pub parent_thread_id: acp::SessionId,
+    pub parent_thread_id: ThreadId,
 
     /// Current depth level (0 = root agent, 1 = first-level subagent, etc.)
     pub depth: u8,
@@ -620,8 +620,10 @@ pub trait TerminalHandle {
 }
 
 pub trait SubagentHandle {
-    /// The session ID of this subagent thread
-    fn id(&self) -> acp::SessionId;
+    /// The internal thread ID of this subagent thread, allocated by Zed.
+    fn id(&self) -> ThreadId;
+    /// The ACP session ID for this subagent, allocated by the agent.
+    fn session_id(&self, cx: &App) -> acp::SessionId;
     /// The current number of entries in the thread.
     /// Useful for knowing where the next turn will begin
     fn num_entries(&self, cx: &App) -> usize;
@@ -922,7 +924,8 @@ enum CompletionError {
 }
 
 pub struct Thread {
-    id: acp::SessionId,
+    id: ThreadId,
+    session_id: acp::SessionId,
     prompt_id: PromptId,
     updated_at: DateTime<Utc>,
     title: Option<SharedString>,
@@ -996,7 +999,7 @@ impl Thread {
             cx,
         );
         thread.subagent_context = Some(SubagentContext {
-            parent_thread_id: parent_thread.read(cx).id().clone(),
+            parent_thread_id: parent_thread.read(cx).id(),
             depth: parent_thread.read(cx).depth() + 1,
         });
         thread.inherit_parent_settings(parent_thread, cx);
@@ -1048,7 +1051,8 @@ impl Thread {
         let (prompt_capabilities_tx, prompt_capabilities_rx) =
             watch::channel(Self::prompt_capabilities(model.as_deref()));
         Self {
-            id: acp::SessionId::new(uuid::Uuid::new_v4().to_string()),
+            id: ThreadId::new(),
+            session_id: acp::SessionId::new(uuid::Uuid::new_v4().to_string()),
             prompt_id: PromptId::new(),
             updated_at: Utc::now(),
             title: None,
@@ -1103,8 +1107,12 @@ impl Thread {
         self.profile_id = parent.profile_id.clone();
     }
 
-    pub fn id(&self) -> &acp::SessionId {
-        &self.id
+    pub fn id(&self) -> ThreadId {
+        self.id
+    }
+
+    pub fn session_id(&self) -> &acp::SessionId {
+        &self.session_id
     }
 
     /// Returns true if this thread was imported from a shared thread.
@@ -1236,7 +1244,8 @@ impl Thread {
     }
 
     pub fn from_db(
-        id: acp::SessionId,
+        id: ThreadId,
+        session_id: acp::SessionId,
         db_thread: DbThread,
         project: Entity<Project>,
         project_context: Entity<ProjectContext>,
@@ -1279,6 +1288,7 @@ impl Thread {
 
         Self {
             id,
+            session_id,
             prompt_id: PromptId::new(),
             title: if db_thread.title.is_empty() {
                 None
@@ -2908,22 +2918,18 @@ impl Thread {
         self.running_subagents.push(subagent);
     }
 
-    pub(crate) fn unregister_running_subagent(
-        &mut self,
-        subagent_session_id: &acp::SessionId,
-        cx: &App,
-    ) {
+    pub(crate) fn unregister_running_subagent(&mut self, subagent_thread_id: ThreadId, cx: &App) {
         self.running_subagents.retain(|s| {
             s.upgrade()
-                .map_or(false, |s| s.read(cx).id() != subagent_session_id)
+                .map_or(false, |s| s.read(cx).id() != subagent_thread_id)
         });
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn running_subagent_ids(&self, cx: &App) -> Vec<acp::SessionId> {
+    pub fn running_subagent_ids(&self, cx: &App) -> Vec<ThreadId> {
         self.running_subagents
             .iter()
-            .filter_map(|s| s.upgrade().map(|s| s.read(cx).id().clone()))
+            .filter_map(|s| s.upgrade().map(|s| s.read(cx).id()))
             .collect()
     }
 
@@ -2931,10 +2937,8 @@ impl Thread {
         self.subagent_context.is_some()
     }
 
-    pub fn parent_thread_id(&self) -> Option<acp::SessionId> {
-        self.subagent_context
-            .as_ref()
-            .map(|c| c.parent_thread_id.clone())
+    pub fn parent_thread_id(&self) -> Option<ThreadId> {
+        self.subagent_context.as_ref().map(|c| c.parent_thread_id)
     }
 
     pub fn depth(&self) -> u8 {

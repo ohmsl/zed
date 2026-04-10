@@ -56,7 +56,7 @@ impl ThreadFeedbackState {
             }
         }
         let session_id = thread.read(cx).session_id().clone();
-        let parent_session_id = thread.read(cx).parent_session_id().cloned();
+        let parent_session_id = thread.read(cx).parent_thread_id();
         let agent_telemetry_id = thread.read(cx).connection().telemetry_id();
         let task = telemetry.thread_data(&session_id, cx);
         let rating = match feedback {
@@ -1050,7 +1050,7 @@ impl ThreadView {
         cx: &mut Context<Self>,
     ) {
         let session_id = self.thread.read(cx).session_id().clone();
-        let parent_session_id = self.thread.read(cx).parent_session_id().cloned();
+        let parent_session_id = self.thread.read(cx).parent_thread_id();
         let agent_telemetry_id = self.thread.read(cx).connection().telemetry_id();
         let is_first_message = self.thread.read(cx).entries().is_empty();
         let thread = self.thread.downgrade();
@@ -1270,7 +1270,7 @@ impl ThreadView {
         let parent_session_id = self
             .thread
             .read(cx)
-            .parent_session_id()
+            .parent_thread_id()
             .map(|id| id.to_string());
 
         telemetry::event!(
@@ -2235,7 +2235,7 @@ impl ThreadView {
                         this.child(Divider::horizontal().color(DividerColor::Border))
                     })
                     .when(
-                        !changed_buffers.is_empty() && thread.parent_session_id().is_none(),
+                        !changed_buffers.is_empty() && thread.parent_thread_id().is_none(),
                         |this| {
                             this.child(self.render_edits_summary(
                                 &changed_buffers,

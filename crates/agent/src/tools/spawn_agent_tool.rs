@@ -153,12 +153,12 @@ impl AgentTool for SpawnAgentTool {
                     session_info: None,
                 })?;
                 let session_info = SubagentSessionInfo {
-                    session_id: subagent.id(),
+                    session_id: subagent.session_id(cx),
                     message_start_index: subagent.num_entries(cx),
                     message_end_index: None,
                 };
 
-                event_stream.subagent_spawned(subagent.id());
+                event_stream.subagent_spawned(subagent.session_id(cx));
                 event_stream.update_fields_with_meta(
                     acp::ToolCallUpdateFields::new(),
                     Some(acp::Meta::from_iter([(
