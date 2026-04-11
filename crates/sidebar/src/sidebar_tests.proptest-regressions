@@ -5,3 +5,5 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc e5848f13ac6e2dd83819558a65f5836e5196ff6a2dc5289032e28b4cabf2bf83 # shrinks to TestSidebarInvariantsArgs = TestSidebarInvariantsArgs { __seed: 8911164217610394189, raw_operations: [81, 208] }
+cc 83c95196677f617710761c1163124d3eec7db0e99c0c85fb1fd6d26ce5a6fb2a # shrinks to TestSidebarInvariantsArgs = TestSidebarInvariantsArgs { __seed: 17358113519749946733, raw_operations: [225, 16] }
+cc 8c6876d3e226c22e3eb57fa40f9b8d8f0cb6b4d21ea15a9af643b028d44693c8 # shrinks to TestSidebarInvariantsArgs = TestSidebarInvariantsArgs { __seed: 8906097005873738186, raw_operations: [153, 112] }

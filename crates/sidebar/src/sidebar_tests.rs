@@ -1791,9 +1791,8 @@ async fn test_search_only_shows_workspace_headers_with_matches(cx: &mut TestAppC
     });
     cx.run_until_parked();
 
-    let project_b = multi_workspace.read_with(cx, |mw, cx| {
-        mw.workspaces().nth(1).unwrap().read(cx).project().clone()
-    });
+    let project_b =
+        multi_workspace.read_with(cx, |mw, cx| mw.workspace().read(cx).project().clone());
 
     for (id, title, hour) in [
         ("b1", "Refactor sidebar layout", 3),
@@ -1879,9 +1878,8 @@ async fn test_search_matches_workspace_name(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
 
-    let project_b = multi_workspace.read_with(cx, |mw, cx| {
-        mw.workspaces().nth(1).unwrap().read(cx).project().clone()
-    });
+    let project_b =
+        multi_workspace.read_with(cx, |mw, cx| mw.workspace().read(cx).project().clone());
 
     for (id, title, hour) in [
         ("b1", "Refactor sidebar layout", 3),
@@ -2135,17 +2133,14 @@ async fn test_confirm_on_historical_thread_activates_workspace(cx: &mut TestAppC
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
     let sidebar = setup_sidebar(&multi_workspace, cx);
 
+    let workspace_0 = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
     multi_workspace.update_in(cx, |mw, window, cx| {
         mw.create_test_workspace(window, cx).detach();
     });
     cx.run_until_parked();
 
-    let (workspace_0, workspace_1) = multi_workspace.read_with(cx, |mw, _| {
-        (
-            mw.workspaces().next().unwrap().clone(),
-            mw.workspaces().nth(1).unwrap().clone(),
-        )
-    });
+    let workspace_1 = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
 
     save_thread_metadata(
         acp::SessionId::new(Arc::from("hist-1")),
@@ -2170,8 +2165,7 @@ async fn test_confirm_on_historical_thread_activates_workspace(cx: &mut TestAppC
 
     // Switch to workspace 1 so we can verify the confirm switches back.
     multi_workspace.update_in(cx, |mw, window, cx| {
-        let workspace = mw.workspaces().nth(1).unwrap().clone();
-        mw.activate(workspace, window, cx);
+        mw.activate(workspace_1.clone(), window, cx);
     });
     cx.run_until_parked();
     assert_eq!(
@@ -2331,6 +2325,8 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
     let (sidebar, panel_a) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
 
+    let workspace_a = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+
     // Save a thread so it appears in the list.
     let connection_a = StubAgentConnection::new();
     connection_a.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(
@@ -2352,9 +2348,6 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
     });
     let panel_b = add_agent_panel(&workspace_b, cx);
     cx.run_until_parked();
-
-    let workspace_a =
-        multi_workspace.read_with(cx, |mw, _cx| mw.workspaces().next().unwrap().clone());
 
     // ── 1. Initial state: focused thread derived from active panel ─────
     sidebar.read_with(cx, |sidebar, _cx| {
@@ -2454,8 +2447,7 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
     });
 
     multi_workspace.update_in(cx, |mw, window, cx| {
-        let workspace = mw.workspaces().next().unwrap().clone();
-        mw.activate(workspace, window, cx);
+        mw.activate(workspace_a.clone(), window, cx);
     });
     cx.run_until_parked();
 
@@ -2935,6 +2927,8 @@ async fn test_worktree_add_key_collision_removes_duplicate_workspace(cx: &mut Te
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
     let sidebar = setup_sidebar(&multi_workspace, cx);
 
+    let workspace_a = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
     // Save a thread against workspace A [/project-a].
     save_named_thread_metadata("thread-a", "Thread A", &project_a, cx).await;
 
@@ -2951,8 +2945,6 @@ async fn test_worktree_add_key_collision_removes_duplicate_workspace(cx: &mut Te
     cx.run_until_parked();
 
     // Switch back to workspace A so it's the active workspace when the collision happens.
-    let workspace_a =
-        multi_workspace.read_with(cx, |mw, _| mw.workspaces().next().unwrap().clone());
     multi_workspace.update_in(cx, |mw, window, cx| {
         mw.activate(workspace_a, window, cx);
     });
@@ -4846,10 +4838,9 @@ async fn test_activate_archived_thread_no_paths_no_cwd_uses_active_workspace(
         mw.test_add_workspace(project_b, window, cx)
     });
 
-    // Activate workspace B (index 1) to make it the active one.
+    // Activate workspace B to make it the active one.
     multi_workspace.update_in(cx, |mw, window, cx| {
-        let workspace = mw.workspaces().nth(1).unwrap().clone();
-        mw.activate(workspace, window, cx);
+        mw.activate(workspace_b.clone(), window, cx);
     });
     cx.run_until_parked();
     assert_eq!(
@@ -6081,6 +6072,8 @@ async fn test_switch_to_workspace_with_archived_thread_shows_draft(cx: &mut Test
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
     let (sidebar, panel_a) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
 
+    let workspace_a = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+
     let workspace_b = multi_workspace.update_in(cx, |mw, window, cx| {
         mw.test_add_workspace(project_b.clone(), window, cx)
     });
@@ -6105,8 +6098,6 @@ async fn test_switch_to_workspace_with_archived_thread_shows_draft(cx: &mut Test
 
     // Switch back to project-a. Its panel was cleared during archiving,
     // so active_entry should be Draft.
-    let workspace_a =
-        multi_workspace.read_with(cx, |mw, _| mw.workspaces().next().unwrap().clone());
     multi_workspace.update_in(cx, |mw, window, cx| {
         mw.activate(workspace_a.clone(), window, cx);
     });
