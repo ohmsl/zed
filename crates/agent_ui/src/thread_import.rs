@@ -8,7 +8,7 @@ use fs::Fs;
 use futures::FutureExt as _;
 use gpui::{
     App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, MouseDownEvent,
-    Render, SharedString, Task, WeakEntity, Window,
+    Render, SharedString, Task, TaskExt, WeakEntity, Window,
 };
 use notifications::status_toast::{StatusToast, ToastIcon};
 use project::{AgentId, AgentRegistryStore, AgentServerStore};

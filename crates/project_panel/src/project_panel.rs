@@ -25,7 +25,7 @@ use gpui::{
     ExternalPaths, FocusHandle, Focusable, FontWeight, Hsla, InteractiveElement, KeyContext,
     ListHorizontalSizingBehavior, ListSizingBehavior, Modifiers, ModifiersChangedEvent,
     MouseButton, MouseDownEvent, ParentElement, PathPromptOptions, Pixels, Point, PromptLevel,
-    Render, ScrollStrategy, Stateful, Styled, Subscription, Task, UniformListScrollHandle,
+    Render, ScrollStrategy, Stateful, Styled, Subscription, Task, TaskExt, UniformListScrollHandle,
     WeakEntity, Window, actions, anchored, deferred, div, hsla, linear_color_stop, linear_gradient,
     point, px, size, transparent_white, uniform_list,
 };

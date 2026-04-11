@@ -2,8 +2,8 @@ use anyhow::Result;
 use gpui::PathPromptOptions;
 use gpui::{
     AnyView, App, Context, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    ManagedView, MouseButton, Pixels, Render, Subscription, Task, Tiling, Window, WindowId,
-    actions, deferred, px,
+    ManagedView, MouseButton, Pixels, Render, Subscription, Task, TaskExt, Tiling, Window,
+    WindowId, actions, deferred, px,
 };
 use project::{DirectoryLister, DisableAiSettings, Project, ProjectGroupKey};
 use remote::RemoteConnectionOptions;

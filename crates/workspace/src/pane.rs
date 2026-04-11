@@ -24,8 +24,8 @@ use gpui::{
     Action, AnyElement, App, AsyncWindowContext, ClickEvent, ClipboardItem, Context, Corner, Div,
     DragMoveEvent, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle, FocusOutEvent,
     Focusable, KeyContext, MouseButton, NavigationDirection, Pixels, Point, PromptLevel, Render,
-    ScrollHandle, Subscription, Task, WeakEntity, WeakFocusHandle, Window, actions, anchored,
-    deferred, prelude::*,
+    ScrollHandle, Subscription, Task, TaskExt, WeakEntity, WeakFocusHandle, Window, actions,
+    anchored, deferred, prelude::*,
 };
 use itertools::Itertools;
 use language::{Capability, DiagnosticSeverity};

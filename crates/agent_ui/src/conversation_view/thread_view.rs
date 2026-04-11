@@ -10,7 +10,7 @@ use editor::actions::OpenExcerpts;
 
 use crate::StartThreadIn;
 use crate::message_editor::SharedSessionCapabilities;
-use gpui::{Corner, List};
+use gpui::{Corner, List, TaskExt};
 use heapless::Vec as ArrayVec;
 use language_model::{LanguageModelEffortLevel, Speed};
 use settings::update_settings_file;

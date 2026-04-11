@@ -24,7 +24,7 @@ use futures::{
 use gpui::BackgroundExecutor;
 use gpui::http_client::Url;
 use gpui::{
-    App, AsyncApp, Entity, EntityId, Global, SharedString, Task, WeakEntity, actions,
+    App, AsyncApp, Entity, EntityId, Global, SharedString, Task, TaskExt, WeakEntity, actions,
     http_client::{self, AsyncBody, Method},
     prelude::*,
 };

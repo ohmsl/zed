@@ -19,7 +19,7 @@ use db::{
 };
 use fs::Fs;
 use futures::{FutureExt, future::Shared};
-use gpui::{AppContext as _, Entity, Global, Subscription, Task};
+use gpui::{AppContext as _, Entity, Global, Subscription, Task, TaskExt};
 use project::AgentId;
 use remote::RemoteConnectionOptions;
 use ui::{App, Context, SharedString};

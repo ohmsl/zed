@@ -10,7 +10,7 @@ use collections::HashSet;
 use fs::Fs;
 use futures::{AsyncBufReadExt, AsyncReadExt, StreamExt, io::BufReader, stream::BoxStream};
 use gpui::WeakEntity;
-use gpui::{App, AsyncApp, Global, prelude::*};
+use gpui::{App, AsyncApp, Global, TaskExt, prelude::*};
 use http_client::HttpRequestExt;
 use http_client::{AsyncBody, HttpClient, Method, Request as HttpRequest};
 use paths::home_dir;

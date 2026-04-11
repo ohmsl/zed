@@ -21,7 +21,9 @@ use fs::{Fs, RealFs};
 use futures::{StreamExt, channel::oneshot, future};
 use git::GitHostingProviderRegistry;
 use git_ui::clone::clone_and_open;
-use gpui::{App, AppContext, Application, AsyncApp, Focusable as _, QuitMode, UpdateGlobal as _};
+use gpui::{
+    App, AppContext, Application, AsyncApp, Focusable as _, QuitMode, TaskExt, UpdateGlobal as _,
+};
 use gpui_platform;
 
 use gpui_tokio::Tokio;

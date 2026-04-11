@@ -2506,7 +2506,7 @@ mod tests {
         },
     };
     use feature_flags::FeatureFlagAppExt;
-    use gpui::AppContext as _;
+    use gpui::{AppContext as _, TaskExt};
     use pretty_assertions::assert_eq;
     use project::{Project, ProjectGroupKey};
     use remote::SshConnectionOptions;

@@ -18,7 +18,7 @@ use buffer_diff::{BufferDiff, DiffHunkSecondaryStatus, DiffHunkStatus, DiffHunkS
 use collections::HashMap;
 use futures::{StreamExt, channel::oneshot};
 use gpui::{
-    BackgroundExecutor, DismissEvent, TestAppContext, UpdateGlobal, VisualTestContext,
+    BackgroundExecutor, DismissEvent, TaskExt, TestAppContext, UpdateGlobal, VisualTestContext,
     WindowBounds, WindowOptions, div,
 };
 use indoc::indoc;

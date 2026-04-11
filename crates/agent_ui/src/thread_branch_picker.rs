@@ -9,7 +9,7 @@ use fuzzy::StringMatchCandidate;
 use git::repository::Branch as GitBranch;
 use gpui::{
     AnyElement, App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    IntoElement, ParentElement, Render, SharedString, Styled, Task, Window, rems,
+    IntoElement, ParentElement, Render, SharedString, Styled, Task, TaskExt, Window, rems,
 };
 use picker::{Picker, PickerDelegate, PickerEditorPosition};
 use project::Project;

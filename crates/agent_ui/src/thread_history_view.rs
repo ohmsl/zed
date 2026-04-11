@@ -5,7 +5,7 @@ use chrono::{Datelike as _, Local, NaiveDate, TimeDelta, Utc};
 use editor::{Editor, EditorEvent};
 use fuzzy::StringMatchCandidate;
 use gpui::{
-    AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, ScrollStrategy, Task,
+    AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, ScrollStrategy, Task, TaskExt,
     UniformListScrollHandle, Window, uniform_list,
 };
 use std::{fmt::Display, ops::Range};

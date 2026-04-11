@@ -20,8 +20,8 @@ use gpui::{
     FocusHandle, Focusable, Global, IsZero,
     KeyBindingContextPredicate::{And, Descendant, Equal, Identifier, Not, NotEqual, Or},
     KeyContext, KeybindingKeystroke, MouseButton, PlatformKeyboardMapper, Point, ScrollStrategy,
-    ScrollWheelEvent, Stateful, StyledText, Subscription, Task, TextStyleRefinement, WeakEntity,
-    actions, anchored, deferred, div,
+    ScrollWheelEvent, Stateful, StyledText, Subscription, Task, TaskExt, TextStyleRefinement,
+    WeakEntity, actions, anchored, deferred, div,
 };
 use language::{Language, LanguageConfig, ToOffset as _};
 

@@ -19,7 +19,7 @@ use feature_flags::{FeatureFlag, FeatureFlagAppExt as _};
 use gpui::{
     Action, App, AsyncWindowContext, ClipboardItem, Context, Corner, DismissEvent, Entity,
     EntityId, EventEmitter, FocusHandle, Focusable, MouseButton, MouseDownEvent, Point,
-    Subscription, Task, WeakEntity, anchored, deferred,
+    Subscription, Task, TaskExt, WeakEntity, anchored, deferred,
 };
 
 use itertools::Itertools as _;

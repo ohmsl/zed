@@ -9,9 +9,9 @@ use chrono::{DateTime, Utc};
 use git::Clone as GitClone;
 use gpui::{
     Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    ParentElement, Render, Styled, Task, Window, actions,
+    ParentElement, Render, Styled, Task, TaskExt, WeakEntity, Window, actions, linear_color_stop,
+    linear_gradient,
 };
-use gpui::{WeakEntity, linear_color_stop, linear_gradient};
 use menu::{SelectNext, SelectPrevious};
 
 use schemars::JsonSchema;

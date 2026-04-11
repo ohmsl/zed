@@ -1,7 +1,7 @@
 use crate::{DbThread, DbThreadMetadata, ThreadsDatabase};
 use agent_client_protocol as acp;
 use anyhow::{Result, anyhow};
-use gpui::{App, Context, Entity, Global, Task, prelude::*};
+use gpui::{App, Context, Entity, Global, Task, TaskExt, prelude::*};
 use util::path_list::PathList;
 
 struct GlobalThreadStore(Entity<ThreadStore>);

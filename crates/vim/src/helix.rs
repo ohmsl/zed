@@ -11,7 +11,7 @@ use editor::{
     SelectionEffects, ToOffset, ToPoint, movement,
 };
 use gpui::actions;
-use gpui::{Context, Window};
+use gpui::{Context, TaskExt, Window};
 use language::{CharClassifier, CharKind, Point};
 use search::{BufferSearchBar, SearchOptions};
 use settings::Settings;

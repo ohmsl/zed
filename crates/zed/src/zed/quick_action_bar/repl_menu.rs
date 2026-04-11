@@ -1,5 +1,5 @@
 use gpui::ElementId;
-use gpui::{AnyElement, Entity};
+use gpui::{AnyElement, Entity, TaskExt};
 use picker::Picker;
 use repl::{
     ExecutionState, JupyterSettings, Kernel, KernelSpecification, KernelStatus, Session,

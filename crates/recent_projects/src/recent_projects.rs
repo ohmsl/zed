@@ -25,7 +25,7 @@ use disconnected_overlay::DisconnectedOverlay;
 use fuzzy::{StringMatch, StringMatchCandidate};
 use gpui::{
     Action, AnyElement, App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    Subscription, Task, WeakEntity, Window, actions, px,
+    Subscription, Task, TaskExt, WeakEntity, Window, actions, px,
 };
 
 use picker::{
