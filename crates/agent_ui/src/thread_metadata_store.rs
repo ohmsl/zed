@@ -541,8 +541,15 @@ impl ThreadMetadataStore {
         self.threads.get(&thread_id)
     }
 
+    /// Associates a session with a thread_id so that when
+    /// `handle_thread_event` fires later, it reuses this ThreadId instead
+    /// of generating a new one.
+    pub fn associate_session(&mut self, session_id: acp::SessionId, thread_id: ThreadId) {
+        self.sessions.insert(session_id, thread_id);
+    }
+
     /// Returns the `ThreadId` associated with an ACP session, including
-    /// reservations made via `reserve_thread_id` that haven't been saved yet.
+    /// associations made via `associate_session` that haven't been saved yet.
     pub fn thread_id_for_session(&self, session_id: &acp::SessionId) -> Option<ThreadId> {
         self.sessions.get(session_id).copied()
     }
@@ -1115,11 +1122,16 @@ impl ThreadMetadataStore {
 
                 let thread_id = existing_thread
                     .map(|t| t.thread_id)
+                    .or_else(|| {
+                        session_id
+                            .as_ref()
+                            .and_then(|sid| self.sessions.get(sid).copied())
+                    })
                     .unwrap_or_else(ThreadId::new);
 
                 let metadata = ThreadMetadata {
                     thread_id,
-                    session_id: session_id.clone(),
+                    session_id,
                     agent_id,
                     title,
                     created_at: Some(created_at),

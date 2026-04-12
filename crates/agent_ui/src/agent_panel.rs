@@ -24,7 +24,7 @@ use zed_actions::agent::{
     ResolveConflictsWithAgent, ReviewBranchDiff,
 };
 
-use crate::thread_metadata_store::ThreadMetadataStore;
+use crate::thread_metadata_store::{ThreadId, ThreadMetadataStore};
 use crate::{
     AddContextServer, AgentDiffPane, ConversationView, CopyThreadToClipboard, CycleStartThreadIn,
     Follow, InlineAssistant, LoadThreadFromClipboard, NewThread, NewWorktreeBranchTarget,
@@ -813,7 +813,7 @@ pub struct AgentPanel {
     focus_handle: FocusHandle,
     active_view: ActiveView,
     previous_view: Option<ActiveView>,
-    background_threads: HashMap<acp::SessionId, Entity<ConversationView>>,
+    background_threads: HashMap<ThreadId, Entity<ConversationView>>,
     draft_threads: HashMap<DraftId, Entity<ConversationView>>,
     new_thread_menu_handle: PopoverMenuHandle<ContextMenu>,
     start_thread_in_menu_handle: PopoverMenuHandle<ThreadWorktreePicker>,
@@ -1990,7 +1990,7 @@ impl AgentPanel {
         self.workspace_id
     }
 
-    pub fn background_threads(&self) -> &HashMap<acp::SessionId, Entity<ConversationView>> {
+    pub fn background_threads(&self) -> &HashMap<ThreadId, Entity<ConversationView>> {
         &self.background_threads
     }
 
@@ -2027,18 +2027,18 @@ impl AgentPanel {
     }
 
     /// Returns the primary thread views for all retained connections: the
-    pub fn is_background_thread(&self, session_id: &acp::SessionId) -> bool {
-        self.background_threads.contains_key(session_id)
+    pub fn is_background_thread(&self, thread_id: &ThreadId) -> bool {
+        self.background_threads.contains_key(thread_id)
     }
 
-    pub fn cancel_thread(&self, session_id: &acp::SessionId, cx: &mut Context<Self>) -> bool {
+    pub fn cancel_thread(&self, thread_id: &ThreadId, cx: &mut Context<Self>) -> bool {
         let conversation_views = self
             .active_conversation_view()
             .into_iter()
             .chain(self.background_threads.values());
 
         for conversation_view in conversation_views {
-            if let Some(thread_view) = conversation_view.read(cx).thread_view(session_id) {
+            if let Some(thread_view) = conversation_view.read(cx).thread_view(thread_id) {
                 thread_view.update(cx, |view, cx| view.cancel_generation(cx));
                 return true;
             }
@@ -2106,7 +2106,7 @@ impl AgentPanel {
         }
 
         self.background_threads
-            .insert(thread_view.read(cx).id.clone(), conversation_view);
+            .insert(thread_view.read(cx).id, conversation_view);
         self.cleanup_background_threads(cx);
     }
 
@@ -2135,7 +2135,7 @@ impl AgentPanel {
             .saturating_sub(MAX_IDLE_BACKGROUND_THREADS);
         let to_remove = potential_removals
             .into_iter()
-            .map(|(id, _)| id.clone())
+            .map(|(id, _)| *id)
             .take(n)
             .collect::<Vec<_>>();
         for id in to_remove {
@@ -2318,8 +2318,8 @@ impl AgentPanel {
                         if let Some(draft_id) = this.active_draft_id() {
                             this.draft_threads.remove(&draft_id);
                         }
-                        let session_id = view.read(cx).thread.read(cx).session_id().clone();
-                        cx.emit(AgentPanelEvent::MessageSentOrQueued { session_id });
+                        let thread_id = view.read(cx).id;
+                        cx.emit(AgentPanelEvent::MessageSentOrQueued { thread_id });
                     }
                 },
             )
@@ -2605,38 +2605,68 @@ impl AgentPanel {
             });
         }
 
-        if let Some(conversation_view) = self.background_threads.remove(&session_id) {
-            self.set_active_view(
-                ActiveView::AgentThread { conversation_view },
-                focus,
-                window,
-                cx,
-            );
-            return;
-        }
+        let thread_id = ThreadMetadataStore::try_global(cx)
+            .and_then(|store| store.read(cx).thread_id_for_session(&session_id))
+            .or_else(|| {
+                // Fallback: scan active/background threads by ACP session_id
+                let find_thread_id = |cv: &Entity<ConversationView>| -> Option<ThreadId> {
+                    cv.read(cx).active_thread().and_then(|tv| {
+                        let tv = tv.read(cx);
+                        (tv.thread.read(cx).session_id() == &session_id).then_some(tv.id)
+                    })
+                };
+                if let ActiveView::AgentThread { conversation_view } = &self.active_view {
+                    if let Some(id) = find_thread_id(conversation_view) {
+                        return Some(id);
+                    }
+                }
+                if let Some(ActiveView::AgentThread { conversation_view }) = &self.previous_view {
+                    if let Some(id) = find_thread_id(conversation_view) {
+                        return Some(id);
+                    }
+                }
+                for cv in self.background_threads.values() {
+                    if let Some(id) = find_thread_id(cv) {
+                        return Some(id);
+                    }
+                }
+                None
+            });
 
-        if let ActiveView::AgentThread { conversation_view } = &self.active_view {
-            if conversation_view
-                .read(cx)
-                .active_thread()
-                .map(|t| t.read(cx).id.clone())
-                == Some(session_id.clone())
-            {
-                cx.emit(AgentPanelEvent::ActiveViewChanged);
+        if let Some(thread_id) = thread_id {
+            if let Some(conversation_view) = self.background_threads.remove(&thread_id) {
+                self.set_active_view(
+                    ActiveView::AgentThread { conversation_view },
+                    focus,
+                    window,
+                    cx,
+                );
                 return;
             }
-        }
 
-        if let Some(ActiveView::AgentThread { conversation_view }) = &self.previous_view {
-            if conversation_view
-                .read(cx)
-                .active_thread()
-                .map(|t| t.read(cx).id.clone())
-                == Some(session_id.clone())
-            {
-                let view = self.previous_view.take().unwrap();
-                self.set_active_view(view, focus, window, cx);
-                return;
+            if let ActiveView::AgentThread { conversation_view } = &self.active_view {
+                if conversation_view
+                    .read(cx)
+                    .active_thread()
+                    .map(|t| t.read(cx).id)
+                    == Some(thread_id)
+                {
+                    cx.emit(AgentPanelEvent::ActiveViewChanged);
+                    return;
+                }
+            }
+
+            if let Some(ActiveView::AgentThread { conversation_view }) = &self.previous_view {
+                if conversation_view
+                    .read(cx)
+                    .active_thread()
+                    .map(|t| t.read(cx).id)
+                    == Some(thread_id)
+                {
+                    let view = self.previous_view.take().unwrap();
+                    self.set_active_view(view, focus, window, cx);
+                    return;
+                }
             }
         }
 
@@ -2687,12 +2717,18 @@ impl AgentPanel {
 
         let connection_store = self.connection_store.clone();
 
+        let thread_id = resume_session_id.as_ref().and_then(|sid| {
+            ThreadMetadataStore::try_global(cx)
+                .and_then(|store| store.read(cx).thread_id_for_session(sid))
+        });
+
         let conversation_view = cx.new(|cx| {
             crate::ConversationView::new(
                 server,
                 connection_store,
                 agent,
                 resume_session_id,
+                thread_id,
                 work_dirs,
                 title,
                 initial_content,
@@ -3520,7 +3556,7 @@ pub enum AgentPanelEvent {
     ActiveViewChanged,
     ThreadFocused,
     BackgroundThreadChanged,
-    MessageSentOrQueued { session_id: acp::SessionId },
+    MessageSentOrQueued { thread_id: ThreadId },
 }
 
 impl EventEmitter<PanelEvent> for AgentPanel {}
@@ -4972,8 +5008,8 @@ mod tests {
     use super::*;
     use crate::conversation_view::tests::{StubAgentServer, init_test};
     use crate::test_support::{
-        active_session_id, open_thread_with_connection, open_thread_with_custom_connection,
-        send_message,
+        active_session_id, active_thread_id, open_thread_with_connection,
+        open_thread_with_custom_connection, send_message,
     };
     use acp_thread::{StubAgentConnection, ThreadStatus};
     use agent_servers::CODEX_ID;
@@ -5455,9 +5491,10 @@ mod tests {
         panel: &Entity<AgentPanel>,
         connection: &StubAgentConnection,
         cx: &mut VisualTestContext,
-    ) -> acp::SessionId {
+    ) -> (acp::SessionId, ThreadId) {
         open_thread_with_custom_connection(panel, connection.clone(), cx);
         let session_id = active_session_id(panel, cx);
+        let thread_id = active_thread_id(panel, cx);
         send_message(panel, cx);
         cx.update(|_, cx| {
             connection.send_update(
@@ -5467,23 +5504,24 @@ mod tests {
             );
         });
         cx.run_until_parked();
-        session_id
+        (session_id, thread_id)
     }
 
     fn open_idle_thread_with_non_loadable_connection(
         panel: &Entity<AgentPanel>,
         connection: &StubAgentConnection,
         cx: &mut VisualTestContext,
-    ) -> acp::SessionId {
+    ) -> (acp::SessionId, ThreadId) {
         open_thread_with_custom_connection(panel, connection.clone(), cx);
         let session_id = active_session_id(panel, cx);
+        let thread_id = active_thread_id(panel, cx);
 
         connection.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(
             acp::ContentChunk::new("done".into()),
         )]);
         send_message(panel, cx);
 
-        session_id
+        (session_id, thread_id)
     }
 
     async fn setup_panel(cx: &mut TestAppContext) -> (Entity<AgentPanel>, VisualTestContext) {
@@ -5518,7 +5556,7 @@ mod tests {
 
         let connection_a = StubAgentConnection::new();
         open_thread_with_connection(&panel, connection_a, &mut cx);
-        let session_id_a = active_session_id(&panel, &cx);
+        let thread_id_a = active_thread_id(&panel, &cx);
 
         panel.read_with(&cx, |panel, cx| {
             let thread = panel.active_agent_thread(cx).unwrap();
@@ -5538,7 +5576,7 @@ mod tests {
                 "empty draft thread should not be retained in background_threads"
             );
             assert!(
-                !panel.background_threads.contains_key(&session_id_a),
+                !panel.background_threads.contains_key(&thread_id_a),
                 "empty draft thread should not be keyed in background_threads"
             );
         });
@@ -5553,6 +5591,7 @@ mod tests {
         send_message(&panel, &mut cx);
 
         let session_id_a = active_session_id(&panel, &cx);
+        let thread_id_a = active_thread_id(&panel, &cx);
 
         // Send a chunk to keep thread A generating (don't end the turn).
         cx.update(|_, cx| {
@@ -5582,8 +5621,8 @@ mod tests {
                 "Running thread A should be retained in background_views"
             );
             assert!(
-                panel.background_threads.contains_key(&session_id_a),
-                "Background view should be keyed by thread A's session ID"
+                panel.background_threads.contains_key(&thread_id_a),
+                "Background view should be keyed by thread A's thread ID"
             );
         });
     }
@@ -5602,7 +5641,7 @@ mod tests {
         let weak_view_a = panel.read_with(&cx, |panel, _cx| {
             panel.active_conversation_view().unwrap().downgrade()
         });
-        let session_id_a = active_session_id(&panel, &cx);
+        let thread_id_a = active_thread_id(&panel, &cx);
 
         // Thread A should be idle (auto-completed via set_next_prompt_updates).
         panel.read_with(&cx, |panel, cx| {
@@ -5621,8 +5660,8 @@ mod tests {
                 "Idle non-loadable thread A should be retained in background_views"
             );
             assert!(
-                panel.background_threads.contains_key(&session_id_a),
-                "Background view should be keyed by thread A's session ID"
+                panel.background_threads.contains_key(&thread_id_a),
+                "Background view should be keyed by thread A's thread ID"
             );
         });
 
@@ -5641,6 +5680,7 @@ mod tests {
         send_message(&panel, &mut cx);
 
         let session_id_a = active_session_id(&panel, &cx);
+        let thread_id_a = active_thread_id(&panel, &cx);
 
         // Keep thread A generating.
         cx.update(|_, cx| {
@@ -5657,11 +5697,11 @@ mod tests {
         open_thread_with_connection(&panel, connection_b, &mut cx);
         send_message(&panel, &mut cx);
 
-        let session_id_b = active_session_id(&panel, &cx);
+        let thread_id_b = active_thread_id(&panel, &cx);
 
         panel.read_with(&cx, |panel, _cx| {
             assert_eq!(panel.background_threads.len(), 1);
-            assert!(panel.background_threads.contains_key(&session_id_a));
+            assert!(panel.background_threads.contains_key(&thread_id_a));
         });
 
         // Load thread A back via load_agent_thread — should promote from background.
@@ -5686,11 +5726,11 @@ mod tests {
 
         panel.read_with(&cx, |panel, _cx| {
             assert!(
-                !panel.background_threads.contains_key(&session_id_a),
+                !panel.background_threads.contains_key(&thread_id_a),
                 "Promoted thread A should no longer be in background_views"
             );
             assert!(
-                panel.background_threads.contains_key(&session_id_b),
+                panel.background_threads.contains_key(&thread_id_b),
                 "Thread B (idle, non-loadable) should remain retained in background_views"
             );
         });
@@ -5706,13 +5746,13 @@ mod tests {
             .with_agent_id("loadable-stub".into())
             .with_telemetry_id("loadable-stub".into());
         let mut session_ids = Vec::new();
+        let mut thread_ids = Vec::new();
 
         for _ in 0..7 {
-            session_ids.push(open_generating_thread_with_loadable_connection(
-                &panel,
-                &connection,
-                &mut cx,
-            ));
+            let (session_id, thread_id) =
+                open_generating_thread_with_loadable_connection(&panel, &connection, &mut cx);
+            session_ids.push(session_id);
+            thread_ids.push(thread_id);
         }
 
         let base_time = Instant::now();
@@ -5723,10 +5763,10 @@ mod tests {
         cx.run_until_parked();
 
         panel.update(&mut cx, |panel, cx| {
-            for (index, session_id) in session_ids.iter().take(6).enumerate() {
+            for (index, thread_id) in thread_ids.iter().take(6).enumerate() {
                 let conversation_view = panel
                     .background_threads
-                    .get(session_id)
+                    .get(thread_id)
                     .expect("background thread should exist")
                     .clone();
                 conversation_view.update(cx, |view, cx| {
@@ -5743,17 +5783,17 @@ mod tests {
                 "cleanup should keep at most five idle loadable background threads"
             );
             assert!(
-                !panel.background_threads.contains_key(&session_ids[0]),
+                !panel.background_threads.contains_key(&thread_ids[0]),
                 "oldest idle loadable background thread should be removed"
             );
-            for session_id in &session_ids[1..6] {
+            for thread_id in &thread_ids[1..6] {
                 assert!(
-                    panel.background_threads.contains_key(session_id),
+                    panel.background_threads.contains_key(thread_id),
                     "more recent idle loadable background threads should be retained"
                 );
             }
             assert!(
-                !panel.background_threads.contains_key(&session_ids[6]),
+                !panel.background_threads.contains_key(&thread_ids[6]),
                 "the active thread should not also be stored as a background thread"
             );
         });
@@ -5766,24 +5806,28 @@ mod tests {
         let (panel, mut cx) = setup_panel(cx).await;
 
         let non_loadable_connection = StubAgentConnection::new();
-        let non_loadable_session_id = open_idle_thread_with_non_loadable_connection(
-            &panel,
-            &non_loadable_connection,
-            &mut cx,
-        );
+        let (_non_loadable_session_id, non_loadable_thread_id) =
+            open_idle_thread_with_non_loadable_connection(
+                &panel,
+                &non_loadable_connection,
+                &mut cx,
+            );
 
         let loadable_connection = StubAgentConnection::new()
             .with_supports_load_session(true)
             .with_agent_id("loadable-stub".into())
             .with_telemetry_id("loadable-stub".into());
         let mut loadable_session_ids = Vec::new();
+        let mut loadable_thread_ids = Vec::new();
 
         for _ in 0..7 {
-            loadable_session_ids.push(open_generating_thread_with_loadable_connection(
+            let (session_id, thread_id) = open_generating_thread_with_loadable_connection(
                 &panel,
                 &loadable_connection,
                 &mut cx,
-            ));
+            );
+            loadable_session_ids.push(session_id);
+            loadable_thread_ids.push(thread_id);
         }
 
         let base_time = Instant::now();
@@ -5794,10 +5838,10 @@ mod tests {
         cx.run_until_parked();
 
         panel.update(&mut cx, |panel, cx| {
-            for (index, session_id) in loadable_session_ids.iter().take(6).enumerate() {
+            for (index, thread_id) in loadable_thread_ids.iter().take(6).enumerate() {
                 let conversation_view = panel
                     .background_threads
-                    .get(session_id)
+                    .get(thread_id)
                     .expect("background thread should exist")
                     .clone();
                 conversation_view.update(cx, |view, cx| {
@@ -5816,25 +5860,25 @@ mod tests {
             assert!(
                 panel
                     .background_threads
-                    .contains_key(&non_loadable_session_id),
+                    .contains_key(&non_loadable_thread_id),
                 "idle non-loadable background threads should not be cleanup candidates"
             );
             assert!(
                 !panel
                     .background_threads
-                    .contains_key(&loadable_session_ids[0]),
+                    .contains_key(&loadable_thread_ids[0]),
                 "oldest idle loadable background thread should still be removed"
             );
-            for session_id in &loadable_session_ids[1..6] {
+            for thread_id in &loadable_thread_ids[1..6] {
                 assert!(
-                    panel.background_threads.contains_key(session_id),
+                    panel.background_threads.contains_key(thread_id),
                     "more recent idle loadable background threads should be retained"
                 );
             }
             assert!(
                 !panel
                     .background_threads
-                    .contains_key(&loadable_session_ids[6]),
+                    .contains_key(&loadable_thread_ids[6]),
                 "the active loadable thread should not also be stored as a background thread"
             );
         });
@@ -6517,6 +6561,7 @@ mod tests {
         open_thread_with_custom_connection(&panel, connection_a.clone(), &mut cx);
         send_message(&panel, &mut cx);
         let session_id_a = active_session_id(&panel, &cx);
+        let thread_id_a = active_thread_id(&panel, &cx);
 
         // Open thread C — thread A (generating) moves to background.
         // Thread C completes immediately (idle), then opening B moves C to background too.
@@ -6526,23 +6571,24 @@ mod tests {
         )]);
         open_thread_with_custom_connection(&panel, connection_c.clone(), &mut cx);
         send_message(&panel, &mut cx);
-        let session_id_c = active_session_id(&panel, &cx);
+        let thread_id_c = active_thread_id(&panel, &cx);
 
         // Open thread B — thread C (idle, non-loadable) is retained in background.
         let connection_b = StubAgentConnection::new().with_agent_id("agent-b".into());
         open_thread_with_custom_connection(&panel, connection_b.clone(), &mut cx);
         send_message(&panel, &mut cx);
         let session_id_b = active_session_id(&panel, &cx);
+        let _thread_id_b = active_thread_id(&panel, &cx);
 
         let metadata_store = cx.update(|_, cx| ThreadMetadataStore::global(cx));
 
         panel.read_with(&cx, |panel, _cx| {
             assert!(
-                panel.background_threads.contains_key(&session_id_a),
+                panel.background_threads.contains_key(&thread_id_a),
                 "Thread A should be in background_threads"
             );
             assert!(
-                panel.background_threads.contains_key(&session_id_c),
+                panel.background_threads.contains_key(&thread_id_c),
                 "Thread C should be in background_threads"
             );
         });
@@ -6586,7 +6632,7 @@ mod tests {
 
         // Verify thread A's (background) work_dirs are also updated.
         let updated_a_paths = panel.read_with(&cx, |panel, cx| {
-            let bg_view = panel.background_threads.get(&session_id_a).unwrap();
+            let bg_view = panel.background_threads.get(&thread_id_a).unwrap();
             let root_thread = bg_view.read(cx).root_thread(cx).unwrap();
             root_thread
                 .read(cx)
@@ -6606,7 +6652,7 @@ mod tests {
 
         // Verify thread idle C was also updated.
         let updated_c_paths = panel.read_with(&cx, |panel, cx| {
-            let bg_view = panel.background_threads.get(&session_id_c).unwrap();
+            let bg_view = panel.background_threads.get(&thread_id_c).unwrap();
             let root_thread = bg_view.read(cx).root_thread(cx).unwrap();
             root_thread
                 .read(cx)
@@ -6660,7 +6706,7 @@ mod tests {
         );
 
         let after_remove_a = panel.read_with(&cx, |panel, cx| {
-            let bg_view = panel.background_threads.get(&session_id_a).unwrap();
+            let bg_view = panel.background_threads.get(&thread_id_a).unwrap();
             let root_thread = bg_view.read(cx).root_thread(cx).unwrap();
             root_thread
                 .read(cx)

@@ -32,12 +32,12 @@ fn init_test(cx: &mut TestAppContext) {
 }
 
 #[track_caller]
-fn assert_active_thread(sidebar: &Sidebar, session_id: &acp::SessionId, msg: &str) {
+fn assert_active_thread(sidebar: &Sidebar, session_id: &acp::SessionId, cx: &App, msg: &str) {
     assert!(
         sidebar
             .active_entry
             .as_ref()
-            .is_some_and(|e| e.is_active_thread(session_id)),
+            .is_some_and(|e| e.is_active_thread_by_session(session_id, cx)),
         "{msg}: expected active_entry to be Thread({session_id:?}), got {:?}",
         sidebar.active_entry,
     );
@@ -1520,7 +1520,11 @@ async fn test_subagent_permission_request_marks_parent_sidebar_thread_waiting(
     let subagent_thread = panel.read_with(cx, |panel, cx| {
         panel
             .active_conversation_view()
-            .and_then(|conversation| conversation.read(cx).thread_view(&subagent_session_id))
+            .and_then(|conversation| {
+                conversation
+                    .read(cx)
+                    .thread_view_for_session(&subagent_session_id, cx)
+            })
             .map(|thread_view| thread_view.read(cx).thread.clone())
             .expect("Expected subagent thread to be loaded into the conversation")
     });
@@ -2357,6 +2361,7 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
         assert_active_thread(
             sidebar,
             &session_id_a,
+            _cx,
             "The active panel's thread should be focused on startup",
         );
     });
@@ -2386,6 +2391,7 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
         assert_active_thread(
             sidebar,
             &session_id_a,
+            _cx,
             "After clicking a thread, it should be the focused thread",
         );
         assert!(
@@ -2443,6 +2449,7 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
         assert_active_thread(
             sidebar,
             &session_id_b,
+            _cx,
             "Clicking a thread in another workspace should focus that thread",
         );
         assert!(
@@ -2461,6 +2468,7 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
         assert_active_thread(
             sidebar,
             &session_id_a,
+            _cx,
             "Switching workspace should seed focused_thread from the new active panel",
         );
         assert!(
@@ -2487,6 +2495,7 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
         assert_active_thread(
             sidebar,
             &session_id_a,
+            _cx,
             "Opening a thread in a non-active panel should not change focused_thread",
         );
     });
@@ -2500,6 +2509,7 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
         assert_active_thread(
             sidebar,
             &session_id_a,
+            _cx,
             "Defocusing the sidebar should not change focused_thread",
         );
     });
@@ -2518,6 +2528,7 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
         assert_active_thread(
             sidebar,
             &session_id_b2,
+            _cx,
             "Switching workspace should seed focused_thread from the new active panel",
         );
         assert!(
@@ -2541,6 +2552,7 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
         assert_active_thread(
             sidebar,
             &session_id_b2,
+            _cx,
             "Focusing the agent panel thread should set focused_thread",
         );
         assert!(
@@ -3628,10 +3640,11 @@ async fn test_sending_message_from_draft_removes_draft(cx: &mut TestAppContext) 
         "draft should be removed after sending a message"
     );
 
-    sidebar.read_with(cx, |sidebar, _| {
+    sidebar.read_with(cx, |sidebar, cx| {
         assert_active_thread(
             sidebar,
             &new_session_id,
+            cx,
             "active_entry should transition to the new thread after sending",
         );
     });
@@ -5076,9 +5089,9 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window(cx: &m
         cx_a.read(|cx| cx.active_window().unwrap()) == *multi_workspace_b,
         "should activate the window that already owns the matching workspace"
     );
-    sidebar.read_with(cx_a, |sidebar, _| {
+    sidebar.read_with(cx_a, |sidebar, cx| {
             assert!(
-                !matches!(&sidebar.active_entry, Some(ActiveEntry::Thread { session_id: id, .. }) if id == &session_id),
+                !sidebar.active_entry.as_ref().is_some_and(|e| e.is_active_thread_by_session(&session_id, cx)),
                 "source window's sidebar should not eagerly claim focus for a thread opened in another window"
             );
         });
@@ -5118,23 +5131,22 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window_with_t
     let session_id = acp::SessionId::new(Arc::from("archived-cross-window-with-sidebar"));
 
     sidebar_a.update_in(cx_a, |sidebar, window, cx| {
-        sidebar.activate_archived_thread(
-            ThreadMetadata {
-                thread_id: ThreadId::new(),
-                session_id: Some(session_id.clone()),
-                agent_id: agent::ZED_AGENT_ID.clone(),
-                title: "Cross Window Thread".into(),
-                updated_at: Utc::now(),
-                created_at: None,
-                worktree_paths: ThreadWorktreePaths::from_folder_paths(&PathList::new(&[
-                    PathBuf::from("/project-b"),
-                ])),
-                archived: false,
-                remote_connection: None,
-            },
-            window,
-            cx,
-        );
+        let metadata = ThreadMetadata {
+            thread_id: ThreadId::new(),
+            session_id: Some(session_id.clone()),
+            agent_id: agent::ZED_AGENT_ID.clone(),
+            title: "Cross Window Thread".into(),
+            updated_at: Utc::now(),
+            created_at: None,
+            worktree_paths: ThreadWorktreePaths::from_folder_paths(&PathList::new(&[
+                PathBuf::from("/project-b"),
+            ])),
+            archived: false,
+            remote_connection: None,
+        };
+        ThreadMetadataStore::global(cx)
+            .update(cx, |store, cx| store.save_manually(metadata.clone(), cx));
+        sidebar.activate_archived_thread(metadata, window, cx);
     });
     cx_a.run_until_parked();
 
@@ -5156,16 +5168,17 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window_with_t
         cx_a.read(|cx| cx.active_window().unwrap()) == *multi_workspace_b,
         "should activate the window that already owns the matching workspace"
     );
-    sidebar_a.read_with(cx_a, |sidebar, _| {
+    sidebar_a.read_with(cx_a, |sidebar, cx| {
             assert!(
-                !matches!(&sidebar.active_entry, Some(ActiveEntry::Thread { session_id: id, .. }) if id == &session_id),
+                !sidebar.active_entry.as_ref().is_some_and(|e| e.is_active_thread_by_session(&session_id, cx)),
                 "source window's sidebar should not eagerly claim focus for a thread opened in another window"
             );
         });
-    sidebar_b.read_with(cx_b, |sidebar, _| {
+    sidebar_b.read_with(cx_b, |sidebar, cx| {
         assert_active_thread(
             sidebar,
             &session_id,
+            cx,
             "target window's sidebar should eagerly focus the activated archived thread",
         );
     });
@@ -5201,23 +5214,22 @@ async fn test_activate_archived_thread_prefers_current_window_for_matching_paths
     let session_id = acp::SessionId::new(Arc::from("archived-current-window"));
 
     sidebar_a.update_in(cx_a, |sidebar, window, cx| {
-        sidebar.activate_archived_thread(
-            ThreadMetadata {
-                thread_id: ThreadId::new(),
-                session_id: Some(session_id.clone()),
-                agent_id: agent::ZED_AGENT_ID.clone(),
-                title: "Current Window Thread".into(),
-                updated_at: Utc::now(),
-                created_at: None,
-                worktree_paths: ThreadWorktreePaths::from_folder_paths(&PathList::new(&[
-                    PathBuf::from("/project-a"),
-                ])),
-                archived: false,
-                remote_connection: None,
-            },
-            window,
-            cx,
-        );
+        let metadata = ThreadMetadata {
+            thread_id: ThreadId::new(),
+            session_id: Some(session_id.clone()),
+            agent_id: agent::ZED_AGENT_ID.clone(),
+            title: "Current Window Thread".into(),
+            updated_at: Utc::now(),
+            created_at: None,
+            worktree_paths: ThreadWorktreePaths::from_folder_paths(&PathList::new(&[
+                PathBuf::from("/project-a"),
+            ])),
+            archived: false,
+            remote_connection: None,
+        };
+        ThreadMetadataStore::global(cx)
+            .update(cx, |store, cx| store.save_manually(metadata.clone(), cx));
+        sidebar.activate_archived_thread(metadata, window, cx);
     });
     cx_a.run_until_parked();
 
@@ -5225,10 +5237,11 @@ async fn test_activate_archived_thread_prefers_current_window_for_matching_paths
         cx_a.read(|cx| cx.active_window().unwrap()) == *multi_workspace_a,
         "should keep activation in the current window when it already has a matching workspace"
     );
-    sidebar_a.read_with(cx_a, |sidebar, _| {
+    sidebar_a.read_with(cx_a, |sidebar, cx| {
         assert_active_thread(
             sidebar,
             &session_id,
+            cx,
             "current window's sidebar should eagerly focus the activated archived thread",
         );
     });
@@ -5370,10 +5383,11 @@ async fn test_archive_thread_uses_next_threads_own_workspace(cx: &mut TestAppCon
 
     // The sidebar should track T2 as the focused thread (derived from the
     // main panel's active view).
-    sidebar.read_with(cx, |s, _| {
+    sidebar.read_with(cx, |s, cx| {
         assert_active_thread(
             s,
             &thread2_session_id,
+            cx,
             "focused thread should be Thread 2 before archiving",
         );
     });
@@ -5792,7 +5806,7 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
         );
     });
 
-    sidebar.update(cx, |sidebar, _cx| {
+    sidebar.update(cx, |sidebar, cx| {
         let last_accessed = sidebar
             .thread_last_accessed
             .keys()
@@ -5805,7 +5819,7 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
                 .active_entry
                 .as_ref()
                 .expect("active_entry should be set")
-                .is_active_thread(&session_id_c)
+                .is_active_thread_by_session(&session_id_c, cx)
         );
     });
 
@@ -5831,7 +5845,7 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
 
-    sidebar.update(cx, |sidebar, _cx| {
+    sidebar.update(cx, |sidebar, cx| {
         let last_accessed = sidebar
             .thread_last_accessed
             .keys()
@@ -5845,7 +5859,7 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
                 .active_entry
                 .as_ref()
                 .expect("active_entry should be set")
-                .is_active_thread(&session_id_a)
+                .is_active_thread_by_session(&session_id_a, cx)
         );
     });
 
@@ -5877,7 +5891,7 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
 
-    sidebar.update(cx, |sidebar, _cx| {
+    sidebar.update(cx, |sidebar, cx| {
         let last_accessed = sidebar
             .thread_last_accessed
             .keys()
@@ -5892,7 +5906,7 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
                 .active_entry
                 .as_ref()
                 .expect("active_entry should be set")
-                .is_active_thread(&session_id_b)
+                .is_active_thread_by_session(&session_id_b, cx)
         );
     });
 
@@ -6107,9 +6121,12 @@ async fn test_archive_thread_active_entry_management(cx: &mut TestAppContext) {
     let thread_b = agent_ui::test_support::active_session_id(&panel_b, cx);
     cx.run_until_parked();
 
-    sidebar.read_with(cx, |sidebar, _| {
+    sidebar.read_with(cx, |sidebar, cx| {
         assert!(
-            matches!(&sidebar.active_entry, Some(ActiveEntry::Thread { session_id, .. }) if *session_id == thread_b),
+            sidebar
+                .active_entry
+                .as_ref()
+                .is_some_and(|e| e.is_active_thread_by_session(&thread_b, cx)),
             "expected active_entry to be Thread({thread_b}), got: {:?}",
             sidebar.active_entry,
         );
@@ -6403,10 +6420,11 @@ async fn test_archive_last_thread_on_linked_worktree_does_not_create_new_thread_
     );
 
     // Confirm the worktree thread is the active entry.
-    sidebar.read_with(cx, |s, _| {
+    sidebar.read_with(cx, |s, cx| {
         assert_active_thread(
             s,
             &worktree_thread_id,
+            cx,
             "worktree thread should be active before archiving",
         );
     });
@@ -6670,10 +6688,11 @@ async fn test_archive_thread_on_linked_worktree_selects_sibling_thread(cx: &mut 
     cx.run_until_parked();
 
     // Confirm the worktree thread is active.
-    sidebar.read_with(cx, |s, _| {
+    sidebar.read_with(cx, |s, cx| {
         assert_active_thread(
             s,
             &worktree_thread_id,
+            cx,
             "worktree thread should be active before archiving",
         );
     });
@@ -7450,8 +7469,13 @@ async fn test_startup_successful_restoration_no_spurious_draft(cx: &mut TestAppC
     assert_eq!(entries, vec!["v [my-project]", "  Hello *"]);
 
     // active_entry should be Thread, not Draft.
-    sidebar.read_with(cx, |sidebar, _| {
-        assert_active_thread(sidebar, &session_id, "should be on the thread, not a draft");
+    sidebar.read_with(cx, |sidebar, cx| {
+        assert_active_thread(
+            sidebar,
+            &session_id,
+            cx,
+            "should be on the thread, not a draft",
+        );
     });
 }
 
@@ -7556,8 +7580,8 @@ async fn test_project_header_click_restores_last_viewed(cx: &mut TestAppContext)
     cx.run_until_parked();
 
     // The user is now looking at thread_a2.
-    sidebar.read_with(cx, |sidebar, _| {
-        assert_active_thread(sidebar, &thread_a2, "should be on thread_a2");
+    sidebar.read_with(cx, |sidebar, cx| {
+        assert_active_thread(sidebar, &thread_a2, cx, "should be on thread_a2");
     });
 
     // Add project-b and switch to it.
@@ -7598,10 +7622,11 @@ async fn test_project_header_click_restores_last_viewed(cx: &mut TestAppContext)
 
     // The panel should still show thread_a2 (the last thing the user
     // was viewing in project-a), not a draft or thread_a1.
-    sidebar.read_with(cx, |sidebar, _| {
+    sidebar.read_with(cx, |sidebar, cx| {
         assert_active_thread(
             sidebar,
             &thread_a2,
+            cx,
             "switching back to project-a should restore thread_a2",
         );
     });
@@ -8467,15 +8492,15 @@ mod property_test {
                 "panel shows a tracked draft but active_entry is {:?}",
                 entry,
             );
-        } else if let Some(session_id) = panel
+        } else if let Some(thread_id) = panel
             .read(cx)
             .active_conversation_view()
             .and_then(|cv| cv.read(cx).parent_id(cx))
         {
             anyhow::ensure!(
-                matches!(entry, ActiveEntry::Thread { session_id: id, .. } if id == &session_id),
-                "panel has session {:?} but active_entry is {:?}",
-                session_id,
+                matches!(entry, ActiveEntry::Thread { thread_id: id, .. } if id == &thread_id),
+                "panel has thread {:?} but active_entry is {:?}",
+                thread_id,
                 entry,
             );
         }
