@@ -59,7 +59,7 @@ pub fn release_nightly() -> Workflow {
             .push(Push::default().add_tag("nightly")))
         .concurrency(
             Concurrency::default()
-                .group(format!("release-nightly-${{{{ github.event_name }}}}"))
+                .group("release-nightly-${{ github.event_name }}")
                 .cancel_in_progress(true),
         )
         .add_env(("CARGO_TERM_COLOR", "always"))
