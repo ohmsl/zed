@@ -2401,8 +2401,6 @@ async fn test_confirm_on_historical_thread_preserves_typed_draft_in_same_group(
         sidebar.confirm(&Confirm, window, cx);
     });
     cx.run_until_parked();
-    cx.run_until_parked();
-    cx.run_until_parked();
 
     assert_eq!(
         visible_entries_as_strings(&sidebar, cx),
