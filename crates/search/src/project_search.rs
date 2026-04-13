@@ -333,6 +333,7 @@ impl ProjectSearch {
             }
         })
     }
+
     fn subscribe_to_excerpts(
         excerpts: &Entity<MultiBuffer>,
         cx: &mut Context<Self>,
@@ -456,10 +457,10 @@ impl ProjectSearch {
                 limit_reached |= has_reached_limit;
 
                 if incremental {
-                    let buffers_with_ranges: Vec<_> = buffers_with_ranges
+                    let buffers_with_ranges = buffers_with_ranges
                         .into_iter()
                         .filter(|(_, ranges)| !ranges.is_empty())
-                        .collect();
+                        .collect::<Vec<_>>();
                     if buffers_with_ranges.is_empty() {
                         continue;
                     }
@@ -529,44 +530,31 @@ impl ProjectSearch {
                 }
             }
 
-            if incremental {
-                project_search
-                    .update(cx, |project_search, cx| {
+            project_search
+                .update(cx, |project_search, cx| {
+                    project_search.no_results = Some(project_search.match_ranges.is_empty());
+                    project_search.limit_reached = limit_reached;
+                    project_search.pending_search.take();
+                    if incremental {
                         if seen_paths.is_empty() {
                             project_search
                                 .excerpts
                                 .update(cx, |excerpts, cx| excerpts.clear(cx));
                         } else {
-                            // TODO kb
-                            // project_search.excerpts.update(cx, |excerpts, cx| {
-                            //     let stale = excerpts
-                            //         .paths()
-                            //         .filter(|path| !seen_paths.contains(*path))
-                            //         .cloned()
-                            //         .collect::<Vec<_>>();
-                            //     for path in stale {
-                            //         excerpts.remove_excerpts_for_path(path, cx);
-                            //     }
-                            // });
+                            project_search.excerpts.update(cx, |excerpts, cx| {
+                                for path in excerpts
+                                    .existing_excerpts()
+                                    .into_iter()
+                                    .filter(|path| !seen_paths.contains(path))
+                                {
+                                    excerpts.remove_excerpts(path, cx);
+                                }
+                            });
                         }
-                        project_search.no_results = Some(project_search.match_ranges.is_empty());
-                        project_search.limit_reached = limit_reached;
-                        project_search.pending_search.take();
-                        cx.notify();
-                    })
-                    .ok()?;
-            } else {
-                project_search
-                    .update(cx, |project_search, cx| {
-                        if !project_search.match_ranges.is_empty() {
-                            project_search.no_results = Some(false);
-                        }
-                        project_search.limit_reached = limit_reached;
-                        project_search.pending_search.take();
-                        cx.notify();
-                    })
-                    .ok()?;
-            }
+                    }
+                    cx.notify();
+                })
+                .ok()?;
 
             None
         }));
@@ -1037,8 +1025,7 @@ impl ProjectSearchView {
                         }
                     }
 
-                    let search_settings = &EditorSettings::get_global(cx).search;
-                    if search_settings.search_on_input {
+                    if EditorSettings::get_global(cx).search.search_on_input {
                         if this.query_editor.read(cx).is_empty(cx) {
                             this.entity.update(cx, |model, cx| {
                                 model.pending_search = None;
@@ -1692,7 +1679,6 @@ impl ProjectSearchView {
         let editor = match kind {
             SearchInputKind::Query => &self.query_editor,
             SearchInputKind::Include => &self.included_files_editor,
-
             SearchInputKind::Exclude => &self.excluded_files_editor,
         };
         editor.update(cx, |editor, cx| {
