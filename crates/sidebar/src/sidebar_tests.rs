@@ -1597,6 +1597,42 @@ fn setup_sidebar_with_agent_panel(
 }
 
 #[gpui::test]
+async fn test_sidebar_initialization_syncs_existing_active_thread(cx: &mut TestAppContext) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+
+    let workspace = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+    let panel = add_agent_panel(&workspace, cx);
+
+    let connection = StubAgentConnection::new();
+    connection.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(
+        acp::ContentChunk::new("Done".into()),
+    )]);
+    open_thread_with_connection(&panel, connection, cx);
+    send_message(&panel, cx);
+
+    let session_id = active_session_id(&panel, cx);
+    save_test_thread_metadata(&session_id, &project, cx).await;
+    cx.run_until_parked();
+
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+
+    sidebar.read_with(cx, |sidebar, _cx| {
+        assert_active_thread(
+            sidebar,
+            &session_id,
+            "Sidebar should sync an already-active panel thread during initialization",
+        );
+    });
+
+    assert_eq!(
+        visible_entries_as_strings(&sidebar, cx),
+        vec!["v [my-project]", "  Hello *"]
+    );
+}
+
+#[gpui::test]
 async fn test_parallel_threads_shown_with_live_status(cx: &mut TestAppContext) {
     let project = init_test_project_with_agent_panel("/my-project", cx).await;
     let (multi_workspace, cx) =

@@ -205,6 +205,8 @@ struct SerializedAgentPanel {
 #[derive(Serialize, Deserialize, Debug)]
 struct SerializedActiveThread {
     session_id: String,
+    #[serde(default)]
+    thread_id: Option<ThreadId>,
     agent_type: Agent,
     title: Option<String>,
     work_dirs: Option<SerializedPathList>,
@@ -384,6 +386,7 @@ pub fn init(cx: &mut App) {
                             None,
                             None,
                             None,
+                            None,
                             Some(AgentInitialContent::ContentBlock {
                                 blocks: content_blocks,
                                 auto_submit: true,
@@ -406,6 +409,7 @@ pub fn init(cx: &mut App) {
 
                         panel.update(cx, |panel, cx| {
                             panel.external_thread(
+                                None,
                                 None,
                                 None,
                                 None,
@@ -434,6 +438,7 @@ pub fn init(cx: &mut App) {
 
                         panel.update(cx, |panel, cx| {
                             panel.external_thread(
+                                None,
                                 None,
                                 None,
                                 None,
@@ -904,6 +909,7 @@ impl AgentPanel {
             let work_dirs = thread.work_dirs().cloned();
             SerializedActiveThread {
                 session_id: thread.session_id().0.to_string(),
+                thread_id: self.active_thread_id(cx),
                 agent_type: self.selected_agent.clone(),
                 title: title.map(|t| t.to_string()),
                 work_dirs: work_dirs.map(|dirs| dirs.serialize()),
@@ -965,10 +971,15 @@ impl AgentPanel {
                 let is_restorable = cx
                     .update(|_window, cx| {
                         let store = ThreadMetadataStore::global(cx);
+                        let store = store.read(cx);
                         store
-                            .read(cx)
                             .entry_by_session(&session_id)
                             .is_some_and(|entry| !entry.archived)
+                            || thread_info.thread_id.is_some_and(|thread_id| {
+                                store
+                                    .entry(thread_id)
+                                    .is_some_and(|entry| entry.is_draft() && !entry.archived)
+                            })
                     })
                     .unwrap_or(false);
                 if is_restorable {
@@ -1034,9 +1045,10 @@ impl AgentPanel {
                     let agent = thread_info.agent_type.clone();
                     panel.update(cx, |panel, cx| {
                         panel.selected_agent = agent.clone();
-                        panel.load_agent_thread(
+                        panel.load_agent_thread_with_thread_id(
                             agent,
                             thread_info.session_id.clone().into(),
+                            thread_info.thread_id,
                             thread_info.work_dirs.as_ref().map(|dirs| PathList::deserialize(dirs)),
                             thread_info.title.as_ref().map(|t| t.clone().into()),
                             false,
@@ -1332,6 +1344,7 @@ impl AgentPanel {
         self.external_thread(
             Some(crate::Agent::NativeAgent),
             Some(session_id),
+            None,
             work_dirs,
             title,
             None,
@@ -1400,7 +1413,7 @@ impl AgentPanel {
         } else {
             self.selected_agent.clone()
         };
-        let thread = self.create_agent_thread(agent, None, None, None, None, window, cx);
+        let thread = self.create_agent_thread(agent, None, None, None, None, None, window, cx);
         let thread_id = thread.conversation_view.read(cx).thread_id;
         self.retained_threads
             .insert(thread_id, thread.conversation_view);
@@ -1591,6 +1604,7 @@ impl AgentPanel {
                     None,
                     None,
                     None,
+                    None,
                     Some(AgentInitialContent::ThreadSummary {
                         session_id: thread.session_id,
                         title: thread.title,
@@ -1609,6 +1623,7 @@ impl AgentPanel {
         &mut self,
         agent_choice: Option<crate::Agent>,
         resume_session_id: Option<acp::SessionId>,
+        preferred_thread_id: Option<ThreadId>,
         work_dirs: Option<PathList>,
         title: Option<SharedString>,
         initial_content: Option<AgentInitialContent>,
@@ -1626,6 +1641,7 @@ impl AgentPanel {
         let thread = self.create_agent_thread(
             agent,
             resume_session_id,
+            preferred_thread_id,
             work_dirs,
             title,
             initial_content,
@@ -2251,12 +2267,17 @@ impl AgentPanel {
             .conversation_views()
             .into_iter()
             .filter_map(|conversation_view| {
-                let thread_id = conversation_view.read(cx).thread_id;
-                let is_draft = match conversation_view.read(cx).root_thread(cx) {
+                let conversation_view = conversation_view.read(cx);
+                let thread_id = conversation_view.thread_id;
+                let is_loaded_or_loading_draft = match conversation_view.root_thread(cx) {
                     Some(tv) => tv.read(cx).is_draft(cx),
-                    None => false,
+                    None => conversation_view.is_loading(),
                 };
-                if is_draft { Some(thread_id) } else { None }
+                if is_loaded_or_loading_draft {
+                    Some(thread_id)
+                } else {
+                    None
+                }
             })
             .collect();
         let path_list = {
@@ -2766,6 +2787,7 @@ impl AgentPanel {
             None,
             None,
             None,
+            None,
             external_source_prompt.map(AgentInitialContent::from),
             true,
             window,
@@ -2791,6 +2813,7 @@ impl AgentPanel {
             None,
             None,
             None,
+            None,
             initial_content,
             focus,
             window,
@@ -2806,6 +2829,22 @@ impl AgentPanel {
         &mut self,
         agent: Agent,
         session_id: acp::SessionId,
+        work_dirs: Option<PathList>,
+        title: Option<SharedString>,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.load_agent_thread_with_thread_id(
+            agent, session_id, None, work_dirs, title, focus, window, cx,
+        );
+    }
+
+    fn load_agent_thread_with_thread_id(
+        &mut self,
+        agent: Agent,
+        session_id: acp::SessionId,
+        preferred_thread_id: Option<ThreadId>,
         work_dirs: Option<PathList>,
         title: Option<SharedString>,
         focus: bool,
@@ -2862,6 +2901,7 @@ impl AgentPanel {
         self.external_thread(
             Some(agent),
             Some(session_id),
+            preferred_thread_id,
             work_dirs,
             title,
             None,
@@ -2876,6 +2916,7 @@ impl AgentPanel {
         &mut self,
         agent: Agent,
         resume_session_id: Option<acp::SessionId>,
+        preferred_thread_id: Option<ThreadId>,
         work_dirs: Option<PathList>,
         title: Option<SharedString>,
         initial_content: Option<AgentInitialContent>,
@@ -2886,6 +2927,7 @@ impl AgentPanel {
             agent,
             None,
             resume_session_id,
+            preferred_thread_id,
             work_dirs,
             title,
             initial_content,
@@ -2899,6 +2941,7 @@ impl AgentPanel {
         agent: Agent,
         server_override: Option<Rc<dyn AgentServer>>,
         resume_session_id: Option<acp::SessionId>,
+        preferred_thread_id: Option<ThreadId>,
         work_dirs: Option<PathList>,
         title: Option<SharedString>,
         initial_content: Option<AgentInitialContent>,
@@ -2912,6 +2955,7 @@ impl AgentPanel {
         let thread_id = existing_metadata
             .as_ref()
             .map(|m| m.thread_id)
+            .or(preferred_thread_id)
             .unwrap_or_else(ThreadId::new);
         let workspace = self.workspace.clone();
         let project = self.project.clone();
@@ -3735,6 +3779,7 @@ impl AgentPanel {
                     panel.update(cx, |panel, cx| {
                         panel.external_thread(
                             selected_agent,
+                            None,
                             None,
                             None,
                             None,
@@ -5166,6 +5211,7 @@ impl AgentPanel {
             None,
             None,
             None,
+            None,
             window,
             cx,
         );
@@ -5382,6 +5428,104 @@ mod tests {
                 "workspace B should have no active thread"
             );
         });
+    }
+
+    #[gpui::test]
+    async fn test_create_agent_thread_preserves_preferred_thread_id_for_resumed_draft(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        let preferred_thread_id = ThreadId::new();
+        let session_id = acp::SessionId::new("restored-draft-session");
+        let connection = StubAgentConnection::new().with_supports_load_session(true);
+
+        let thread_id = panel.update_in(&mut cx, |panel, window, cx| {
+            let thread = panel.create_agent_thread_with_server(
+                Agent::Custom { id: "Test".into() },
+                Some(std::rc::Rc::new(StubAgentServer::new(connection))),
+                Some(session_id),
+                Some(preferred_thread_id),
+                None,
+                None,
+                None,
+                window,
+                cx,
+            );
+            thread.conversation_view.read(cx).thread_id
+        });
+
+        assert_eq!(
+            thread_id, preferred_thread_id,
+            "resumed draft should preserve the persisted thread_id"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_remove_empty_draft_preserves_loading_restored_draft_metadata(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [Path::new("/project")], cx).await;
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(multi_workspace.into(), cx);
+        let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
+            cx.new(|cx| AgentPanel::new(workspace, None, window, cx))
+        });
+
+        let preferred_thread_id = ThreadId::new();
+        cx.update(|_, cx| {
+            let metadata = ThreadMetadata::new_draft(
+                preferred_thread_id,
+                AgentId::new("Test"),
+                None,
+                project.read(cx).worktree_paths(cx),
+                None,
+            );
+            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(metadata, cx);
+            });
+        });
+
+        let session_id = acp::SessionId::new("loading-restored-draft");
+        let connection = StubAgentConnection::new().with_supports_load_session(true);
+        panel.update_in(&mut cx, |panel, window, cx| {
+            let thread = panel.create_agent_thread_with_server(
+                Agent::Custom { id: "Test".into() },
+                Some(std::rc::Rc::new(StubAgentServer::new(connection))),
+                Some(session_id),
+                Some(preferred_thread_id),
+                None,
+                None,
+                None,
+                window,
+                cx,
+            );
+            panel.set_base_view(thread.into(), false, window, cx);
+            panel.remove_empty_draft(cx);
+        });
+
+        let still_present = cx.update(|_, cx| {
+            ThreadMetadataStore::global(cx)
+                .read(cx)
+                .entry(preferred_thread_id)
+                .is_some()
+        });
+        assert!(
+            still_present,
+            "loading restored draft metadata should not be deleted during cleanup"
+        );
     }
 
     #[gpui::test]

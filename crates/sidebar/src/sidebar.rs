@@ -518,6 +518,7 @@ impl Sidebar {
             for workspace in &workspaces {
                 this.subscribe_to_workspace(workspace, window, cx);
             }
+            this.sync_active_entry_from_active_workspace(cx);
             this.update_entries(cx);
             this.reconcile_groups(window, cx);
         });
