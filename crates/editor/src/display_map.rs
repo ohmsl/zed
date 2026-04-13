@@ -1678,34 +1678,40 @@ impl DisplaySnapshot {
     }
 
     /// Converts a buffer offset range into one or more `DisplayPoint` ranges
-    /// that cover only actual buffer text, excluding any inlay hint text that
-    /// falls within the range.
+    /// that cover only actual buffer text, excluding any non-isomorphic content
+    /// added or removed by display map layers (inlays, folds, soft wraps, blocks).
     pub fn isomorphic_display_point_ranges_for_buffer_range(
         &self,
         range: Range<MultiBufferOffset>,
     ) -> SmallVec<[Range<DisplayPoint>; 1]> {
         let inlay_snapshot = self.inlay_snapshot();
-        inlay_snapshot
-            .buffer_offset_to_inlay_ranges(range)
-            .map(|inlay_range| {
-                let inlay_point_to_display_point = |inlay_point: InlayPoint, bias: Bias| {
-                    let fold_point = self.fold_snapshot().to_fold_point(inlay_point, bias);
-                    let tab_point = self.tab_snapshot().fold_point_to_tab_point(fold_point);
-                    let wrap_point = self.wrap_snapshot().tab_point_to_wrap_point(tab_point);
-                    let block_point = self.block_snapshot.to_block_point(wrap_point);
-                    DisplayPoint(block_point)
-                };
+        let fold_snapshot = self.fold_snapshot();
+        let tab_snapshot = self.tab_snapshot();
+        let wrap_snapshot = self.wrap_snapshot();
 
-                let start = inlay_point_to_display_point(
-                    inlay_snapshot.to_point(inlay_range.start),
-                    Bias::Left,
-                );
-                let end = inlay_point_to_display_point(
-                    inlay_snapshot.to_point(inlay_range.end),
-                    Bias::Left,
-                );
-                start..end
-            })
+        let inlay_ranges: SmallVec<[_; 1]> = inlay_snapshot
+            .buffer_offset_to_inlay_ranges(range)
+            .collect();
+
+        let fold_ranges: SmallVec<[_; 1]> = inlay_ranges
+            .into_iter()
+            .flat_map(|r| fold_snapshot.isomorphic_ranges(r))
+            .collect();
+
+        let tab_ranges: SmallVec<[_; 1]> = fold_ranges
+            .into_iter()
+            .flat_map(|r| tab_snapshot.isomorphic_ranges(r))
+            .collect();
+
+        let wrap_ranges: SmallVec<[_; 1]> = tab_ranges
+            .into_iter()
+            .flat_map(|r| wrap_snapshot.isomorphic_ranges(r))
+            .collect();
+
+        wrap_ranges
+            .into_iter()
+            .flat_map(|r| self.block_snapshot.isomorphic_ranges(r))
+            .map(|r| DisplayPoint(r.start)..DisplayPoint(r.end))
             .collect()
     }
 
@@ -4080,6 +4086,146 @@ pub mod tests {
         assert_eq!(ranges.len(), 1);
         assert_eq!(ranges[0].start, DisplayPoint::new(DisplayRow(0), 10));
         assert_eq!(ranges[0].end, DisplayPoint::new(DisplayRow(0), 14));
+    }
+
+    #[gpui::test]
+    async fn test_isomorphic_ranges_with_soft_wraps(cx: &mut gpui::TestAppContext) {
+        cx.background_executor
+            .set_block_on_ticks(usize::MAX..=usize::MAX);
+        cx.update(|cx| init_test(cx, &|_| {}));
+
+        let mut cx = crate::test::editor_test_context::EditorTestContext::new(cx).await;
+        let window = cx.window;
+
+        _ = cx.update_window(window, |_, _window, cx| {
+            let font_size = px(12.0);
+            let wrap_width = Some(px(96.));
+
+            let text = "one two three four five\nsix seven eight";
+            let buffer = MultiBuffer::build_simple(text, cx);
+            let map = cx.new(|cx| {
+                DisplayMap::new(
+                    buffer.clone(),
+                    font("Helvetica"),
+                    font_size,
+                    wrap_width,
+                    1,
+                    1,
+                    FoldPlaceholder::test(),
+                    DiagnosticSeverity::Warning,
+                    cx,
+                )
+            });
+
+            let snapshot = map.update(cx, |map, cx| map.snapshot(cx));
+            assert_eq!(
+                snapshot.text_chunks(DisplayRow(0)).collect::<String>(),
+                "one two \nthree four \nfive\nsix seven \neight"
+            );
+
+            let ranges = snapshot.isomorphic_display_point_ranges_for_buffer_range(
+                MultiBufferOffset(4)..MultiBufferOffset(15),
+            );
+            assert_eq!(
+                ranges.len(),
+                2,
+                "expected split at soft wrap, got: {:?}",
+                ranges,
+            );
+            assert_eq!(ranges[0].start, DisplayPoint::new(DisplayRow(0), 4));
+            assert_eq!(ranges[0].end, DisplayPoint::new(DisplayRow(0), 8));
+            assert_eq!(ranges[1].start, DisplayPoint::new(DisplayRow(1), 0));
+            assert_eq!(ranges[1].end, DisplayPoint::new(DisplayRow(1), 7));
+
+            let ranges = snapshot.isomorphic_display_point_ranges_for_buffer_range(
+                MultiBufferOffset(0)..MultiBufferOffset(7),
+            );
+            assert_eq!(ranges.len(), 1);
+            assert_eq!(ranges[0].start, DisplayPoint::new(DisplayRow(0), 0));
+            assert_eq!(ranges[0].end, DisplayPoint::new(DisplayRow(0), 7));
+
+            let ranges = snapshot.isomorphic_display_point_ranges_for_buffer_range(
+                MultiBufferOffset(4)..MultiBufferOffset(22),
+            );
+            assert_eq!(
+                ranges.len(),
+                3,
+                "expected split at two soft wraps, got: {:?}",
+                ranges,
+            );
+            assert_eq!(ranges[0].start, DisplayPoint::new(DisplayRow(0), 4));
+            assert_eq!(ranges[0].end, DisplayPoint::new(DisplayRow(0), 8));
+            assert_eq!(ranges[1].start, DisplayPoint::new(DisplayRow(1), 0));
+            assert_eq!(ranges[1].end, DisplayPoint::new(DisplayRow(1), 11));
+            assert_eq!(ranges[2].start, DisplayPoint::new(DisplayRow(2), 0));
+            assert_eq!(ranges[2].end, DisplayPoint::new(DisplayRow(2), 3));
+        });
+    }
+
+    #[gpui::test]
+    fn test_isomorphic_ranges_with_folds(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| init_test(cx, &|_| {}));
+
+        let text = "fn outer() {\n    fn inner() {}\n}";
+        let buffer = cx.new(|cx| Buffer::local(text, cx));
+        let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
+
+        let font_size = px(14.0);
+        let map = cx.new(|cx| {
+            DisplayMap::new(
+                buffer.clone(),
+                font("Helvetica"),
+                font_size,
+                None,
+                1,
+                1,
+                FoldPlaceholder::test(),
+                DiagnosticSeverity::Warning,
+                cx,
+            )
+        });
+
+        map.update(cx, |map, cx| {
+            map.fold(
+                vec![Crease::simple(
+                    MultiBufferPoint::new(0, 12)..MultiBufferPoint::new(2, 0),
+                    FoldPlaceholder::test(),
+                )],
+                cx,
+            )
+        });
+
+        let snapshot = map.update(cx, |map, cx| map.snapshot(cx));
+        assert_eq!(snapshot.text(), "fn outer() {⋯}");
+
+        let ranges = snapshot.isomorphic_display_point_ranges_for_buffer_range(
+            MultiBufferOffset(3)..MultiBufferOffset(10),
+        );
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].start, DisplayPoint::new(DisplayRow(0), 3));
+        assert_eq!(ranges[0].end, DisplayPoint::new(DisplayRow(0), 10));
+
+        let ranges = snapshot.isomorphic_display_point_ranges_for_buffer_range(
+            MultiBufferOffset(3)..MultiBufferOffset(32),
+        );
+        assert_eq!(
+            ranges.len(),
+            2,
+            "expected split around fold, got: {:?}",
+            ranges,
+        );
+        assert_eq!(
+            ranges.as_slice(),
+            &[
+                DisplayPoint::new(DisplayRow(0), 3)..DisplayPoint::new(DisplayRow(0), 12),
+                DisplayPoint::new(DisplayRow(0), 15)..DisplayPoint::new(DisplayRow(0), 16),
+            ],
+        );
+
+        let ranges = snapshot.isomorphic_display_point_ranges_for_buffer_range(
+            MultiBufferOffset(13)..MultiBufferOffset(30),
+        );
+        assert_eq!(ranges.len(), 0);
     }
 
     #[test]

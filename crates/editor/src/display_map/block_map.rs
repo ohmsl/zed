@@ -15,6 +15,7 @@ use multi_buffer::{
     MultiBufferSnapshot, RowInfo, ToOffset, ToPoint as _,
 };
 use parking_lot::Mutex;
+use smallvec::SmallVec;
 use std::{
     cell::{Cell, RefCell},
     cmp::{self, Ordering},
@@ -2513,6 +2514,63 @@ impl BlockSnapshot {
         } else {
             self.max_point()
         }
+    }
+
+    pub(super) fn isomorphic_ranges(
+        &self,
+        range: Range<WrapPoint>,
+    ) -> SmallVec<[Range<BlockPoint>; 1]> {
+        let mut result = SmallVec::new();
+        let mut cursor = self.transforms.cursor::<Dimensions<WrapRow, BlockRow>>(());
+        cursor.seek(&range.start.row(), Bias::Right);
+
+        loop {
+            match cursor.item() {
+                None => break,
+                Some(transform) => {
+                    if transform.block.is_none() {
+                        let seg_wrap_start = cursor.start().0;
+                        let seg_wrap_end = cursor.end().0;
+                        let seg_block_start = cursor.start().1;
+
+                        let overlap_start = if range.start.row() >= seg_wrap_start {
+                            range.start
+                        } else {
+                            WrapPoint::new(seg_wrap_start, 0)
+                        };
+
+                        let seg_last_row = WrapRow(seg_wrap_end.0.saturating_sub(1));
+                        let overlap_end = if range.end.row() <= seg_last_row {
+                            range.end
+                        } else {
+                            WrapPoint::new(seg_last_row, self.wrap_snapshot.line_len(seg_last_row))
+                        };
+
+                        let past_end = range.end.row() < seg_wrap_end;
+                        cursor.next();
+
+                        if overlap_start < overlap_end {
+                            let input_start = Point::new(seg_wrap_start.0, 0);
+                            let output_start = Point::new(seg_block_start.0, 0);
+
+                            let block_start =
+                                BlockPoint(output_start + (overlap_start.0 - input_start));
+                            let block_end =
+                                BlockPoint(output_start + (overlap_end.0 - input_start));
+                            result.push(block_start..block_end);
+                        }
+
+                        if past_end {
+                            break;
+                        }
+                    } else {
+                        cursor.next();
+                    }
+                }
+            }
+        }
+
+        result
     }
 
     #[ztracing::instrument(skip_all)]

@@ -794,6 +794,50 @@ impl FoldSnapshot {
         }
     }
 
+    pub fn isomorphic_ranges(
+        &self,
+        range: Range<InlayOffset>,
+    ) -> impl Iterator<Item = Range<FoldPoint>> + '_ {
+        let mut cursor = self
+            .transforms
+            .cursor::<Dimensions<InlayOffset, FoldPoint>>(());
+        cursor.seek(&range.start, Bias::Right);
+
+        std::iter::from_fn(move || {
+            loop {
+                let transform = cursor.item()?;
+                if transform.placeholder.is_some() {
+                    cursor.next();
+                } else {
+                    let seg_inlay_start = cursor.start().0;
+                    let seg_inlay_end = cursor.end().0;
+                    let seg_fold_start = cursor.start().1;
+
+                    let overlap_start = cmp::max(range.start, seg_inlay_start);
+                    let overlap_end = cmp::min(range.end, seg_inlay_end);
+
+                    let past_end = seg_inlay_end >= range.end;
+                    cursor.next();
+
+                    if overlap_start < overlap_end {
+                        let start_inlay_point = self.inlay_snapshot.to_point(overlap_start);
+                        let end_inlay_point = self.inlay_snapshot.to_point(overlap_end);
+                        let seg_inlay_point = self.inlay_snapshot.to_point(seg_inlay_start);
+                        let fold_start =
+                            FoldPoint(seg_fold_start.0 + (start_inlay_point.0 - seg_inlay_point.0));
+                        let fold_end =
+                            FoldPoint(seg_fold_start.0 + (end_inlay_point.0 - seg_inlay_point.0));
+                        return Some(fold_start..fold_end);
+                    }
+
+                    if past_end {
+                        return None;
+                    }
+                }
+            }
+        })
+    }
+
     #[ztracing::instrument(skip_all)]
     pub fn fold_point_cursor(&self) -> FoldPointCursor<'_> {
         let cursor = self

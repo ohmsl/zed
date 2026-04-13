@@ -7,6 +7,7 @@ use super::{
 use gpui::{App, AppContext as _, Context, Entity, Font, LineWrapper, Pixels, Task};
 use language::{LanguageAwareStyling, Point};
 use multi_buffer::{MultiBufferSnapshot, RowInfo};
+use smallvec::SmallVec;
 use smol::future::yield_now;
 use std::{cmp, collections::VecDeque, mem, ops::Range, sync::LazyLock, time::Duration};
 use sum_tree::{Bias, Cursor, Dimensions, SumTree};
@@ -851,6 +852,49 @@ impl WrapSnapshot {
             self.transforms
                 .find::<Dimensions<TabPoint, WrapPoint>, _>((), &point, Bias::Right);
         WrapPoint(start.1.0 + (point.0 - start.0.0))
+    }
+
+    pub fn isomorphic_ranges(&self, range: Range<TabPoint>) -> SmallVec<[Range<WrapPoint>; 1]> {
+        let mut result = SmallVec::new();
+        let mut cursor = self
+            .transforms
+            .cursor::<Dimensions<TabPoint, WrapPoint>>(());
+        cursor.seek(&range.start, Bias::Right);
+
+        loop {
+            match cursor.item() {
+                None => break,
+                Some(transform) => {
+                    if transform.is_isomorphic() {
+                        let seg_tab_start = cursor.start().0;
+                        let seg_tab_end = cursor.end().0;
+                        let seg_wrap_start = cursor.start().1;
+
+                        let overlap_start = cmp::max(range.start, seg_tab_start);
+                        let overlap_end = cmp::min(range.end, seg_tab_end);
+
+                        let past_end = seg_tab_end >= range.end;
+                        cursor.next();
+
+                        if overlap_start < overlap_end {
+                            let wrap_start =
+                                WrapPoint(seg_wrap_start.0 + (overlap_start.0 - seg_tab_start.0));
+                            let wrap_end =
+                                WrapPoint(seg_wrap_start.0 + (overlap_end.0 - seg_tab_start.0));
+                            result.push(wrap_start..wrap_end);
+                        }
+
+                        if past_end {
+                            break;
+                        }
+                    } else {
+                        cursor.next();
+                    }
+                }
+            }
+        }
+
+        result
     }
 
     #[ztracing::instrument(skip_all)]

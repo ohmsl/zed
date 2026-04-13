@@ -5,6 +5,7 @@ use super::{
 
 use language::{LanguageAwareStyling, Point};
 use multi_buffer::MultiBufferSnapshot;
+use smallvec::{SmallVec, smallvec};
 use std::{cmp, num::NonZeroU32, ops::Range};
 use sum_tree::Bias;
 
@@ -358,6 +359,12 @@ impl TabSnapshot {
             self.fold_snapshot
                 .clip_point(self.tab_point_to_fold_point(point, bias).0, bias),
         )
+    }
+
+    pub fn isomorphic_ranges(&self, range: Range<FoldPoint>) -> SmallVec<[Range<TabPoint>; 1]> {
+        smallvec![
+            self.fold_point_to_tab_point(range.start)..self.fold_point_to_tab_point(range.end)
+        ]
     }
 
     #[ztracing::instrument(skip_all)]
