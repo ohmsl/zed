@@ -59,7 +59,7 @@ pub fn release_nightly() -> Workflow {
             .push(Push::default().add_tag("nightly")))
         .concurrency(
             Concurrency::default()
-                .group("release-nightly")
+                .group(format!("release-nightly-${{{{ github.event_name }}}}"))
                 .cancel_in_progress(true),
         )
         .add_env(("CARGO_TERM_COLOR", "always"))
@@ -83,7 +83,36 @@ pub fn release_nightly() -> Workflow {
 fn check_for_changes() -> NamedJob {
     fn check_nightly_tag() -> (Step<Run>, vars::StepOutput) {
         let step = named::bash(indoc! {r#"
+            if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+                # Push events always take precedence; cancel any in-progress scheduled runs
+                gh run list \
+                    --workflow release_nightly.yml \
+                    --status in_progress \
+                    --event schedule \
+                    --json databaseId \
+                    -q '.[].databaseId' | while read -r run_id; do
+                    echo "Cancelling in-progress scheduled run $run_id"
+                    gh run cancel "$run_id" || true
+                done
+                echo "Push event, proceeding with nightly release"
+                echo "bump_nightly=true" >> "$GITHUB_OUTPUT"
+                exit 0
+            fi
+
+            # For scheduled events: check if a push-triggered run is already in progress
+            if gh run list \
+                --workflow release_nightly.yml \
+                --status in_progress \
+                --event push \
+                --json databaseId \
+                -q '.[].databaseId' | grep -q .; then
+                echo "A push-triggered nightly release is in progress, skipping scheduled run"
+                echo "bump_nightly=false" >> "$GITHUB_OUTPUT"
+                exit 0
+            fi
+
             if ! NIGHTLY_SHA=$(git rev-parse nightly 2>/dev/null); then
+                echo "No nightly tag found, changes detected"
                 echo "bump_nightly=true" >> "$GITHUB_OUTPUT"
                 exit 0
             fi
@@ -93,6 +122,7 @@ fn check_for_changes() -> NamedJob {
                 echo "nightly tag already points to HEAD ($HEAD_SHA), no new nightly needed"
                 echo "bump_nightly=false" >> "$GITHUB_OUTPUT"
             else
+                echo "Changes detected: nightly=$NIGHTLY_SHA HEAD=$HEAD_SHA"
                 echo "bump_nightly=true" >> "$GITHUB_OUTPUT"
             fi
         "#})
@@ -107,6 +137,7 @@ fn check_for_changes() -> NamedJob {
     named::job(
         Job::default()
             .with_repository_owner_guard()
+            .permissions(Permissions::default().actions(Level::Write))
             .runs_on(runners::LINUX_SMALL)
             .outputs([("bump_nightly".to_owned(), bump_nightly.to_string())])
             .add_step(steps::checkout_repo().with_fetch_tags())

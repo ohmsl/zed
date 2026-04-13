@@ -14,6 +14,8 @@ jobs:
   check_for_changes:
     if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')
     runs-on: namespace-profile-2x4-ubuntu-2404
+    permissions:
+      actions: write
     steps:
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -23,7 +25,36 @@ jobs:
     - id: check
       name: release_nightly::check_for_changes::check_nightly_tag
       run: |
+        if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            # Push events always take precedence; cancel any in-progress scheduled runs
+            gh run list \
+                --workflow release_nightly.yml \
+                --status in_progress \
+                --event schedule \
+                --json databaseId \
+                -q '.[].databaseId' | while read -r run_id; do
+                echo "Cancelling in-progress scheduled run $run_id"
+                gh run cancel "$run_id" || true
+            done
+            echo "Push event, proceeding with nightly release"
+            echo "bump_nightly=true" >> "$GITHUB_OUTPUT"
+            exit 0
+        fi
+
+        # For scheduled events: check if a push-triggered run is already in progress
+        if gh run list \
+            --workflow release_nightly.yml \
+            --status in_progress \
+            --event push \
+            --json databaseId \
+            -q '.[].databaseId' | grep -q .; then
+            echo "A push-triggered nightly release is in progress, skipping scheduled run"
+            echo "bump_nightly=false" >> "$GITHUB_OUTPUT"
+            exit 0
+        fi
+
         if ! NIGHTLY_SHA=$(git rev-parse nightly 2>/dev/null); then
+            echo "No nightly tag found, changes detected"
             echo "bump_nightly=true" >> "$GITHUB_OUTPUT"
             exit 0
         fi
@@ -33,6 +64,7 @@ jobs:
             echo "nightly tag already points to HEAD ($HEAD_SHA), no new nightly needed"
             echo "bump_nightly=false" >> "$GITHUB_OUTPUT"
         else
+            echo "Changes detected: nightly=$NIGHTLY_SHA HEAD=$HEAD_SHA"
             echo "bump_nightly=true" >> "$GITHUB_OUTPUT"
         fi
     outputs:
@@ -590,7 +622,7 @@ jobs:
         SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_WORKFLOW_FAILURES }}
         SLACK_MESSAGE: '❌ ${{ github.workflow }} failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
 concurrency:
-  group: release-nightly
+  group: release-nightly-${{ github.event_name }}
   cancel-in-progress: true
 defaults:
   run:
