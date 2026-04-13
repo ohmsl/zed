@@ -3070,15 +3070,24 @@ impl ProjectPanel {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(external_paths) = self.external_paths_from_system_clipboard(cx) {
-            let target_entry_id = self
-                .selection
-                .map(|s| s.entry_id)
-                .or(self.state.last_worktree_root_id);
-            if let Some(entry_id) = target_entry_id {
-                self.drop_external_files(external_paths.paths(), entry_id, window, cx);
+        // Check internal clipboard first (for cut/copy within Zed)
+        let has_internal_clipboard = self
+            .clipboard
+            .as_ref()
+            .is_some_and(|clipboard| !clipboard.items().is_empty());
+
+        if !has_internal_clipboard {
+            // Only use external paths if there's no internal clipboard state
+            if let Some(external_paths) = self.external_paths_from_system_clipboard(cx) {
+                let target_entry_id = self
+                    .selection
+                    .map(|s| s.entry_id)
+                    .or(self.state.last_worktree_root_id);
+                if let Some(entry_id) = target_entry_id {
+                    self.drop_external_files(external_paths.paths(), entry_id, window, cx);
+                }
+                return;
             }
-            return;
         }
 
         maybe!({
@@ -3825,7 +3834,7 @@ impl ProjectPanel {
 
     fn write_entries_to_system_clipboard(&self, entries: &BTreeSet<SelectedEntry>, cx: &mut App) {
         let project = self.project.read(cx);
-        let paths: Vec<String> = entries
+        let paths: Vec<_> = entries
             .iter()
             .filter_map(|entry| {
                 let worktree = project.worktree_for_id(entry.worktree_id, cx)?;
@@ -3834,20 +3843,31 @@ impl ProjectPanel {
                 Some(
                     worktree
                         .abs_path()
-                        .join(worktree_entry.path.as_std_path())
-                        .to_string_lossy()
-                        .to_string(),
+                        .join(worktree_entry.path.as_std_path()),
                 )
             })
             .collect();
         if !paths.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(paths.join("\n")));
+            let external_paths = ExternalPaths(paths.into());
+            eprintln!("Writing to clipboard: ExternalPaths with {} paths", external_paths.paths().len());
+            cx.write_to_clipboard(ClipboardItem {
+                entries: vec![GpuiClipboardEntry::ExternalPaths(external_paths)],
+            });
         }
     }
 
     fn external_paths_from_system_clipboard(&self, cx: &App) -> Option<ExternalPaths> {
         let clipboard_item = cx.read_from_clipboard()?;
-        for entry in clipboard_item.entries() {
+        eprintln!("Clipboard has {} entries", clipboard_item.entries().len());
+        for (i, entry) in clipboard_item.entries().iter().enumerate() {
+            eprintln!("  Entry {}: {:?}", i, match entry {
+                GpuiClipboardEntry::String(_) => "String",
+                GpuiClipboardEntry::Image(_) => "Image",
+                GpuiClipboardEntry::ExternalPaths(p) => {
+                    eprintln!("    ExternalPaths with {} paths", p.paths().len());
+                    "ExternalPaths"
+                }
+            });
             if let GpuiClipboardEntry::ExternalPaths(paths) = entry {
                 if !paths.paths().is_empty() {
                     return Some(paths.clone());
@@ -3858,14 +3878,19 @@ impl ProjectPanel {
     }
 
     fn has_pasteable_content(&self, cx: &App) -> bool {
-        if self
+        let has_internal = self
             .clipboard
             .as_ref()
-            .is_some_and(|c| !c.items().is_empty())
-        {
+            .is_some_and(|c| !c.items().is_empty());
+        
+        let has_external = self.external_paths_from_system_clipboard(cx).is_some();
+        
+        eprintln!("has_pasteable_content: internal={}, external={}", has_internal, has_external);
+        
+        if has_internal {
             return true;
         }
-        self.external_paths_from_system_clipboard(cx).is_some()
+        has_external
     }
 
     fn selected_entry_handle<'a>(

@@ -10229,3 +10229,82 @@ impl Render for TestProjectItemView {
         Empty
     }
 }
+
+#[gpui::test]
+async fn test_copy_paste_between_windows(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        "/root1",
+        json!({
+            "file_a.txt": "content a",
+        }),
+    )
+    .await;
+
+    fs.insert_tree(
+        "/root2",
+        json!({
+            "existing.txt": "existing",
+        }),
+    )
+    .await;
+
+    // Create first window with root1
+    let project1 = Project::test(fs.clone(), ["/root1".as_ref()], cx).await;
+    let window1 = cx.add_window(|window, cx| MultiWorkspace::test_new(project1.clone(), window, cx));
+    let workspace1 = window1
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx1 = &mut VisualTestContext::from_window(window1.into(), cx);
+    let panel1 = workspace1.update_in(cx1, ProjectPanel::new);
+    cx1.run_until_parked();
+
+    // Create second window with root2
+    let project2 = Project::test(fs.clone(), ["/root2".as_ref()], cx).await;
+    let window2 = cx.add_window(|window, cx| MultiWorkspace::test_new(project2.clone(), window, cx));
+    let workspace2 = window2
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx2 = &mut VisualTestContext::from_window(window2.into(), cx);
+    let panel2 = workspace2.update_in(cx2, ProjectPanel::new);
+    cx2.run_until_parked();
+
+    // Copy file from window1
+    select_path(&panel1, "root1/file_a.txt", cx1);
+    panel1.update_in(cx1, |panel, window, cx| {
+        panel.copy(&Default::default(), window, cx);
+    });
+
+    // Verify clipboard has ExternalPaths format
+    let clipboard = cx1
+        .read_from_clipboard()
+        .expect("clipboard should have content after copy");
+    
+    let has_external_paths = clipboard.entries().iter().any(|entry| {
+        matches!(entry, GpuiClipboardEntry::ExternalPaths(_))
+    });
+    
+    assert!(
+        has_external_paths,
+        "Clipboard should contain ExternalPaths format for cross-window paste"
+    );
+
+    // Paste into window2
+    select_path(&panel2, "root2", cx2);
+    panel2.update_in(cx2, |panel, window, cx| {
+        panel.paste(&Default::default(), window, cx);
+    });
+    cx2.executor().run_until_parked();
+
+    // Verify file was pasted
+    assert_eq!(
+        visible_entries_as_strings(&panel2, 0..10, cx2),
+        &[
+            "v root2",
+            "      existing.txt",
+            "      file_a.txt  <== selected",
+        ]
+    );
+}

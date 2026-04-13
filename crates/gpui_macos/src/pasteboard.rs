@@ -175,7 +175,9 @@ impl Pasteboard {
                 [ClipboardEntry::Image(image)] => {
                     self.write_image(image);
                 }
-                [ClipboardEntry::ExternalPaths(_)] => {}
+                [ClipboardEntry::ExternalPaths(paths)] => {
+                    self.write_external_paths(paths);
+                }
                 _ => {
                     // Agus NB: We're currently only writing string entries to the clipboard when we have more than one.
                     //
@@ -251,6 +253,26 @@ impl Pasteboard {
 
             self.inner
                 .setData_forType(bytes, Into::<UTType>::into(image.format).inner_mut());
+        }
+    }
+
+    unsafe fn write_external_paths(&self, paths: &ExternalPaths) {
+        unsafe {
+            self.inner.clearContents();
+
+            let ns_paths: Vec<id> = paths
+                .paths()
+                .iter()
+                .map(|p| ns_string(&p.to_string_lossy()))
+                .collect();
+            let ns_array = NSArray::arrayWithObjects(nil, &ns_paths);
+
+            let types = vec![NSFilenamesPboardType];
+            let types_array = NSArray::arrayWithObjects(nil, &types);
+            self.inner.declareTypes_owner(types_array, nil);
+
+            self.inner
+                .setPropertyList_forType(ns_array, NSFilenamesPboardType);
         }
     }
 }

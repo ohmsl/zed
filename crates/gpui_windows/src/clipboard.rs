@@ -78,7 +78,7 @@ pub(crate) fn write_to_clipboard(item: ClipboardItem) {
             match entry {
                 ClipboardEntry::String(string) => write_string(string)?,
                 ClipboardEntry::Image(image) => write_image(image)?,
-                ClipboardEntry::ExternalPaths(_) => {}
+                ClipboardEntry::ExternalPaths(paths) => write_files(paths)?,
             }
         }
         Ok(())
@@ -266,6 +266,46 @@ fn read_files() -> Option<ClipboardEntry> {
     Some(ClipboardEntry::ExternalPaths(ExternalPaths(
         filenames.into(),
     )))
+}
+
+fn write_files(paths: &ExternalPaths) -> Result<()> {
+    // HDROP structure: DROPFILES header + null-terminated wide strings + final null
+    let mut wide_paths = Vec::new();
+    for path in paths.paths() {
+        let path_str = path.to_string_lossy();
+        wide_paths.extend(path_str.encode_utf16());
+        wide_paths.push(0); // null terminator for each path
+    }
+    wide_paths.push(0); // final null terminator
+
+    // DROPFILES structure size is 20 bytes
+    let header_size = 20usize;
+    let total_size = header_size + wide_paths.len() * std::mem::size_of::<u16>();
+
+    unsafe {
+        let global = Owned::new(GlobalAlloc(GMEM_MOVEABLE, total_size)?);
+        let ptr = GlobalLock(*global) as *mut u8;
+        anyhow::ensure!(!ptr.is_null(), "GlobalLock returned null");
+
+        // Write DROPFILES header
+        std::ptr::write_unaligned(ptr as *mut u32, header_size as u32); // pFiles offset
+        std::ptr::write_unaligned(ptr.add(4) as *mut u32, 0); // pt.x
+        std::ptr::write_unaligned(ptr.add(8) as *mut u32, 0); // pt.y
+        std::ptr::write_unaligned(ptr.add(12) as *mut u32, 0); // fNC
+        std::ptr::write_unaligned(ptr.add(16) as *mut u32, 1); // fWide (Unicode)
+
+        // Write wide strings
+        std::ptr::copy_nonoverlapping(
+            wide_paths.as_ptr(),
+            ptr.add(header_size) as *mut u16,
+            wide_paths.len(),
+        );
+
+        GlobalUnlock(*global).ok();
+        SetClipboardData(CF_HDROP.0 as u32, Some(HANDLE(global.0)))?;
+        std::mem::forget(global);
+    }
+    Ok(())
 }
 
 /// DIB is BMP without the 14-byte BITMAPFILEHEADER. Prepend one.
