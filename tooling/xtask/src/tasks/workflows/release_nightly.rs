@@ -84,7 +84,21 @@ fn check_for_changes() -> NamedJob {
     fn check_nightly_tag() -> (Step<Run>, vars::StepOutput) {
         let step = named::bash(indoc! {r#"
             if [ "$GITHUB_EVENT_NAME" = "push" ]; then
-                # Push events always take precedence; cancel any in-progress scheduled runs
+                # Check if a scheduled run is already building the same commit
+                SCHEDULED_SHA=$(gh run list \
+                    --workflow release_nightly.yml \
+                    --status in_progress \
+                    --event schedule \
+                    --json databaseId,headSha \
+                    -q '.[0].headSha' || true)
+
+                if [ "$SCHEDULED_SHA" = "$GITHUB_SHA" ]; then
+                    echo "Scheduled run is already building this commit ($GITHUB_SHA), skipping push event"
+                    echo "bump_nightly=false" >> "$GITHUB_OUTPUT"
+                    exit 0
+                fi
+
+                # Cancel any in-progress scheduled runs building a different commit
                 gh run list \
                     --workflow release_nightly.yml \
                     --status in_progress \
