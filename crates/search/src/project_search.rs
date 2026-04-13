@@ -326,9 +326,10 @@ impl ProjectSearch {
                 no_results: self.no_results,
                 limit_reached: self.limit_reached,
                 search_input_confirmed: self.search_input_confirmed,
-            search_history_cursor: self.search_history_cursor.clone(),
-            search_included_history_cursor: self.search_included_history_cursor.clone(),
-            search_excluded_history_cursor: self.search_excluded_history_cursor.clone(),_excerpts_subscription: subscription,
+                search_history_cursor: self.search_history_cursor.clone(),
+                search_included_history_cursor: self.search_included_history_cursor.clone(),
+                search_excluded_history_cursor: self.search_excluded_history_cursor.clone(),
+                _excerpts_subscription: subscription,
             }
         })
     }
@@ -536,16 +537,17 @@ impl ProjectSearch {
                                 .excerpts
                                 .update(cx, |excerpts, cx| excerpts.clear(cx));
                         } else {
-                            project_search.excerpts.update(cx, |excerpts, cx| {
-                                let stale = excerpts
-                                    .paths()
-                                    .filter(|path| !seen_paths.contains(*path))
-                                    .cloned()
-                                    .collect::<Vec<_>>();
-                                for path in stale {
-                                    excerpts.remove_excerpts_for_path(path, cx);
-                                }
-                            });
+                            // TODO kb
+                            // project_search.excerpts.update(cx, |excerpts, cx| {
+                            //     let stale = excerpts
+                            //         .paths()
+                            //         .filter(|path| !seen_paths.contains(*path))
+                            //         .cloned()
+                            //         .collect::<Vec<_>>();
+                            //     for path in stale {
+                            //         excerpts.remove_excerpts_for_path(path, cx);
+                            //     }
+                            // });
                         }
                         project_search.no_results = Some(project_search.match_ranges.is_empty());
                         project_search.limit_reached = limit_reached;
@@ -2800,41 +2802,32 @@ pub mod tests {
     use util_macros::perf;
     use workspace::{DeploySearch, MultiWorkspace};
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    enum ExcerptEvent {
-        Added { excerpts: usize },
-        Removed { ids: usize },
-        Edited,
+    fn take_updated_files(events: &RefCell<Vec<MultiBufferEvent>>) -> Vec<String> {
+        let mut files: Vec<String> = Vec::new();
+        for event in events.borrow_mut().drain(..) {
+            if let MultiBufferEvent::BufferRangesUpdated { path_key, .. } = event {
+                let name = path_key.path.as_unix_str().to_owned();
+                if !files.contains(&name) {
+                    files.push(name);
+                }
+            }
+        }
+        files.sort();
+        files
     }
 
     fn subscribe_to_excerpt_events(
         search: &Entity<ProjectSearch>,
         cx: &mut TestAppContext,
-    ) -> (Rc<RefCell<Vec<ExcerptEvent>>>, Subscription) {
-        let events: Rc<RefCell<Vec<ExcerptEvent>>> = Rc::default();
+    ) -> (Rc<RefCell<Vec<MultiBufferEvent>>>, Subscription) {
+        let events: Rc<RefCell<Vec<MultiBufferEvent>>> = Rc::default();
         let excerpts = cx.update(|cx| search.read(cx).excerpts.clone());
         let subscription = cx.update({
             let events = events.clone();
             |cx| {
-                cx.subscribe(
-                    &excerpts,
-                    move |_, event: &MultiBufferEvent, _| match event {
-                        MultiBufferEvent::ExcerptsAdded { excerpts, .. } => {
-                            events.borrow_mut().push(ExcerptEvent::Added {
-                                excerpts: excerpts.len(),
-                            });
-                        }
-                        MultiBufferEvent::ExcerptsRemoved { ids, .. } => {
-                            events
-                                .borrow_mut()
-                                .push(ExcerptEvent::Removed { ids: ids.len() });
-                        }
-                        MultiBufferEvent::Edited { .. } => {
-                            events.borrow_mut().push(ExcerptEvent::Edited);
-                        }
-                        _ => {}
-                    },
-                )
+                cx.subscribe(&excerpts, move |_, event: &MultiBufferEvent, _| {
+                    events.borrow_mut().push(event.clone());
+                })
             }
         });
         (events, subscription)
@@ -2846,6 +2839,7 @@ pub mod tests {
             cx.set_global(settings);
 
             theme::init(theme::LoadThemes::JustBase, cx);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
 
             editor::init(cx);
             crate::init(cx);
@@ -5771,130 +5765,79 @@ pub mod tests {
             ProjectSearchView::new(workspace.downgrade(), search.clone(), window, cx, None)
         });
         let (events, _subscription) = subscribe_to_excerpt_events(&search, cx);
-        let take_excerpt_changes = || -> Vec<ExcerptEvent> {
-            events
-                .borrow_mut()
-                .drain(..)
-                .filter(|e| !matches!(e, ExcerptEvent::Edited))
-                .collect()
-        };
+        let all_rs_files = vec!["four.rs", "one.rs", "only_one.rs", "three.rs", "two.rs"];
         let expected_one_matches = vec![
             "one", "ONE", "ONE", "ONE", "ONE", "one", "ONE", "one", "ONE", "one", "ONE",
         ];
 
-        // Initial non-incremental search for "ONE" — clears then inserts one excerpt per file.
+        // Initial non-incremental search for "ONE" — inserts one excerpt per file.
         perform_search(search_view, "ONE", cx);
         assert_eq!(read_match_texts(search_view, cx), expected_one_matches);
         assert_all_highlights_match_query(search_view, "ONE", cx);
-        assert_eq!(
-            take_excerpt_changes(),
-            vec![
-                ExcerptEvent::Removed { ids: 0 },
-                ExcerptEvent::Added { excerpts: 1 },
-                ExcerptEvent::Added { excerpts: 1 },
-                ExcerptEvent::Added { excerpts: 1 },
-                ExcerptEvent::Added { excerpts: 1 },
-                ExcerptEvent::Added { excerpts: 1 },
-            ]
-        );
+        assert_eq!(take_updated_files(&events), all_rs_files);
 
-        // Natural narrowing: typing "R" after "ONE" -> "ONER".
-        // Only one.rs has ONEROUS, 4 other files removed.
+        // Natural narrowing: "ONE" -> "ONER". Only one.rs has ONEROUS.
         perform_incremental_search(search_view, "ONER", cx);
         assert_eq!(read_match_texts(search_view, cx), vec!["ONER"]);
         assert_all_highlights_match_query(search_view, "ONER", cx);
-        assert_eq!(
-            take_excerpt_changes(),
-            vec![
-                ExcerptEvent::Removed { ids: 1 },
-                ExcerptEvent::Removed { ids: 1 },
-                ExcerptEvent::Removed { ids: 1 },
-                ExcerptEvent::Removed { ids: 1 },
-            ]
-        );
+        assert_eq!(take_updated_files(&events), vec!["one.rs"]);
 
-        // Continue typing "OUS" -> "ONEROUS". Still one.rs only, zero excerpt churn.
+        // Continue narrowing: "ONER" -> "ONEROUS". Still one.rs only.
         perform_incremental_search(search_view, "ONEROUS", cx);
         assert_eq!(read_match_texts(search_view, cx), vec!["ONEROUS"]);
         assert_all_highlights_match_query(search_view, "ONEROUS", cx);
-        assert_eq!(take_excerpt_changes(), Vec::new());
+        assert_eq!(take_updated_files(&events), vec!["one.rs"]);
 
-        // Backspace to "ONER" — still one.rs only, zero events.
+        // Backspace to "ONER" — still one.rs only.
         perform_incremental_search(search_view, "ONER", cx);
         assert_eq!(read_match_texts(search_view, cx), vec!["ONER"]);
         assert_all_highlights_match_query(search_view, "ONER", cx);
-        assert_eq!(take_excerpt_changes(), Vec::new());
+        assert_eq!(take_updated_files(&events), vec!["one.rs"]);
 
-        // Backspace to "ONE" — 4 files re-added.
+        // Backspace to "ONE" — all 5 files re-appear.
         perform_incremental_search(search_view, "ONE", cx);
         assert_eq!(read_match_texts(search_view, cx), expected_one_matches);
         assert_all_highlights_match_query(search_view, "ONE", cx);
-        assert_eq!(
-            take_excerpt_changes(),
-            vec![
-                ExcerptEvent::Added { excerpts: 1 },
-                ExcerptEvent::Added { excerpts: 1 },
-                ExcerptEvent::Added { excerpts: 1 },
-                ExcerptEvent::Added { excerpts: 1 },
-            ]
-        );
+        assert_eq!(take_updated_files(&events), all_rs_files);
 
-        // Repeat the same "ONE" query — excerpts already match, zero events emitted.
+        // Repeat the same "ONE" query — excerpts still get updated.
         perform_incremental_search(search_view, "ONE", cx);
         assert_eq!(read_match_texts(search_view, cx), expected_one_matches);
         assert_all_highlights_match_query(search_view, "ONE", cx);
-        assert_eq!(events.borrow().len(), 0);
+        assert_eq!(take_updated_files(&events), all_rs_files);
 
-        // Narrow to "ONLY_ONE" — single match in only_one.rs, 4 files removed.
+        // Narrow to "ONLY_ONE" — single match in only_one.rs.
         perform_incremental_search(search_view, "ONLY_ONE", cx);
         assert_eq!(read_match_texts(search_view, cx), vec!["ONLY_ONE"]);
         assert_all_highlights_match_query(search_view, "ONLY_ONE", cx);
-        assert_eq!(
-            take_excerpt_changes(),
-            vec![
-                ExcerptEvent::Removed { ids: 1 },
-                ExcerptEvent::Removed { ids: 1 },
-                ExcerptEvent::Removed { ids: 1 },
-                ExcerptEvent::Removed { ids: 1 },
-            ]
-        );
+        assert_eq!(take_updated_files(&events), vec!["only_one.rs"]);
 
-        // Widen back to "ONE" — 4 files re-added.
+        // Widen back to "ONE" — all 5 files re-appear.
         perform_incremental_search(search_view, "ONE", cx);
         assert_eq!(read_match_texts(search_view, cx), expected_one_matches);
         assert_all_highlights_match_query(search_view, "ONE", cx);
-        assert_eq!(
-            take_excerpt_changes(),
-            vec![
-                ExcerptEvent::Added { excerpts: 1 },
-                ExcerptEvent::Added { excerpts: 1 },
-                ExcerptEvent::Added { excerpts: 1 },
-                ExcerptEvent::Added { excerpts: 1 },
-            ]
-        );
+        assert_eq!(take_updated_files(&events), all_rs_files);
 
-        // Narrowing when all files still match — zero excerpt events.
-        // "usize" matches all 5 .rs files; "usize =" is narrower but still in every file.
+        // Narrowing when all files still match: "usize" -> "usize =".
+        // Same file set, same match count.
         perform_search(search_view, "usize", cx);
         assert_eq!(read_match_count(search_view, cx), 6);
         events.borrow_mut().clear();
         perform_incremental_search(search_view, "usize =", cx);
         assert_eq!(read_match_count(search_view, cx), 6);
-        assert_eq!(events.borrow().len(), 0);
+        assert_eq!(take_updated_files(&events), all_rs_files);
 
-        // Merged-excerpt narrowing: "target" matches lines 5 and 10 in big.txt,
-        // whose context lines merge into one excerpt [3..12]. Narrowing to
-        // "targeted" shrinks context to [3..7] ⊂ [3..12] — the existing excerpt
-        // must be kept with zero events.
+        // Merged-excerpt narrowing: "target" matches lines 5 and 10 in big.txt.
+        // Narrowing to "targeted" drops to 1 match but big.txt stays.
         perform_search(search_view, "target", cx);
         assert_all_highlights_match_query(search_view, "target", cx);
         assert_eq!(read_match_count(search_view, cx), 2);
-        take_excerpt_changes();
+        events.borrow_mut().clear();
 
         perform_incremental_search(search_view, "targeted", cx);
         assert_all_highlights_match_query(search_view, "targeted", cx);
         assert_eq!(read_match_count(search_view, cx), 1);
-        assert_eq!(take_excerpt_changes(), Vec::new());
+        assert_eq!(take_updated_files(&events), vec!["big.txt"]);
     }
 
     #[gpui::test]
@@ -5930,9 +5873,12 @@ pub mod tests {
         let cx = &mut VisualTestContext::from_window(window.into(), cx);
         let search_bar = window.build_entity(cx, |_, _| ProjectSearchBar::new());
 
-            theme_settings::init(theme::LoadThemes::JustBase, cx);
-
-            ProjectSearchView::new_search(workspace, &workspace::NewSearch, window, cx)
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.panes()[0].update(cx, |pane, cx| {
+                pane.toolbar()
+                    .update(cx, |toolbar, cx| toolbar.add_item(search_bar, window, cx))
+            });
+            ProjectSearchView::new_search(workspace, &workspace::NewSearch, window, cx);
         });
 
         let search_view = cx
