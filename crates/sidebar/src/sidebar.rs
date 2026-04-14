@@ -3260,7 +3260,7 @@ impl Sidebar {
                             });
                         if panel_shows_archived {
                             panel.update(cx, |panel, cx| {
-                                panel.clear_base_view(cx);
+                                panel.clear_base_view(window, cx);
                             });
                         }
                     }
@@ -3300,7 +3300,7 @@ impl Sidebar {
             if let Some(workspace) = workspace {
                 if let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx) {
                     panel.update(cx, |panel, cx| {
-                        panel.clear_base_view(cx);
+                        panel.clear_base_view(window, cx);
                     });
                 }
             }
@@ -4052,7 +4052,7 @@ impl Sidebar {
         workspace.update(cx, |ws, cx| {
             if let Some(panel) = ws.panel::<AgentPanel>(cx) {
                 panel.update(cx, |panel, cx| {
-                    panel.remove_thread(draft_id, cx);
+                    panel.remove_thread(draft_id, window, cx);
                 });
             }
         });

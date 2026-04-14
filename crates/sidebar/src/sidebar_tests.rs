@@ -3283,8 +3283,8 @@ async fn test_sending_message_from_draft_removes_draft(cx: &mut TestAppContext) 
     // remove the draft, open a real thread with a stub connection,
     // and send.
     let thread_id = panel.read_with(cx, |panel, cx| panel.active_thread_id(cx).unwrap());
-    panel.update_in(cx, |panel, _window, cx| {
-        panel.remove_thread(thread_id, cx);
+    panel.update_in(cx, |panel, window, cx| {
+        panel.remove_thread(thread_id, window, cx);
     });
     let draft_connection = StubAgentConnection::new();
     draft_connection.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(

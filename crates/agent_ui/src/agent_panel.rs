@@ -1209,13 +1209,11 @@ impl AgentPanel {
     }
 
     /// Clear the active view, retaining any running thread in the background.
-    pub fn clear_base_view(&mut self, cx: &mut Context<Self>) {
+    pub fn clear_base_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let old_view = std::mem::replace(&mut self.base_view, BaseView::Uninitialized);
         self.retain_running_thread(old_view, cx);
         self.clear_overlay_state();
-        self._thread_view_subscription = None;
-        self._active_thread_focus_subscription = None;
-        self._base_view_observation = None;
+        self.ensure_thread_initialized(window, cx);
         self.serialize(cx);
         cx.emit(AgentPanelEvent::ActiveViewChanged);
         cx.notify();
@@ -1257,18 +1255,19 @@ impl AgentPanel {
         );
     }
 
-    pub fn remove_thread(&mut self, id: ThreadId, cx: &mut Context<Self>) {
+    pub fn remove_thread(&mut self, id: ThreadId, window: &mut Window, cx: &mut Context<Self>) {
         self.retained_threads.remove(&id);
         ThreadMetadataStore::global(cx).update(cx, |store, cx| {
             store.delete(id, cx);
         });
 
         if self.active_thread_id(cx) == Some(id) && self.active_thread_is_draft(cx) {
-            self.base_view = BaseView::Uninitialized;
             self.clear_overlay_state();
-            self._thread_view_subscription = None;
-            self._active_thread_focus_subscription = None;
-            self._base_view_observation = None;
+
+            // Fallback?
+            let id = self.create_thread(window, cx);
+            self.activate_retained_thread(id, false, window, cx);
+
             self.serialize(cx);
             cx.emit(AgentPanelEvent::ActiveViewChanged);
             cx.notify();
@@ -3614,7 +3613,11 @@ impl Panel for AgentPanel {
         });
     }
 
-    fn set_active(&mut self, _active: bool, _window: &mut Window, _cx: &mut Context<Self>) {}
+    fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if active {
+            self.ensure_thread_initialized(window, cx);
+        }
+    }
 
     fn remote_id() -> Option<proto::PanelId> {
         Some(proto::PanelId::AssistantPanel)
@@ -3655,6 +3658,18 @@ impl Panel for AgentPanel {
 }
 
 impl AgentPanel {
+    fn ensure_thread_initialized(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.base_view, BaseView::Uninitialized)
+            && !matches!(
+                self.worktree_creation_status,
+                Some((_, WorktreeCreationStatus::Creating))
+            )
+        {
+            let id = self.create_thread(window, cx);
+            self.activate_retained_thread(id, false, window, cx);
+        }
+    }
+
     fn render_title_view(&self, _window: &mut Window, cx: &Context<Self>) -> AnyElement {
         let content = match self.visible_surface() {
             VisibleSurface::AgentThread(conversation_view) => {
