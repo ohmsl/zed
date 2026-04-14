@@ -2086,7 +2086,6 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.remove_empty_draft(cx);
         self.retained_threads
             .remove(&conversation_view.read(cx).thread_id);
         self.set_base_view(
