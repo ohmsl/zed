@@ -6480,6 +6480,7 @@ dependencies = [
  "rope",
  "serde",
  "serde_json",
+ "slotmap",
  "smol",
  "tempfile",
  "text",

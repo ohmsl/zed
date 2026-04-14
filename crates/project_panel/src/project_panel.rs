@@ -2213,6 +2213,8 @@ impl ProjectPanel {
         self.rename_impl(None, window, cx);
     }
 
+    // TODO!(dino): Ensure that the listener in remote is enabled, right now is
+    // disabled.
     fn trash(&mut self, action: &Trash, window: &mut Window, cx: &mut Context<Self>) {
         dbg!("ProjectPanel::trash");
         self.remove(true, action.skip_prompt, window, cx);

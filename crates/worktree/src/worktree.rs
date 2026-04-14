@@ -8,7 +8,7 @@ use clock::ReplicaId;
 use collections::{HashMap, HashSet, VecDeque};
 use encoding_rs::Encoding;
 use fs::{
-    Fs, MTime, PathEvent, PathEventKind, RemoveOptions, TrashedEntry, Watcher, copy_recursive,
+    Fs, MTime, PathEvent, PathEventKind, RemoveOptions, TrashId, Watcher, copy_recursive,
     read_dir_items,
 };
 use futures::{
@@ -849,16 +849,10 @@ impl Worktree {
         entry_id: ProjectEntryId,
         trash: bool,
         cx: &mut Context<Worktree>,
-    ) -> Option<Task<Result<Option<TrashedEntry>>>> {
+    ) -> Option<Task<Result<Option<TrashId>>>> {
         let task = match self {
-            Worktree::Local(this) => {
-                dbg!(("LOCAL", trash));
-                this.delete_entry(entry_id, trash, cx)
-            }
-            Worktree::Remote(this) => {
-                dbg!(("REMOTE", trash));
-                this.delete_entry(entry_id, trash, cx)
-            }
+            Worktree::Local(this) => this.delete_entry(entry_id, trash, cx),
+            Worktree::Remote(this) => this.delete_entry(entry_id, trash, cx),
         }?;
 
         let entry = match &*self {
@@ -878,13 +872,13 @@ impl Worktree {
     }
 
     pub async fn restore_entry(
-        trash_entry: TrashedEntry,
+        trash_id: TrashId,
         worktree: Entity<Self>,
         cx: &mut AsyncApp,
     ) -> Result<RelPathBuf> {
         let is_local = worktree.read_with(cx, |this, _| this.is_local());
         if is_local {
-            LocalWorktree::restore_entry(trash_entry, worktree, cx).await
+            LocalWorktree::restore_entry(trash_id, worktree, cx).await
         } else {
             // TODO(dino): Add support for restoring entries in remote worktrees.
             Err(anyhow!("Unsupported"))
@@ -898,18 +892,6 @@ impl Worktree {
             self.get_children_ids_recursive(&child.path, ids);
         }
     }
-
-    // pub fn rename_entry(
-    //     &mut self,
-    //     entry_id: ProjectEntryId,
-    //     new_path: Arc<RelPath>,
-    //     cx: &Context<Self>,
-    // ) -> Task<Result<CreatedEntry>> {
-    //     match self {
-    //         Worktree::Local(this) => this.rename_entry(entry_id, new_path, cx),
-    //         Worktree::Remote(this) => this.rename_entry(entry_id, new_path, cx),
-    //     }
-    // }
 
     pub fn copy_external_entries(
         &mut self,
@@ -1019,13 +1001,13 @@ impl Worktree {
                 ),
             )
         });
-        let trashed_entry = task
+        let trash_id = task
             .ok_or_else(|| anyhow::anyhow!("invalid entry"))?
             .await?;
         Ok(proto::ProjectEntryResponse {
             entry: None,
             worktree_scan_id: scan_id as u64,
-            trashed_entry: trashed_entry.map(|e| proto::TrashedEntry {
+            trashed_entry: trash_id.map(|e| proto::TrashedEntry {
                 trash_id: e.id.to_string_lossy().to_string(),
                 file_name: e.name.to_string_lossy().to_string(),
                 original_parent_path: e.original_parent.to_string_lossy().to_string(),
@@ -1713,13 +1695,13 @@ impl LocalWorktree {
         entry_id: ProjectEntryId,
         trash: bool,
         cx: &Context<Worktree>,
-    ) -> Option<Task<Result<Option<TrashedEntry>>>> {
+    ) -> Option<Task<Result<Option<TrashId>>>> {
         let entry = self.entry_for_id(entry_id)?.clone();
         let abs_path = self.absolutize(&entry.path);
         let fs = self.fs.clone();
 
         let delete = cx.background_spawn(async move {
-            let trashed_entry = match (entry.is_file(), trash) {
+            let trash_id = match (entry.is_file(), trash) {
                 (true, true) => Some(fs.trash(&abs_path, Default::default()).await?),
                 (false, true) => Some(
                     fs.trash(
@@ -1748,7 +1730,7 @@ impl LocalWorktree {
                 }
             };
 
-            anyhow::Ok((trashed_entry, entry.path))
+            anyhow::Ok((trash_id, entry.path))
         });
 
         Some(cx.spawn(async move |this, cx| {
@@ -2190,41 +2172,6 @@ impl RemoteWorktree {
             }))
         }))
     }
-
-    // fn rename_entry(
-    //     &self,
-    //     entry_id: ProjectEntryId,
-    //     new_path: impl Into<Arc<RelPath>>,
-    //     cx: &Context<Worktree>,
-    // ) -> Task<Result<CreatedEntry>> {
-    //     let new_path: Arc<RelPath> = new_path.into();
-    //     let response = self.client.request(proto::RenameProjectEntry {
-    //         project_id: self.project_id,
-    //         entry_id: entry_id.to_proto(),
-    //         new_worktree_id: new_path.worktree_id,
-    //         new_path: new_path.as_ref().to_proto(),
-    //     });
-    //     cx.spawn(async move |this, cx| {
-    //         let response = response.await?;
-    //         match response.entry {
-    //             Some(entry) => this
-    //                 .update(cx, |this, cx| {
-    //                     this.as_remote_mut().unwrap().insert_entry(
-    //                         entry,
-    //                         response.worktree_scan_id as usize,
-    //                         cx,
-    //                     )
-    //                 })?
-    //                 .await
-    //                 .map(CreatedEntry::Included),
-    //             None => {
-    //                 let abs_path =
-    //                     this.read_with(cx, |worktree, _| worktree.absolutize(&new_path))?;
-    //                 Ok(CreatedEntry::Excluded { abs_path })
-    //             }
-    //         }
-    //     })
-    // }
 
     fn copy_external_entries(
         &self,
