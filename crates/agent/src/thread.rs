@@ -1398,6 +1398,39 @@ impl Thread {
         &self.action_log
     }
 
+    pub fn rebind_project_context(
+        &mut self,
+        project: Entity<Project>,
+        project_context: Entity<ProjectContext>,
+        context_server_registry: Entity<ContextServerRegistry>,
+        cx: &mut Context<Self>,
+    ) {
+        self.project = project.clone();
+        self.user_store = project.read(cx).user_store();
+        self.project_context = project_context;
+        self.context_server_registry = context_server_registry;
+        self.action_log.update(cx, |action_log, cx| {
+            action_log.rebind_project(project.clone(), cx);
+        });
+        self.set_tools_project(project.clone());
+        self.refresh_turn_tools(cx);
+
+        let rebound_project_context = self.project_context.clone();
+        let rebound_context_server_registry = self.context_server_registry.clone();
+        for subagent in &self.running_subagents {
+            subagent
+                .update(cx, |thread, cx| {
+                    thread.rebind_project_context(
+                        project.clone(),
+                        rebound_project_context.clone(),
+                        rebound_context_server_registry.clone(),
+                        cx,
+                    )
+                })
+                .ok();
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.messages.is_empty() && self.title.is_none()
     }
@@ -1527,6 +1560,7 @@ impl Thread {
         environment: Rc<dyn ThreadEnvironment>,
         cx: &mut Context<Self>,
     ) {
+        self.tools.clear();
         // Only update the agent location for the root thread, not for subagents.
         let update_agent_location = self.parent_thread_id().is_none();
 
@@ -1572,6 +1606,12 @@ impl Thread {
 
         if self.depth() < MAX_SUBAGENT_DEPTH {
             self.add_tool(SpawnAgentTool::new(environment));
+        }
+    }
+
+    fn set_tools_project(&self, project: Entity<Project>) {
+        for tool in self.tools.values() {
+            tool.set_project(project.clone());
         }
     }
 
@@ -1784,14 +1824,10 @@ impl Thread {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Result<mpsc::UnboundedReceiver<Result<ThreadEvent>>> {
-        let model = self
-            .model()
+        self.model()
             .ok_or_else(|| anyhow!(NoModelConfiguredError))?;
 
-        log::info!("Thread::send called with model: {}", model.name().0);
         self.advance_prompt_id();
-
-        log::debug!("Total messages in thread: {}", self.messages.len());
         self.run_turn(cx)
     }
 
@@ -3375,6 +3411,8 @@ where
         Ok(())
     }
 
+    fn set_project(&self, _project: Entity<Project>);
+
     fn erase(self) -> Arc<dyn AnyAgentTool> {
         Arc::new(Erased(Arc::new(self)))
     }
@@ -3424,6 +3462,7 @@ pub trait AnyAgentTool {
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Result<()>;
+    fn set_project(&self, project: Entity<Project>);
 }
 
 impl<T> AnyAgentTool for Erased<Arc<T>>
@@ -3499,9 +3538,13 @@ where
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Result<()> {
-        let input = serde_json::from_value(input)?;
-        let output = serde_json::from_value(output)?;
+        let input = serde_json::from_value::<T::Input>(input)?;
+        let output = serde_json::from_value::<T::Output>(output)?;
         self.0.replay(input, output, event_stream, cx)
+    }
+
+    fn set_project(&self, project: Entity<Project>) {
+        self.0.set_project(project);
     }
 }
 

@@ -3,6 +3,7 @@ use super::tool_permissions::{
     resolve_project_path,
 };
 use crate::{AgentTool, ToolCallEventStream, ToolInput};
+
 use agent_client_protocol::ToolKind;
 use anyhow::{Context as _, Result, anyhow};
 use gpui::{App, Entity, SharedString, Task};
@@ -10,6 +11,7 @@ use project::{Project, ProjectPath, WorktreeSettings};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::Settings;
+use parking_lot::Mutex;
 use std::fmt::Write;
 use std::sync::Arc;
 use util::markdown::MarkdownInlineCode;
@@ -42,12 +44,12 @@ pub struct ListDirectoryToolInput {
 }
 
 pub struct ListDirectoryTool {
-    project: Entity<Project>,
+    project: Mutex<Entity<Project>>,
 }
 
 impl ListDirectoryTool {
     pub fn new(project: Entity<Project>) -> Self {
-        Self { project }
+        Self { project: Mutex::new(project) }
     }
 
     fn build_directory_output(
@@ -131,6 +133,10 @@ impl AgentTool for ListDirectoryTool {
         ToolKind::Read
     }
 
+    fn set_project(&self, project: Entity<Project>) {
+            *self.project.lock() = project;
+        }
+
     fn initial_title(
         &self,
         input: Result<Self::Input, serde_json::Value>,
@@ -150,7 +156,7 @@ impl AgentTool for ListDirectoryTool {
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
-        let project = self.project.clone();
+        let project = self.project.lock().clone();
         cx.spawn(async move |cx| {
             let input = input
                 .recv()
@@ -394,6 +400,80 @@ mod tests {
         assert!(!output.contains("# Folders:"));
         assert!(output.contains("# Files:"));
         assert!(output.contains(&platform_paths("project/tests/integration_test.rs")));
+    }
+
+    #[gpui::test]
+    async fn test_list_directory_rebinds_to_new_project(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/project_a"),
+            json!({
+                "a.txt": "hello from a"
+            }),
+        )
+        .await;
+        fs.insert_tree(
+            path!("/project_b"),
+            json!({
+                "b.txt": "hello from b"
+            }),
+        )
+        .await;
+
+        let project_a = Project::test(fs.clone(), [path!("/project_a").as_ref()], cx).await;
+        let project_b = Project::test(fs.clone(), [path!("/project_b").as_ref()], cx).await;
+        let tool = Arc::new(ListDirectoryTool::new(project_a));
+
+        let output_before_rebind = cx
+            .update(|cx| {
+                tool.clone().run(
+                    ToolInput::resolved(ListDirectoryToolInput {
+                        path: "project_a".into(),
+                    }),
+                    ToolCallEventStream::test().0,
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        assert!(output_before_rebind.contains(&platform_paths("project_a/a.txt")));
+
+        tool.set_project(project_b);
+
+        let output_after_rebind = cx
+            .update(|cx| {
+                tool.clone().run(
+                    ToolInput::resolved(ListDirectoryToolInput {
+                        path: "project_b".into(),
+                    }),
+                    ToolCallEventStream::test().0,
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        assert!(output_after_rebind.contains(&platform_paths("project_b/b.txt")));
+
+        let error_after_rebind = cx
+            .update(|cx| {
+                tool.clone().run(
+                    ToolInput::resolved(ListDirectoryToolInput {
+                        path: "project_a".into(),
+                    }),
+                    ToolCallEventStream::test().0,
+                    cx,
+                )
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            error_after_rebind.contains("Path not found: project_a")
+                || error_after_rebind.contains("not in a known worktree")
+                || error_after_rebind.contains("Path project_a is not in the project"),
+            "expected rebound tool to stop resolving project_a, got: {error_after_rebind}"
+        );
     }
 
     #[gpui::test]

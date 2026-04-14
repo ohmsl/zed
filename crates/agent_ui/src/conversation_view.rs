@@ -578,6 +578,50 @@ impl ConversationView {
             });
         }
     }
+
+    pub fn set_workspace(
+        &mut self,
+        workspace: Entity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let project = workspace.read(cx).project().clone();
+        self.workspace = workspace.downgrade();
+        self.project = project.clone();
+        self.agent_server_store = project.read(cx).agent_server_store().clone();
+
+        let (thread_views, active_thread, connection) = self
+            .as_connected()
+            .map(|connected| {
+                let thread_views = connected.threads.values().cloned().collect::<Vec<_>>();
+                let active_thread = connected.active_view().cloned();
+                let connection = connected.connection.clone();
+                (thread_views, active_thread, Some(connection))
+            })
+            .unwrap_or_default();
+
+        if let Some(connection) = &connection {
+            for thread_view in &thread_views {
+                let session_id = thread_view.read(cx).session_id.clone();
+                connection
+                    .set_project(&session_id, project.clone(), cx)
+                    .log_err();
+            }
+        }
+
+        for thread_view in &thread_views {
+            thread_view.update(cx, |thread_view, cx| {
+                thread_view.set_workspace(workspace.clone(), window, cx);
+            });
+        }
+
+        if let Some(active_thread) = active_thread {
+            let active_thread = active_thread.read(cx).thread.clone();
+            AgentDiff::set_active_thread(&self.workspace, active_thread, window, cx);
+        }
+
+        cx.notify();
+    }
 }
 
 enum ServerState {

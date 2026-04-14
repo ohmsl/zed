@@ -6,6 +6,7 @@ use gpui::{App, Entity, SharedString, Task};
 use indoc::formatdoc;
 use language::Point;
 use language_model::{LanguageModelImage, LanguageModelImageExt, LanguageModelToolResultContent};
+use parking_lot::Mutex;
 use project::{AgentLocation, ImageItem, Project, WorktreeSettings, image_store};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -56,7 +57,7 @@ pub struct ReadFileToolInput {
 }
 
 pub struct ReadFileTool {
-    project: Entity<Project>,
+    project: Mutex<Entity<Project>>,
     action_log: Entity<ActionLog>,
     update_agent_location: bool,
 }
@@ -68,7 +69,7 @@ impl ReadFileTool {
         update_agent_location: bool,
     ) -> Self {
         Self {
-            project,
+            project: Mutex::new(project),
             action_log,
             update_agent_location,
         }
@@ -85,15 +86,19 @@ impl AgentTool for ReadFileTool {
         acp::ToolKind::Read
     }
 
+    fn set_project(&self, project: Entity<Project>) {
+        *self.project.lock() = project;
+    }
+
     fn initial_title(
         &self,
         input: Result<Self::Input, serde_json::Value>,
         cx: &mut App,
     ) -> SharedString {
+        let project = self.project.lock().clone();
         if let Ok(input) = input
-            && let Some(project_path) = self.project.read(cx).find_project_path(&input.path, cx)
-            && let Some(path) = self
-                .project
+            && let Some(project_path) = project.read(cx).find_project_path(&input.path, cx)
+            && let Some(path) = project
                 .read(cx)
                 .short_full_path_for_project_path(&project_path, cx)
         {
@@ -118,7 +123,7 @@ impl AgentTool for ReadFileTool {
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<LanguageModelToolResultContent, LanguageModelToolResultContent>> {
-        let project = self.project.clone();
+        let project = self.project.lock().clone();
         let action_log = self.action_log.clone();
         cx.spawn(async move |cx| {
             let input = input
@@ -213,7 +218,7 @@ impl AgentTool for ReadFileTool {
             if is_image {
                 let image_entity: Entity<ImageItem> = cx
                     .update(|cx| {
-                        self.project.update(cx, |project, cx| {
+                        project.update(cx, |project, cx| {
                             project.open_image(project_path.clone(), cx)
                         })
                     })

@@ -308,6 +308,8 @@ impl AnyAgentTool for ContextServerTool {
         ToolKind::Other
     }
 
+    fn set_project(&self, _project: Entity<project::Project>) {}
+
     fn initial_title(&self, _input: serde_json::Value, _cx: &mut App) -> SharedString {
         format!("Run MCP tool `{}`", self.tool.name).into()
     }

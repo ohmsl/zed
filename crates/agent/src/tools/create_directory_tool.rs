@@ -10,6 +10,7 @@ use project::Project;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::Settings;
+use parking_lot::Mutex;
 use std::sync::Arc;
 use util::markdown::MarkdownInlineCode;
 
@@ -37,12 +38,14 @@ pub struct CreateDirectoryToolInput {
 }
 
 pub struct CreateDirectoryTool {
-    project: Entity<Project>,
+    project: Mutex<Entity<Project>>,
 }
 
 impl CreateDirectoryTool {
     pub fn new(project: Entity<Project>) -> Self {
-        Self { project }
+        Self {
+            project: Mutex::new(project),
+        }
     }
 }
 
@@ -54,6 +57,10 @@ impl AgentTool for CreateDirectoryTool {
 
     fn kind() -> ToolKind {
         ToolKind::Read
+    }
+
+    fn set_project(&self, project: Entity<Project>) {
+        *self.project.lock() = project;
     }
 
     fn initial_title(
@@ -74,7 +81,7 @@ impl AgentTool for CreateDirectoryTool {
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
-        let project = self.project.clone();
+        let project = self.project.lock().clone();
         cx.spawn(async move |cx| {
             let input = input
                 .recv()

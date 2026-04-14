@@ -38,6 +38,8 @@ impl AgentTool for NowTool {
         acp::ToolKind::Other
     }
 
+    fn set_project(&self, _project: gpui::Entity<project::Project>) {}
+
     fn initial_title(
         &self,
         _input: Result<Self::Input, serde_json::Value>,

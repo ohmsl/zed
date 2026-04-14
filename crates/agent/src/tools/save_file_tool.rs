@@ -4,6 +4,7 @@ use collections::FxHashSet;
 use futures::FutureExt as _;
 use gpui::{App, Entity, SharedString, Task};
 use language::Buffer;
+use parking_lot::Mutex;
 use project::Project;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,7 @@ use crate::{
     AgentTool, ToolCallEventStream, ToolInput, ToolPermissionDecision, decide_permission_for_path,
 };
 
+
 /// Saves files that have unsaved changes.
 ///
 /// Use this tool when you need to edit files but they have unsaved changes that must be saved first.
@@ -32,12 +34,12 @@ pub struct SaveFileToolInput {
 }
 
 pub struct SaveFileTool {
-    project: Entity<Project>,
+    project: Mutex<Entity<Project>>,
 }
 
 impl SaveFileTool {
     pub fn new(project: Entity<Project>) -> Self {
-        Self { project }
+        Self { project: Mutex::new(project) }
     }
 }
 
@@ -49,6 +51,10 @@ impl AgentTool for SaveFileTool {
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other
+    }
+
+    fn set_project(&self, project: Entity<Project>) {
+        *self.project.lock() = project;
     }
 
     fn initial_title(
@@ -69,7 +75,7 @@ impl AgentTool for SaveFileTool {
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<String, String>> {
-        let project = self.project.clone();
+        let project = self.project.lock().clone();
 
         cx.spawn(async move |cx| {
             let input = input

@@ -3,12 +3,14 @@ use super::tool_permissions::{
     resolve_project_path,
 };
 use crate::{AgentTool, ToolInput};
+
 use agent_client_protocol::ToolKind;
 use futures::FutureExt as _;
 use gpui::{App, AppContext as _, Entity, SharedString, Task};
 use project::Project;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use parking_lot::Mutex;
 use std::{path::PathBuf, sync::Arc};
 use util::markdown::MarkdownEscaped;
 
@@ -28,12 +30,12 @@ pub struct OpenToolInput {
 }
 
 pub struct OpenTool {
-    project: Entity<Project>,
+    project: Mutex<Entity<Project>>,
 }
 
 impl OpenTool {
     pub fn new(project: Entity<Project>) -> Self {
-        Self { project }
+        Self { project: Mutex::new(project) }
     }
 }
 
@@ -46,6 +48,10 @@ impl AgentTool for OpenTool {
     fn kind() -> ToolKind {
         ToolKind::Execute
     }
+
+    fn set_project(&self, project: Entity<Project>) {
+            *self.project.lock() = project;
+        }
 
     fn initial_title(
         &self,
@@ -65,7 +71,7 @@ impl AgentTool for OpenTool {
         event_stream: crate::ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
-        let project = self.project.clone();
+        let project = self.project.lock().clone();
         cx.spawn(async move |cx| {
             let input = input
                 .recv()

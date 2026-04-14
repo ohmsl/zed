@@ -9,6 +9,7 @@ use collections::FxHashSet;
 use futures::FutureExt as _;
 use gpui::{App, Entity, SharedString, Task};
 use language::Buffer;
+use parking_lot::Mutex;
 use project::Project;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,7 @@ use util::markdown::MarkdownInlineCode;
 use crate::{
     AgentTool, ToolCallEventStream, ToolInput, ToolPermissionDecision, decide_permission_for_path,
 };
+
 
 /// Discards unsaved changes in open buffers by reloading file contents from disk.
 ///
@@ -35,12 +37,12 @@ pub struct RestoreFileFromDiskToolInput {
 }
 
 pub struct RestoreFileFromDiskTool {
-    project: Entity<Project>,
+    project: Mutex<Entity<Project>>,
 }
 
 impl RestoreFileFromDiskTool {
     pub fn new(project: Entity<Project>) -> Self {
-        Self { project }
+        Self { project: Mutex::new(project) }
     }
 }
 
@@ -52,6 +54,10 @@ impl AgentTool for RestoreFileFromDiskTool {
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other
+    }
+
+    fn set_project(&self, project: Entity<Project>) {
+        *self.project.lock() = project;
     }
 
     fn initial_title(
@@ -72,7 +78,7 @@ impl AgentTool for RestoreFileFromDiskTool {
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<String, String>> {
-        let project = self.project.clone();
+        let project = self.project.lock().clone();
 
         cx.spawn(async move |cx| {
             let input = input

@@ -308,6 +308,18 @@ impl TerminalView {
         cx.notify();
     }
 
+    pub fn set_workspace(
+        &mut self,
+        workspace: Entity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.project = workspace.read(cx).project().downgrade();
+        self.workspace = workspace.downgrade();
+        self._terminal_subscriptions =
+            subscribe_for_terminal_events(&self.terminal, workspace.downgrade(), window, cx);
+    }
+
     const MAX_EMBEDDED_LINES: usize = 1_000;
 
     /// Returns the current `ContentMode` depending on the set `TerminalMode` and the current number of lines

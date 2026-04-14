@@ -85,6 +85,15 @@ impl ActionLog {
         &self.project
     }
 
+    pub fn rebind_project(&mut self, project: Entity<Project>, cx: &mut Context<Self>) {
+        self.project = project.clone();
+        if let Some(linked_action_log) = &self.linked_action_log {
+            linked_action_log.update(cx, |linked_action_log, cx| {
+                linked_action_log.rebind_project(project, cx);
+            });
+        }
+    }
+
     pub fn file_read_time(&self, path: &Path) -> Option<MTime> {
         self.file_read_times.get(path).copied()
     }

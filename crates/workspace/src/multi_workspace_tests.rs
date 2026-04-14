@@ -1,4 +1,7 @@
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+type CapturedActivationEvent = (EntityId, EntityId, WorkspaceActivationCause);
 
 use super::*;
 use client::proto;
@@ -653,4 +656,117 @@ async fn test_remote_worktree_without_git_updates_project_group(cx: &mut TestApp
             "should contain the updated key; got {keys:?}"
         );
     });
+}
+
+#[gpui::test]
+async fn test_activate_with_worktree_switch_cause_emits_correct_event(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs.clone(), ["/root_b".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+
+    let workspace_a = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+
+    let workspace_b = multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b, window, cx)
+    });
+
+    let events: Arc<Mutex<Vec<CapturedActivationEvent>>> = Arc::new(Mutex::new(Vec::new()));
+
+    multi_workspace.update(cx, |_mw, cx| {
+        let events = events.clone();
+        cx.subscribe(
+            &cx.entity(),
+            move |_mw, _emitter, event: &MultiWorkspaceEvent, _cx| {
+                if let MultiWorkspaceEvent::ActiveWorkspaceChanged {
+                    old_workspace,
+                    new_workspace,
+                    cause,
+                } = event
+                {
+                    events.lock().unwrap().push((
+                        old_workspace.entity_id(),
+                        new_workspace.entity_id(),
+                        *cause,
+                    ));
+                }
+            },
+        )
+        .detach();
+    });
+
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.activate_with_cause(
+            workspace_a.clone(),
+            WorkspaceActivationCause::WorktreeSwitch,
+            window,
+            cx,
+        );
+    });
+
+    let captured_events = events.lock().unwrap();
+    assert_eq!(captured_events.len(), 1, "expected exactly one event");
+    let (old_id, new_id, cause) = &captured_events[0];
+    assert_eq!(*old_id, workspace_b.entity_id());
+    assert_eq!(*new_id, workspace_a.entity_id());
+    assert_eq!(*cause, WorkspaceActivationCause::WorktreeSwitch);
+}
+
+#[gpui::test]
+async fn test_activate_with_other_cause_emits_correct_event(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs.clone(), ["/root_b".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+
+    let workspace_a = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+
+    let workspace_b = multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b, window, cx)
+    });
+
+    let events: Arc<Mutex<Vec<CapturedActivationEvent>>> = Arc::new(Mutex::new(Vec::new()));
+
+    multi_workspace.update(cx, |_mw, cx| {
+        let events = events.clone();
+        cx.subscribe(
+            &cx.entity(),
+            move |_mw, _emitter, event: &MultiWorkspaceEvent, _cx| {
+                if let MultiWorkspaceEvent::ActiveWorkspaceChanged {
+                    old_workspace,
+                    new_workspace,
+                    cause,
+                } = event
+                {
+                    events.lock().unwrap().push((
+                        old_workspace.entity_id(),
+                        new_workspace.entity_id(),
+                        *cause,
+                    ));
+                }
+            },
+        )
+        .detach();
+    });
+
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.activate(workspace_a.clone(), window, cx);
+    });
+
+    let captured_events = events.lock().unwrap();
+    assert_eq!(captured_events.len(), 1, "expected exactly one event");
+    let (old_id, new_id, cause) = &captured_events[0];
+    assert_eq!(*old_id, workspace_b.entity_id());
+    assert_eq!(*new_id, workspace_a.entity_id());
+    assert_eq!(*cause, WorkspaceActivationCause::Other);
 }

@@ -1,4 +1,5 @@
 use crate::{AgentTool, ToolCallEventStream, ToolInput};
+
 use agent_client_protocol as acp;
 use anyhow::{Result, anyhow};
 use futures::FutureExt as _;
@@ -8,6 +9,7 @@ use project::Project;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt::Write;
+use parking_lot::Mutex;
 use std::{cmp, path::PathBuf, sync::Arc};
 use util::paths::PathMatcher;
 
@@ -88,12 +90,12 @@ impl From<FindPathToolOutput> for LanguageModelToolResultContent {
 const RESULTS_PER_PAGE: usize = 50;
 
 pub struct FindPathTool {
-    project: Entity<Project>,
+    project: Mutex<Entity<Project>>,
 }
 
 impl FindPathTool {
     pub fn new(project: Entity<Project>) -> Self {
-        Self { project }
+        Self { project: Mutex::new(project) }
     }
 }
 
@@ -106,6 +108,10 @@ impl AgentTool for FindPathTool {
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Search
     }
+
+    fn set_project(&self, project: Entity<Project>) {
+            *self.project.lock() = project;
+        }
 
     fn initial_title(
         &self,
@@ -125,7 +131,7 @@ impl AgentTool for FindPathTool {
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
-        let project = self.project.clone();
+        let project = self.project.lock().clone();
         cx.spawn(async move |cx| {
             let input = input.recv().await.map_err(|e| FindPathToolOutput::Error {
                 error: format!("Failed to receive tool input: {e}"),

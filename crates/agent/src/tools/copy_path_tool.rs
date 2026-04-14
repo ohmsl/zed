@@ -5,6 +5,7 @@ use super::tool_permissions::{
 use crate::{
     AgentTool, ToolCallEventStream, ToolInput, ToolPermissionDecision, decide_permission_for_paths,
 };
+
 use agent_client_protocol::ToolKind;
 use agent_settings::AgentSettings;
 use futures::FutureExt as _;
@@ -14,6 +15,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::Settings;
 use std::path::Path;
+use parking_lot::Mutex;
 use std::sync::Arc;
 use util::markdown::MarkdownInlineCode;
 
@@ -46,12 +48,14 @@ pub struct CopyPathToolInput {
 }
 
 pub struct CopyPathTool {
-    project: Entity<Project>,
+    project: Mutex<Entity<Project>>,
 }
 
 impl CopyPathTool {
     pub fn new(project: Entity<Project>) -> Self {
-        Self { project }
+        Self {
+            project: Mutex::new(project),
+        }
     }
 }
 
@@ -63,6 +67,10 @@ impl AgentTool for CopyPathTool {
 
     fn kind() -> ToolKind {
         ToolKind::Move
+    }
+
+    fn set_project(&self, project: Entity<Project>) {
+        *self.project.lock() = project;
     }
 
     fn initial_title(
@@ -85,7 +93,7 @@ impl AgentTool for CopyPathTool {
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
-        let project = self.project.clone();
+        let project = self.project.lock().clone();
         cx.spawn(async move |cx| {
             let input = input
                 .recv()

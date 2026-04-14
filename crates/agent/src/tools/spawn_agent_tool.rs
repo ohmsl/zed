@@ -110,6 +110,8 @@ impl AgentTool for SpawnAgentTool {
         acp::ToolKind::Other
     }
 
+    fn set_project(&self, _project: gpui::Entity<project::Project>) {}
+
     fn initial_title(
         &self,
         input: Result<Self::Input, serde_json::Value>,
@@ -147,7 +149,7 @@ impl AgentTool for SpawnAgentTool {
                 } else {
                     self.environment.create_subagent(input.label, cx)
                 };
-                let subagent = subagent.map_err(|err| SpawnAgentToolOutput::Error {
+                let subagent = subagent.map_err(|err: anyhow::Error| SpawnAgentToolOutput::Error {
                     session_id: None,
                     error: err.to_string(),
                     session_info: None,

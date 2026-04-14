@@ -59,6 +59,37 @@ impl EntryViewState {
         self.entries.get(index)
     }
 
+    pub fn set_workspace(
+        &mut self,
+        workspace: Entity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let project = workspace.read(cx).project().downgrade();
+        self.workspace = workspace.downgrade();
+        self.project = project;
+
+        for entry in &self.entries {
+            match entry {
+                Entry::UserMessage(editor) => {
+                    editor.update(cx, |editor, cx| {
+                        editor.set_workspace(workspace.clone(), cx);
+                    });
+                }
+                Entry::ToolCall(ToolCallEntry { content }) => {
+                    for view in content.values() {
+                        if let Ok(terminal_view) = view.clone().downcast::<TerminalView>() {
+                            terminal_view.update(cx, |terminal_view, cx| {
+                                terminal_view.set_workspace(workspace.clone(), window, cx);
+                            });
+                        }
+                    }
+                }
+                Entry::AssistantMessage(_) | Entry::CompletedPlan => {}
+            }
+        }
+    }
+
     pub fn sync_entry(
         &mut self,
         index: usize,

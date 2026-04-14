@@ -472,6 +472,53 @@ impl NativeAgent {
             .and_then(|session| self.projects.get(&session.project_id))
     }
 
+    fn rebind_session_to_project(
+        &mut self,
+        session_id: &acp::SessionId,
+        project: Entity<Project>,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let project_id = self.get_or_create_project_state(&project, cx);
+        let project_state = self
+            .projects
+            .get(&project_id)
+            .context("project state not found")?;
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .context("session not found")?;
+
+        let old_project_id = session.project_id;
+        session.project_id = project_id;
+        session.thread.update(cx, |thread, cx| {
+            thread.rebind_project_context(
+                project.clone(),
+                project_state.project_context.clone(),
+                project_state.context_server_registry.clone(),
+                cx,
+            );
+        });
+        session.acp_thread.update(cx, |thread, cx| {
+            thread.rebind_project(project.clone(), cx);
+        });
+        if let Some(state) = self.projects.get_mut(&project_id) {
+            state.project_context_needs_refresh.send(()).ok();
+        }
+        self.update_available_commands_for_project(project_id, cx);
+
+        if old_project_id != project_id {
+            let has_remaining = self
+                .sessions
+                .values()
+                .any(|s| s.project_id == old_project_id);
+            if !has_remaining {
+                self.projects.remove(&old_project_id);
+            }
+        }
+
+        Ok(())
+    }
+
     async fn maintain_project_context(
         this: WeakEntity<Self>,
         project_id: EntityId,
@@ -1145,6 +1192,16 @@ impl NativeAgentConnection {
             .update(cx, |this, cx| this.load_thread(id, project, cx))
     }
 
+    pub fn rebind_session_to_project(
+        &self,
+        session_id: &acp::SessionId,
+        project: Entity<Project>,
+        cx: &mut App,
+    ) -> Result<()> {
+        self.0
+            .update(cx, |this, cx| this.rebind_session_to_project(session_id, project, cx))
+    }
+
     fn run_turn(
         &self,
         session_id: acp::SessionId,
@@ -1158,9 +1215,9 @@ impl NativeAgentConnection {
                 .get_mut(&session_id)
                 .map(|s| (s.thread.clone(), s.acp_thread.clone()))
         }) else {
+            log::warn!("run_turn: session not found: {session_id}");
             return Task::ready(Err(anyhow!("Session not found")));
         };
-        log::debug!("Found session for: {}", session_id);
 
         let response_stream = match f(thread, cx) {
             Ok(stream) => stream,
@@ -1459,6 +1516,10 @@ impl acp_thread::AgentConnection for NativeAgentConnection {
             }
 
             let Some(session) = agent.sessions.remove(session_id) else {
+                log::warn!(
+                    "NativeAgentConnection::close_session session already missing: session_id={}",
+                    session_id
+                );
                 return Task::ready(Ok(()));
             };
             let project_id = session.project_id;
@@ -1470,6 +1531,16 @@ impl acp_thread::AgentConnection for NativeAgentConnection {
 
             session.pending_save
         })
+    }
+
+    fn set_project(
+        &self,
+        session_id: &acp::SessionId,
+        project: Entity<Project>,
+        cx: &mut App,
+    ) -> Result<()> {
+        self.0
+            .update(cx, |this, cx| this.rebind_session_to_project(session_id, project, cx))
     }
 
     fn auth_methods(&self) -> &[acp::AuthMethod] {
@@ -1494,10 +1565,9 @@ impl acp_thread::AgentConnection for NativeAgentConnection {
         cx: &mut App,
     ) -> Task<Result<acp::PromptResponse>> {
         let session_id = params.session_id.clone();
-        log::info!("Received prompt request for session: {}", session_id);
-        log::debug!("Prompt blocks count: {}", params.prompt.len());
 
         let Some(project_state) = self.0.read(cx).session_project_state(&session_id) else {
+            log::warn!("prompt: session not found: {session_id}");
             return Task::ready(Err(anyhow::anyhow!("Session not found")));
         };
 
@@ -1549,9 +1619,6 @@ impl acp_thread::AgentConnection for NativeAgentConnection {
                 .into_iter()
                 .map(|block| UserMessageContent::from_content_block(block, path_style))
                 .collect::<Vec<_>>();
-            log::debug!("Converted prompt to message: {} chars", content.len());
-            log::debug!("Message id: {:?}", id);
-            log::debug!("Message content: {:?}", content);
 
             thread.update(cx, |thread, cx| thread.send(id, content, cx))
         })
@@ -1569,7 +1636,6 @@ impl acp_thread::AgentConnection for NativeAgentConnection {
     }
 
     fn cancel(&self, session_id: &acp::SessionId, cx: &mut App) {
-        log::info!("Cancelling on session: {}", session_id);
         self.0.update(cx, |agent, cx| {
             if let Some(session) = agent.sessions.get(session_id) {
                 session
@@ -3080,6 +3146,132 @@ mod internal_tests {
                 .map(|entry| (entry.id.clone(), entry.title.to_string()))
                 .collect::<Vec<_>>()
         })
+    }
+
+
+
+    #[gpui::test]
+    async fn test_rebind_last_session_cleans_up_old_project_state(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/project_a", json!({ "a.txt": "" }))
+            .await;
+        fs.insert_tree("/project_b", json!({ "b.txt": "" }))
+            .await;
+
+        let project_a = Project::test(fs.clone(), [Path::new("/project_a")], cx).await;
+        let project_b = Project::test(fs.clone(), [Path::new("/project_b")], cx).await;
+        let thread_store = cx.new(|cx| ThreadStore::new(cx));
+        let agent = cx.update(|cx| {
+            NativeAgent::new(thread_store.clone(), Templates::new(), None, fs.clone(), cx)
+        });
+        let connection = Rc::new(NativeAgentConnection(agent.clone()));
+
+        let acp_thread = cx
+            .update(|cx| {
+                connection.clone().new_session(
+                    project_a.clone(),
+                    PathList::new(&[Path::new("/project_a")]),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let project_a_id = project_a.entity_id();
+
+        // Verify project_a's state exists.
+        agent.read_with(cx, |agent, _| {
+            assert!(
+                agent.projects.contains_key(&project_a_id),
+                "project_a state should exist before rebinding"
+            );
+        });
+
+        // Rebind the only session from project_a to project_b through the
+        // same connection API used by production code.
+        cx.update(|cx| connection.set_project(&session_id, project_b.clone(), cx))
+            .unwrap();
+        cx.run_until_parked();
+
+        // The old project_a state should have been cleaned up since
+        // no sessions reference it anymore.
+        agent.read_with(cx, |agent, _| {
+            assert!(
+                !agent.projects.contains_key(&project_a_id),
+                "project_a state should be cleaned up after last session was rebound"
+            );
+            assert!(
+                agent.projects.contains_key(&project_b.entity_id()),
+                "project_b state should exist after rebinding"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_rebind_keeps_project_state_when_other_sessions_remain(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/project_a", json!({ "a.txt": "" }))
+            .await;
+        fs.insert_tree("/project_b", json!({ "b.txt": "" }))
+            .await;
+
+        let project_a = Project::test(fs.clone(), [Path::new("/project_a")], cx).await;
+        let project_b = Project::test(fs.clone(), [Path::new("/project_b")], cx).await;
+        let thread_store = cx.new(|cx| ThreadStore::new(cx));
+        let agent = cx.update(|cx| {
+            NativeAgent::new(thread_store.clone(), Templates::new(), None, fs.clone(), cx)
+        });
+        let connection = Rc::new(NativeAgentConnection(agent.clone()));
+
+        // Create two sessions on project_a.
+        let _acp_thread_1 = cx
+            .update(|cx| {
+                connection.clone().new_session(
+                    project_a.clone(),
+                    PathList::new(&[Path::new("/project_a")]),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        let acp_thread_2 = cx
+            .update(|cx| {
+                connection.clone().new_session(
+                    project_a.clone(),
+                    PathList::new(&[Path::new("/project_a")]),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        let session_id_2 = acp_thread_2.read_with(cx, |thread, _| thread.session_id().clone());
+        let project_a_id = project_a.entity_id();
+
+        // Rebind only one of the two sessions to project_b through the same
+        // connection API used by production code.
+        cx.update(|cx| connection.set_project(&session_id_2, project_b.clone(), cx))
+            .unwrap();
+        cx.run_until_parked();
+
+        // project_a state should still exist because session_1 still uses it.
+        agent.read_with(cx, |agent, _| {
+            assert!(
+                agent.projects.contains_key(&project_a_id),
+                "project_a state should remain while another session uses it"
+            );
+            assert!(
+                agent.projects.contains_key(&project_b.entity_id()),
+                "project_b state should exist after rebinding"
+            );
+        });
     }
 
     fn init_test(cx: &mut TestAppContext) {

@@ -35,7 +35,7 @@ pub use multi_workspace::{
     MultiWorkspace, MultiWorkspaceEvent, NewThread, NextProject, NextThread, PreviousProject,
     PreviousThread, ProjectGroup, ProjectGroupKey, SerializedProjectGroupState, ShowFewerThreads,
     ShowMoreThreads, Sidebar, SidebarEvent, SidebarHandle, SidebarRenderState, SidebarSide,
-    ToggleWorkspaceSidebar, sidebar_side_context_menu,
+    ToggleWorkspaceSidebar, WorkspaceActivationCause, sidebar_side_context_menu,
 };
 pub use path_list::{PathList, SerializedPathList};
 pub use toast_layer::{ToastAction, ToastLayer, ToastView};
@@ -1814,6 +1814,28 @@ impl Workspace {
         open_mode: OpenMode,
         cx: &mut App,
     ) -> Task<anyhow::Result<OpenResult>> {
+        Self::new_local_with_activation_cause(
+            abs_paths,
+            app_state,
+            requesting_window,
+            env,
+            init,
+            open_mode,
+            WorkspaceActivationCause::Other,
+            cx,
+        )
+    }
+
+    pub fn new_local_with_activation_cause(
+        abs_paths: Vec<PathBuf>,
+        app_state: Arc<AppState>,
+        requesting_window: Option<WindowHandle<MultiWorkspace>>,
+        env: Option<HashMap<String, String>>,
+        init: Option<Box<dyn FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>) + Send>>,
+        open_mode: OpenMode,
+        activation_cause: WorkspaceActivationCause,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<OpenResult>> {
         let project_handle = Project::local(
             app_state.client.clone(),
             app_state.node_runtime.clone(),
@@ -1942,7 +1964,12 @@ impl Workspace {
                         });
                         match open_mode {
                             OpenMode::Activate => {
-                                multi_workspace.activate(workspace.clone(), window, cx);
+                                multi_workspace.activate_with_cause(
+                                    workspace.clone(),
+                                    activation_cause,
+                                    window,
+                                    cx,
+                                );
                             }
                             OpenMode::Add => {
                                 multi_workspace.add(workspace.clone(), &*window, cx);
@@ -3412,8 +3439,24 @@ impl Workspace {
 
     pub fn open_workspace_for_paths(
         &mut self,
-        // replace_current_window: bool,
+        open_mode: OpenMode,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Entity<Workspace>>> {
+        self.open_workspace_for_paths_with_activation_cause(
+            open_mode,
+            WorkspaceActivationCause::Other,
+            paths,
+            window,
+            cx,
+        )
+    }
+
+    pub fn open_workspace_for_paths_with_activation_cause(
+        &mut self,
         mut open_mode: OpenMode,
+        activation_cause: WorkspaceActivationCause,
         paths: Vec<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -3439,6 +3482,7 @@ impl Workspace {
                         OpenOptions {
                             requesting_window,
                             open_mode,
+                            activation_cause,
                             ..Default::default()
                         },
                         cx,
@@ -9334,6 +9378,7 @@ pub struct OpenOptions {
     pub wait: bool,
     pub requesting_window: Option<WindowHandle<MultiWorkspace>>,
     pub open_mode: OpenMode,
+    pub activation_cause: WorkspaceActivationCause,
     pub env: Option<HashMap<String, String>>,
     pub open_in_dev_container: bool,
 }
@@ -9572,7 +9617,12 @@ pub fn open_paths(
             let open_task = existing
                 .update(cx, |multi_workspace, window, cx| {
                     window.activate_window();
-                    multi_workspace.activate(target_workspace.clone(), window, cx);
+                    multi_workspace.activate_with_cause(
+                        target_workspace.clone(),
+                        open_options.activation_cause,
+                        window,
+                        cx,
+                    );
                     target_workspace.update(cx, |workspace, cx| {
                         if open_in_dev_container {
                             workspace.set_open_in_dev_container(true);
@@ -9613,13 +9663,14 @@ pub fn open_paths(
             };
             let result = cx
                 .update(move |cx| {
-                    Workspace::new_local(
+                    Workspace::new_local_with_activation_cause(
                         abs_paths,
                         app_state.clone(),
                         open_options.requesting_window,
                         open_options.env,
                         init,
                         open_options.open_mode,
+                        open_options.activation_cause,
                         cx,
                     )
                 })
@@ -9798,6 +9849,7 @@ pub fn open_remote_project_with_new_connection(
             app_state,
             window,
             None,
+            WorkspaceActivationCause::Other,
             cx,
         )
         .await
@@ -9813,6 +9865,28 @@ pub fn open_remote_project_with_existing_connection(
     provisional_project_group_key: Option<ProjectGroupKey>,
     cx: &mut AsyncApp,
 ) -> Task<Result<Vec<Option<Box<dyn ItemHandle>>>>> {
+    open_remote_project_with_existing_connection_and_cause(
+        connection_options,
+        project,
+        paths,
+        app_state,
+        window,
+        provisional_project_group_key,
+        WorkspaceActivationCause::Other,
+        cx,
+    )
+}
+
+pub fn open_remote_project_with_existing_connection_and_cause(
+    connection_options: RemoteConnectionOptions,
+    project: Entity<Project>,
+    paths: Vec<PathBuf>,
+    app_state: Arc<AppState>,
+    window: WindowHandle<MultiWorkspace>,
+    provisional_project_group_key: Option<ProjectGroupKey>,
+    activation_cause: WorkspaceActivationCause,
+    cx: &mut AsyncApp,
+) -> Task<Result<Vec<Option<Box<dyn ItemHandle>>>>> {
     cx.spawn(async move |cx| {
         let (workspace_id, serialized_workspace) =
             deserialize_remote_project(connection_options.clone(), paths.clone(), cx).await?;
@@ -9825,6 +9899,7 @@ pub fn open_remote_project_with_existing_connection(
             app_state,
             window,
             provisional_project_group_key,
+            activation_cause,
             cx,
         )
         .await
@@ -9839,6 +9914,7 @@ async fn open_remote_project_inner(
     app_state: Arc<AppState>,
     window: WindowHandle<MultiWorkspace>,
     provisional_project_group_key: Option<ProjectGroupKey>,
+    activation_cause: WorkspaceActivationCause,
     cx: &mut AsyncApp,
 ) -> Result<Vec<Option<Box<dyn ItemHandle>>>> {
     let db = cx.update(|cx| WorkspaceDb::global(cx));
@@ -9902,7 +9978,7 @@ async fn open_remote_project_inner(
         if let Some(project_group_key) = provisional_project_group_key.clone() {
             multi_workspace.retain_workspace(new_workspace.clone(), project_group_key, cx);
         }
-        multi_workspace.activate(new_workspace.clone(), window, cx);
+        multi_workspace.activate_with_cause(new_workspace.clone(), activation_cause, window, cx);
         new_workspace
     })?;
 

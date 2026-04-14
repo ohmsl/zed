@@ -134,6 +134,15 @@ pub trait AgentConnection {
         None
     }
 
+    fn set_project(
+        &self,
+        _session_id: &acp::SessionId,
+        _project: Entity<Project>,
+        _cx: &mut App,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     fn cancel(&self, session_id: &acp::SessionId, cx: &mut App);
 
     fn truncate(

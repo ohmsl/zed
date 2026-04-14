@@ -137,6 +137,9 @@ pub struct MessageEditor {
     mention_set: Entity<MentionSet>,
     editor: Entity<Editor>,
     workspace: WeakEntity<Workspace>,
+    project: WeakEntity<Project>,
+    history: Option<WeakEntity<ThreadHistory>>,
+    prompt_store: Option<Entity<PromptStore>>,
     session_capabilities: SharedSessionCapabilities,
     agent_id: AgentId,
     thread_store: Option<Entity<ThreadStore>>,
@@ -448,23 +451,19 @@ impl MessageEditor {
 
             editor
         });
-        let mention_set =
-            cx.new(|_cx| MentionSet::new(project, thread_store.clone(), prompt_store.clone()));
-        let completion_provider = Rc::new(PromptCompletionProvider::new(
-            MessageEditorCompletionDelegate {
-                session_capabilities: session_capabilities.clone(),
-                has_thread_store: thread_store.is_some(),
-                message_editor: cx.weak_entity(),
-            },
-            editor.downgrade(),
-            mention_set.clone(),
-            history,
-            prompt_store.clone(),
-            workspace.clone(),
-        ));
-        editor.update(cx, |editor, _cx| {
-            editor.set_completion_provider(Some(completion_provider.clone()))
+        let mention_set = cx.new(|_cx| {
+            MentionSet::new(project.clone(), thread_store.clone(), prompt_store.clone())
         });
+        Self::assign_completion_provider(
+            &editor,
+            mention_set.clone(),
+            workspace.clone(),
+            history.clone(),
+            prompt_store.clone(),
+            session_capabilities.clone(),
+            thread_store.is_some(),
+            cx,
+        );
 
         cx.on_focus_in(&editor.focus_handle(cx), window, |_, _, cx| {
             cx.emit(MessageEditorEvent::Focus)
@@ -549,6 +548,9 @@ impl MessageEditor {
             editor,
             mention_set,
             workspace,
+            project,
+            history,
+            prompt_store,
             session_capabilities,
             agent_id,
             thread_store,
@@ -557,12 +559,58 @@ impl MessageEditor {
         }
     }
 
+    fn assign_completion_provider(
+        editor: &Entity<Editor>,
+        mention_set: Entity<MentionSet>,
+        workspace: WeakEntity<Workspace>,
+        history: Option<WeakEntity<ThreadHistory>>,
+        prompt_store: Option<Entity<PromptStore>>,
+        session_capabilities: SharedSessionCapabilities,
+        has_thread_store: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let completion_provider = Rc::new(PromptCompletionProvider::new(
+            MessageEditorCompletionDelegate {
+                session_capabilities,
+                has_thread_store,
+                message_editor: cx.weak_entity(),
+            },
+            editor.downgrade(),
+            mention_set,
+            history,
+            prompt_store,
+            workspace,
+        ));
+        editor.update(cx, |editor, _cx| {
+            editor.set_completion_provider(Some(completion_provider));
+        });
+    }
+
     pub fn set_session_capabilities(
         &mut self,
         session_capabilities: SharedSessionCapabilities,
         _cx: &mut Context<Self>,
     ) {
         self.session_capabilities = session_capabilities;
+    }
+
+    pub fn set_workspace(&mut self, workspace: Entity<Workspace>, cx: &mut Context<Self>) {
+        let project = workspace.read(cx).project().downgrade();
+        self.workspace = workspace.downgrade();
+        self.project = project.clone();
+        self.mention_set.update(cx, |mention_set, cx| {
+            mention_set.rebind_project(project, cx);
+        });
+        Self::assign_completion_provider(
+            &self.editor,
+            self.mention_set.clone(),
+            workspace.downgrade(),
+            self.history.clone(),
+            self.prompt_store.clone(),
+            self.session_capabilities.clone(),
+            self.thread_store.is_some(),
+            cx,
+        );
     }
 
     fn command_hint(&self, snapshot: &MultiBufferSnapshot) -> Option<Inlay> {

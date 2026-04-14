@@ -5,6 +5,7 @@ use super::tool_permissions::{
 use crate::{
     AgentTool, ToolCallEventStream, ToolInput, ToolPermissionDecision, decide_permission_for_path,
 };
+
 use action_log::ActionLog;
 use agent_client_protocol::ToolKind;
 use agent_settings::AgentSettings;
@@ -14,6 +15,7 @@ use project::{Project, ProjectPath};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::Settings;
+use parking_lot::Mutex;
 use std::path::Path;
 use std::sync::Arc;
 use util::markdown::MarkdownInlineCode;
@@ -36,14 +38,14 @@ pub struct DeletePathToolInput {
 }
 
 pub struct DeletePathTool {
-    project: Entity<Project>,
+    project: Mutex<Entity<Project>>,
     action_log: Entity<ActionLog>,
 }
 
 impl DeletePathTool {
     pub fn new(project: Entity<Project>, action_log: Entity<ActionLog>) -> Self {
         Self {
-            project,
+            project: Mutex::new(project),
             action_log,
         }
     }
@@ -57,6 +59,10 @@ impl AgentTool for DeletePathTool {
 
     fn kind() -> ToolKind {
         ToolKind::Delete
+    }
+
+    fn set_project(&self, project: Entity<Project>) {
+        *self.project.lock() = project;
     }
 
     fn initial_title(
@@ -77,7 +83,7 @@ impl AgentTool for DeletePathTool {
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
-        let project = self.project.clone();
+        let project = self.project.lock().clone();
         let action_log = self.action_log.clone();
         cx.spawn(async move |cx| {
             let input = input

@@ -79,6 +79,10 @@ impl MentionSet {
         }
     }
 
+    pub fn rebind_project(&mut self, project: WeakEntity<Project>, _cx: &mut Context<Self>) {
+        self.project = project;
+    }
+
     pub fn contents(
         &self,
         full_mention_content: bool,

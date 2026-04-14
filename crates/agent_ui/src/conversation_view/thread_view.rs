@@ -663,6 +663,28 @@ impl ThreadView {
             .thread(acp_thread.session_id(), cx)
     }
 
+    pub fn set_workspace(
+        &mut self,
+        workspace: Entity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.project = workspace.read(cx).project().downgrade();
+        self.workspace = workspace.downgrade();
+
+        self.message_editor.update(cx, |message_editor, cx| {
+            message_editor.set_workspace(workspace.clone(), cx);
+        });
+        self.entry_view_state.update(cx, |entry_view_state, cx| {
+            entry_view_state.set_workspace(workspace.clone(), window, cx);
+        });
+        for queued_message_editor in &self.queued_message_editors {
+            queued_message_editor.update(cx, |message_editor, cx| {
+                message_editor.set_workspace(workspace.clone(), cx);
+            });
+        }
+    }
+
     /// Resolves the message editor's contents into content blocks. For profiles
     /// that do not enable any tools, directory mentions are expanded to inline
     /// file contents since the agent can't read files on its own.

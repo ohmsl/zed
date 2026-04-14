@@ -85,8 +85,9 @@ use ui::{
 };
 use util::{ResultExt as _, debug_panic};
 use workspace::{
-    CollaboratorId, DraggedSelection, DraggedTab, PathList, SerializedPathList,
-    ToggleWorkspaceSidebar, ToggleZoom, Workspace, WorkspaceId,
+    CollaboratorId, DraggedSelection, DraggedTab, MultiWorkspace, MultiWorkspaceEvent, PathList,
+    SerializedPathList, ToggleWorkspaceSidebar, ToggleZoom, Workspace,
+    WorkspaceActivationCause, WorkspaceId,
     dock::{DockPosition, Panel, PanelEvent},
 };
 
@@ -831,6 +832,7 @@ pub struct AgentPanel {
     _worktree_creation_task: Option<Task<()>>,
     show_trust_workspace_message: bool,
     _base_view_observation: Option<Subscription>,
+    _multi_workspace_subscription: Option<Subscription>,
 }
 
 impl AgentPanel {
@@ -1008,6 +1010,9 @@ impl AgentPanel {
         let language_registry = project.read(cx).languages().clone();
         let client = workspace.client().clone();
         let workspace_id = workspace.database_id();
+        let multi_workspace = workspace
+            .multi_workspace()
+            .and_then(|weak| weak.upgrade());
         let workspace = workspace.weak_handle();
 
         let context_server_registry =
@@ -1173,6 +1178,14 @@ impl AgentPanel {
             }
         });
 
+        let multi_workspace_subscription = multi_workspace.map(|multi_workspace| {
+            cx.subscribe_in(
+                &multi_workspace,
+                window,
+                Self::handle_multi_workspace_event,
+            )
+        });
+
         let mut panel = Self {
             workspace_id,
             base_view,
@@ -1216,6 +1229,7 @@ impl AgentPanel {
                 cx,
             )),
             _base_view_observation: None,
+            _multi_workspace_subscription: multi_workspace_subscription,
         };
 
         // Initial sync of agent servers from extensions
@@ -2043,7 +2057,50 @@ impl AgentPanel {
     pub fn active_conversation_view(&self) -> Option<&Entity<ConversationView>> {
         match &self.base_view {
             BaseView::AgentThread { conversation_view } => Some(conversation_view),
-            _ => None,
+            BaseView::Uninitialized => None,
+        }
+    }
+
+    pub fn take_active_conversation_view(&mut self, cx: &mut Context<Self>) -> Option<Entity<ConversationView>> {
+        let BaseView::AgentThread { conversation_view } =
+            std::mem::replace(&mut self.base_view, BaseView::Uninitialized)
+        else {
+            return None;
+        };
+
+        self.clear_overlay_state();
+        self._thread_view_subscription = None;
+        self._active_thread_focus_subscription = None;
+        self._base_view_observation = None;
+        self.serialize(cx);
+        cx.emit(AgentPanelEvent::ActiveViewChanged);
+        cx.notify();
+        Some(conversation_view)
+    }
+
+    pub fn adopt_active_conversation_view(
+        &mut self,
+        conversation_view: Entity<ConversationView>,
+        focus: bool,
+        reveal_panel: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.remove_empty_draft(cx);
+        self.retained_threads
+            .remove(&conversation_view.read(cx).thread_id);
+        self.set_base_view(
+            BaseView::AgentThread { conversation_view },
+            focus,
+            window,
+            cx,
+        );
+        if reveal_panel {
+            if let Some(workspace) = self.workspace.upgrade() {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.reveal_panel::<Self>(window, cx);
+                });
+            }
         }
     }
 
@@ -2436,6 +2493,95 @@ impl AgentPanel {
         }
 
         menu.separator()
+    }
+
+    fn handle_multi_workspace_event(
+        &mut self,
+        _multi_workspace: &Entity<MultiWorkspace>,
+        event: &MultiWorkspaceEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let MultiWorkspaceEvent::ActiveWorkspaceChanged {
+            old_workspace,
+            new_workspace,
+            cause,
+        } = event
+        else {
+            return;
+        };
+
+        if *cause != WorkspaceActivationCause::WorktreeSwitch {
+            return;
+        }
+
+        let Some(this_workspace) = self.workspace.upgrade() else {
+            return;
+        };
+
+        if this_workspace != *old_workspace {
+            return;
+        }
+
+        let had_panel_focus = self.focus_handle.contains_focused(window, cx);
+        let panel_id = cx.entity().entity_id();
+        let should_reveal_panel = {
+            let workspace = old_workspace.read(cx);
+            [workspace.left_dock(), workspace.bottom_dock(), workspace.right_dock()]
+                .into_iter()
+                .any(|dock| {
+                    dock.read(cx)
+                        .visible_panel()
+                        .is_some_and(|visible_panel| visible_panel.panel_id() == panel_id)
+                })
+        };
+
+        let Some(conversation_view) = self.take_active_conversation_view(cx) else {
+            return;
+        };
+
+        let thread_id = self.create_thread(window, cx);
+        self.activate_retained_thread(thread_id, false, window, cx);
+
+        let new_workspace = new_workspace.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let panel = if let Some(panel) = new_workspace
+                .update_in(cx, |workspace, _window, cx| workspace.panel::<Self>(cx))?
+            {
+                panel
+            } else {
+                let loaded_panel = Self::load(new_workspace.downgrade(), cx.clone()).await?;
+                new_workspace.update_in(cx, |workspace, window, cx| {
+                    if workspace.panel::<Self>(cx).is_none() {
+                        workspace.add_panel(loaded_panel.clone(), window, cx);
+                    }
+                })?;
+                loaded_panel
+            };
+
+            panel.update_in(cx, |panel, window, cx| {
+                conversation_view.update(cx, |conversation_view, cx| {
+                    conversation_view.set_workspace(new_workspace.clone(), window, cx);
+                });
+                panel.adopt_active_conversation_view(
+                    conversation_view.clone(),
+                    had_panel_focus,
+                    false,
+                    window,
+                    cx,
+                );
+                panel.update_thread_work_dirs(cx);
+            })?;
+
+            if should_reveal_panel {
+                new_workspace.update_in(cx, |workspace, window, cx| {
+                    workspace.reveal_panel::<Self>(window, cx);
+                })?;
+            }
+
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
     }
 
     fn subscribe_to_active_thread_view(
@@ -8006,6 +8152,261 @@ mod tests {
                 vec![PathBuf::from("/plain_dir")],
                 "plain_dir should be classified as a non-git path \
                  (not matched to nested_repo inside it)"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_worktree_switch_hands_off_conversation_to_destination_panel(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/project_a", json!({ "file.txt": "" }))
+            .await;
+        fs.insert_tree("/project_b", json!({ "other.txt": "" }))
+            .await;
+        let project_a = Project::test(fs.clone(), [Path::new("/project_a")], cx).await;
+        let project_b = Project::test(fs.clone(), [Path::new("/project_b")], cx).await;
+
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+
+        let workspace_a = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| multi_workspace.workspace().clone())
+            .unwrap();
+
+        let workspace_b = multi_workspace
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.test_add_workspace(project_b.clone(), window, cx)
+            })
+            .unwrap();
+
+        workspace_a.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+        });
+        workspace_b.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+        });
+
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+
+        // Activate workspace A so it's the current workspace.
+        multi_workspace
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.activate(workspace_a.clone(), window, cx);
+            })
+            .unwrap();
+
+        // Create panels for both workspaces, registered so they're discoverable.
+        let panel_a = workspace_a.update_in(cx, |workspace, window, cx| {
+            cx.new(|cx| AgentPanel::new(workspace, None, window, cx))
+        });
+        workspace_a.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(panel_a.clone(), window, cx);
+        });
+
+        let panel_b = workspace_b.update_in(cx, |workspace, window, cx| {
+            cx.new(|cx| AgentPanel::new(workspace, None, window, cx))
+        });
+        workspace_b.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(panel_b.clone(), window, cx);
+        });
+
+        // Reveal the panel in the dock so should_reveal_panel is true during
+        // the worktree switch — this exercises the reveal_panel code path.
+        workspace_a.update_in(cx, |workspace, window, cx| {
+            workspace.open_panel::<AgentPanel>(window, cx);
+        });
+
+        // Open a thread on panel A.
+        let connection = StubAgentConnection::new();
+        open_thread_with_connection(&panel_a, connection, cx);
+        send_message(&panel_a, cx);
+
+        let original_conversation_entity_id = panel_a.read_with(cx, |panel, _cx| {
+            panel.active_conversation_view().unwrap().entity_id()
+        });
+
+        let original_thread_id = panel_a.read_with(cx, |panel, cx| {
+            panel.active_thread_id(cx).unwrap()
+        });
+
+        // Mutate transient UI state to verify preservation.
+        panel_a.update(cx, |panel, cx| {
+            let conversation_view = panel.active_conversation_view().unwrap();
+            if let Some(thread_view) = conversation_view.read(cx).active_thread().cloned() {
+                thread_view.update(cx, |thread_view, _cx| {
+                    thread_view.plan_expanded = true;
+                    thread_view.edits_expanded = true;
+                    thread_view.queue_expanded = false;
+                });
+            }
+        });
+
+        // Trigger worktree switch: activate workspace B with WorktreeSwitch cause.
+        multi_workspace
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.activate_with_cause(
+                    workspace_b.clone(),
+                    WorkspaceActivationCause::WorktreeSwitch,
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        // The conversation should now be on panel B with the same entity.
+        panel_b.read_with(cx, |panel, cx| {
+            let conversation_view = panel
+                .active_conversation_view()
+                .expect("destination panel should have an active conversation after handoff");
+            assert_eq!(
+                conversation_view.entity_id(),
+                original_conversation_entity_id,
+                "same ConversationView entity should have been moved, not cloned"
+            );
+            assert_eq!(
+                conversation_view.read(cx).thread_id, original_thread_id,
+                "thread identity should be preserved"
+            );
+
+            // Verify workspace rebinding points to workspace B.
+            let bound_workspace = conversation_view
+                .read(cx)
+                .workspace()
+                .upgrade()
+                .expect("workspace ref should be valid");
+            assert_eq!(
+                bound_workspace.entity_id(),
+                workspace_b.entity_id(),
+                "conversation should now be bound to workspace B"
+            );
+        });
+
+        // Verify transient UI state was preserved.
+        panel_b.read_with(cx, |panel, cx| {
+            let conversation_view = panel.active_conversation_view().unwrap();
+            if let Some(thread_view) = conversation_view.read(cx).active_thread() {
+                let thread_view = thread_view.read(cx);
+                assert!(thread_view.plan_expanded, "plan_expanded should be preserved");
+                assert!(thread_view.edits_expanded, "edits_expanded should be preserved");
+                assert!(!thread_view.queue_expanded, "queue_expanded should be preserved as false");
+            }
+        });
+
+        // Source panel should have a new draft thread, not be Uninitialized.
+        panel_a.read_with(cx, |panel, cx| {
+            assert!(
+                panel.active_conversation_view().is_some(),
+                "source panel should have a new draft after handoff"
+            );
+            assert_ne!(
+                panel.active_thread_id(cx),
+                Some(original_thread_id),
+                "source panel should have a different thread than the handed-off one"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_non_worktree_switch_does_not_hand_off_conversation(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/project_a", json!({ "file.txt": "" }))
+            .await;
+        let project_a = Project::test(fs.clone(), [Path::new("/project_a")], cx).await;
+        let project_b = Project::test(fs.clone(), [], cx).await;
+
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+
+        let workspace_a = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| multi_workspace.workspace().clone())
+            .unwrap();
+
+        let workspace_b = multi_workspace
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.test_add_workspace(project_b.clone(), window, cx)
+            })
+            .unwrap();
+
+        workspace_a.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+        });
+        workspace_b.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+        });
+
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+
+        // Activate workspace A.
+        multi_workspace
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.activate(workspace_a.clone(), window, cx);
+            })
+            .unwrap();
+
+        // Create and register panels.
+        let panel_a = workspace_a.update_in(cx, |workspace, window, cx| {
+            cx.new(|cx| AgentPanel::new(workspace, None, window, cx))
+        });
+        workspace_a.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(panel_a.clone(), window, cx);
+        });
+
+        let panel_b = workspace_b.update_in(cx, |workspace, window, cx| {
+            cx.new(|cx| AgentPanel::new(workspace, None, window, cx))
+        });
+        workspace_b.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(panel_b.clone(), window, cx);
+        });
+
+        // Open a thread on panel A.
+        let connection = StubAgentConnection::new();
+        open_thread_with_connection(&panel_a, connection, cx);
+        send_message(&panel_a, cx);
+
+        let original_conversation_entity_id = panel_a.read_with(cx, |panel, _cx| {
+            panel.active_conversation_view().unwrap().entity_id()
+        });
+
+        // Activate workspace B with default (Other) cause — NOT a worktree switch.
+        multi_workspace
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.activate(workspace_b.clone(), window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        // Panel A should still have its conversation — no handoff.
+        panel_a.read_with(cx, |panel, _cx| {
+            let conversation_view = panel
+                .active_conversation_view()
+                .expect("source panel should still have its conversation");
+            assert_eq!(
+                conversation_view.entity_id(),
+                original_conversation_entity_id,
+                "conversation should not have been moved"
+            );
+        });
+
+        // Panel B should not have acquired the conversation.
+        panel_b.read_with(cx, |panel, _cx| {
+            assert!(
+                panel.active_conversation_view().is_none(),
+                "destination panel should not have a conversation after non-worktree-switch activation"
             );
         });
     }

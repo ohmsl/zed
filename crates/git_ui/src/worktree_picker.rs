@@ -21,7 +21,8 @@ use std::{path::PathBuf, sync::Arc};
 use ui::{HighlightedLabel, KeyBinding, ListItem, ListItemSpacing, Tooltip, prelude::*};
 use util::{ResultExt, debug_panic, paths::PathExt};
 use workspace::{
-    ModalView, MultiWorkspace, OpenMode, Workspace, notifications::DetachAndPromptErr,
+    ModalView, MultiWorkspace, OpenMode, Workspace, WorkspaceActivationCause,
+    notifications::DetachAndPromptErr,
 };
 
 use crate::git_panel::show_error_toast;
@@ -376,8 +377,9 @@ impl WorktreeListDelegate {
             if is_local {
                 workspace
                     .update_in(cx, |workspace, window, cx| {
-                        workspace.open_workspace_for_paths(
+                        workspace.open_workspace_for_paths_with_activation_cause(
                             OpenMode::Activate,
+                            WorkspaceActivationCause::WorktreeSwitch,
                             vec![new_worktree_path],
                             window,
                             cx,
@@ -438,7 +440,18 @@ impl WorktreeListDelegate {
 
         if is_local {
             let open_task = workspace.update(cx, |workspace, cx| {
-                workspace.open_workspace_for_paths(open_mode, vec![path], window, cx)
+                let activation_cause = if replace_current_window {
+                    WorkspaceActivationCause::WorktreeSwitch
+                } else {
+                    WorkspaceActivationCause::Other
+                };
+                workspace.open_workspace_for_paths_with_activation_cause(
+                    open_mode,
+                    activation_cause,
+                    vec![path],
+                    window,
+                    cx,
+                )
             });
             cx.spawn(async move |_, _| {
                 open_task?.await?;
@@ -642,13 +655,20 @@ async fn open_remote_worktree(
         })?
     };
 
-    workspace::open_remote_project_with_existing_connection(
+    let activation_cause = if replace_current_window {
+        WorkspaceActivationCause::WorktreeSwitch
+    } else {
+        WorkspaceActivationCause::Other
+    };
+
+    workspace::open_remote_project_with_existing_connection_and_cause(
         connection_options,
         new_project,
         paths,
         app_state,
         window_to_use,
         None,
+        activation_cause,
         cx,
     )
     .await?;

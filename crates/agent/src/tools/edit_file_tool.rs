@@ -20,6 +20,7 @@ use project::{Project, ProjectPath};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use parking_lot::Mutex;
 use std::sync::Arc;
 use ui::SharedString;
 use util::ResultExt;
@@ -139,7 +140,7 @@ impl From<EditFileToolOutput> for LanguageModelToolResultContent {
 pub struct EditFileTool {
     thread: WeakEntity<Thread>,
     language_registry: Arc<LanguageRegistry>,
-    project: Entity<Project>,
+    project: Mutex<Entity<Project>>,
     templates: Arc<Templates>,
 }
 
@@ -151,7 +152,7 @@ impl EditFileTool {
         templates: Arc<Templates>,
     ) -> Self {
         Self {
-            project,
+            project: Mutex::new(project),
             thread,
             language_registry,
             templates,
@@ -185,35 +186,41 @@ impl AgentTool for EditFileTool {
         acp::ToolKind::Edit
     }
 
+    fn set_project(&self, project: Entity<Project>) {
+        *self.project.lock() = project;
+    }
+
     fn initial_title(
         &self,
         input: Result<Self::Input, serde_json::Value>,
         cx: &mut App,
     ) -> SharedString {
         match input {
-            Ok(input) => self
-                .project
-                .read(cx)
-                .find_project_path(&input.path, cx)
-                .and_then(|project_path| {
-                    self.project
-                        .read(cx)
-                        .short_full_path_for_project_path(&project_path, cx)
-                })
+            Ok(input) => {
+                let project = self.project.lock().clone();
+                project
+                    .read(cx)
+                    .find_project_path(&input.path, cx)
+                    .and_then(|project_path| {
+                        project
+                            .read(cx)
+                            .short_full_path_for_project_path(&project_path, cx)
+                    })
                 .unwrap_or(input.path.to_string_lossy().into_owned())
-                .into(),
+                .into()
+            }
             Err(raw_input) => {
                 if let Some(input) =
                     serde_json::from_value::<EditFileToolPartialInput>(raw_input).ok()
                 {
                     let path = input.path.trim();
                     if !path.is_empty() {
-                        return self
-                            .project
+                        let project = self.project.lock().clone();
+                        return project
                             .read(cx)
                             .find_project_path(&input.path, cx)
                             .and_then(|project_path| {
-                                self.project
+                                project
                                     .read(cx)
                                     .short_full_path_for_project_path(&project_path, cx)
                             })

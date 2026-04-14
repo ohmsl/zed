@@ -1,4 +1,5 @@
 use crate::{AgentTool, ToolCallEventStream, ToolInput};
+
 use agent_client_protocol as acp;
 use anyhow::Result;
 use futures::{FutureExt as _, StreamExt};
@@ -11,6 +12,7 @@ use project::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::Settings;
+use parking_lot::Mutex;
 use std::{cmp, fmt::Write, sync::Arc};
 use util::RangeExt;
 use util::markdown::MarkdownInlineCode;
@@ -67,12 +69,12 @@ impl GrepToolInput {
 const RESULTS_PER_PAGE: u32 = 20;
 
 pub struct GrepTool {
-    project: Entity<Project>,
+    project: Mutex<Entity<Project>>,
 }
 
 impl GrepTool {
     pub fn new(project: Entity<Project>) -> Self {
-        Self { project }
+        Self { project: Mutex::new(project) }
     }
 }
 
@@ -85,6 +87,10 @@ impl AgentTool for GrepTool {
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Search
     }
+
+    fn set_project(&self, project: Entity<Project>) {
+            *self.project.lock() = project;
+        }
 
     fn initial_title(
         &self,
@@ -121,7 +127,7 @@ impl AgentTool for GrepTool {
         const CONTEXT_LINES: u32 = 2;
         const MAX_ANCESTOR_LINES: u32 = 10;
 
-        let project = self.project.clone();
+        let project = self.project.lock().clone();
         cx.spawn(async move |cx|  {
             let input = input
                 .recv()
@@ -784,7 +790,7 @@ mod tests {
         project: Entity<Project>,
         cx: &mut TestAppContext,
     ) -> String {
-        let tool = Arc::new(GrepTool { project });
+        let tool = Arc::new(GrepTool::new(project));
         let task = cx.update(|cx| {
             tool.run(
                 ToolInput::resolved(input),

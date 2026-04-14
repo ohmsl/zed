@@ -100,8 +100,19 @@ pub fn sidebar_side_context_menu(
     })
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WorkspaceActivationCause {
+    #[default]
+    Other,
+    WorktreeSwitch,
+}
+
 pub enum MultiWorkspaceEvent {
-    ActiveWorkspaceChanged,
+    ActiveWorkspaceChanged {
+        old_workspace: Entity<Workspace>,
+        new_workspace: Entity<Workspace>,
+        cause: WorkspaceActivationCause,
+    },
     WorkspaceAdded(Entity<Workspace>),
     WorkspaceRemoved(EntityId),
     ProjectGroupKeyUpdated {
@@ -1259,6 +1270,16 @@ impl MultiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.activate_with_cause(workspace, WorkspaceActivationCause::Other, window, cx);
+    }
+
+    pub fn activate_with_cause(
+        &mut self,
+        workspace: Entity<Workspace>,
+        cause: WorkspaceActivationCause,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.workspace() == &workspace {
             self.focus_active_workspace(window, cx);
             return;
@@ -1277,13 +1298,17 @@ impl MultiWorkspace {
             }
         }
 
-        self.active_workspace = workspace;
+        self.active_workspace = workspace.clone();
 
         if !self.sidebar_open && !old_active_was_retained {
             self.detach_workspace(&old_active_workspace, cx);
         }
 
-        cx.emit(MultiWorkspaceEvent::ActiveWorkspaceChanged);
+        cx.emit(MultiWorkspaceEvent::ActiveWorkspaceChanged {
+            old_workspace: old_active_workspace,
+            new_workspace: workspace,
+            cause,
+        });
         self.serialize(cx);
         self.focus_active_workspace(window, cx);
         cx.notify();
