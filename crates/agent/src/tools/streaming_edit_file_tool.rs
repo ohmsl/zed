@@ -20,7 +20,6 @@ use gpui::{App, AppContext, AsyncApp, Entity, Task, WeakEntity};
 use language::language_settings::{self, FormatOnSave};
 use language::{Buffer, LanguageRegistry};
 use language_model::LanguageModelToolResultContent;
-use parking_lot::Mutex;
 use project::lsp_store::{FormatTrigger, LspFormatTarget};
 use project::{AgentLocation, Project, ProjectPath};
 use schemars::JsonSchema;
@@ -252,7 +251,7 @@ impl From<StreamingEditFileToolOutput> for LanguageModelToolResultContent {
 }
 
 pub struct StreamingEditFileTool {
-    project: Mutex<Entity<Project>>,
+    project: Entity<Project>,
     thread: WeakEntity<Thread>,
     action_log: Entity<ActionLog>,
     language_registry: Arc<LanguageRegistry>,
@@ -274,7 +273,7 @@ impl StreamingEditFileTool {
         language_registry: Arc<LanguageRegistry>,
     ) -> Self {
         Self {
-            project: Mutex::new(project),
+            project,
             thread,
             action_log,
             language_registry,
@@ -304,7 +303,7 @@ impl StreamingEditFileTool {
             .read_with(cx, |thread, _cx| !thread.is_subagent())
             .unwrap_or_default();
         if should_update_agent_location {
-            let project = self.project.lock().clone();
+            let project = self.project.clone();
             project.update(cx, |project, cx| {
                 project.set_agent_location(Some(AgentLocation { buffer, position }), cx);
             });
@@ -312,7 +311,7 @@ impl StreamingEditFileTool {
     }
 
     async fn ensure_buffer_saved(&self, buffer: &Entity<Buffer>, cx: &mut AsyncApp) {
-        let project = self.project.lock().clone();
+        let project = self.project.clone();
         let format_on_save_enabled = buffer.read_with(cx, |buffer, cx| {
             let settings = language_settings::LanguageSettings::for_buffer(buffer, cx);
             settings.format_on_save != FormatOnSave::Off
@@ -478,17 +477,12 @@ impl AgentTool for StreamingEditFileTool {
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Edit
     }
-
-    fn set_project(&self, project: Entity<Project>) {
-        *self.project.lock() = project;
-    }
-
     fn initial_title(
         &self,
         input: Result<Self::Input, serde_json::Value>,
         cx: &mut App,
     ) -> SharedString {
-        let project = self.project.lock().clone();
+        let project = self.project.clone();
         match input {
             Ok(input) => project
                 .read(cx)
@@ -662,7 +656,7 @@ impl EditSession {
         event_stream: &ToolCallEventStream,
         cx: &mut AsyncApp,
     ) -> Result<Self, String> {
-        let project = tool.project.lock().clone();
+        let project = tool.project.clone();
         let project_path = cx.update(|cx| resolve_path(mode, &path, &project, cx))?;
 
         let Some(abs_path) = cx.update(|cx| project.read(cx).absolute_path(&project_path, cx))

@@ -1285,11 +1285,15 @@ impl AcpThread {
         &self.project
     }
 
-    pub fn rebind_project(&mut self, project: Entity<Project>, cx: &mut Context<Self>) {
-        self.project = project.clone();
-        self.action_log.update(cx, |action_log, cx| {
-            action_log.rebind_project(project, cx);
-        });
+    pub fn rebind_project(
+        &mut self,
+        project: Entity<Project>,
+        action_log: Entity<ActionLog>,
+        cx: &mut Context<Self>,
+    ) {
+        self.project = project;
+        self.action_log = action_log;
+        cx.notify();
     }
 
     pub fn title(&self) -> Option<SharedString> {

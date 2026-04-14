@@ -15,7 +15,6 @@ use indoc::formatdoc;
 use language::language_settings::{self, FormatOnSave};
 use language::{LanguageRegistry, ToPoint};
 use language_model::{CompletionIntent, LanguageModelToolResultContent};
-use parking_lot::Mutex;
 use project::lsp_store::{FormatTrigger, LspFormatTarget};
 use project::{Project, ProjectPath};
 use schemars::JsonSchema;
@@ -140,7 +139,7 @@ impl From<EditFileToolOutput> for LanguageModelToolResultContent {
 pub struct EditFileTool {
     thread: WeakEntity<Thread>,
     language_registry: Arc<LanguageRegistry>,
-    project: Mutex<Entity<Project>>,
+    project: Entity<Project>,
     templates: Arc<Templates>,
 }
 
@@ -152,7 +151,7 @@ impl EditFileTool {
         templates: Arc<Templates>,
     ) -> Self {
         Self {
-            project: Mutex::new(project),
+            project,
             thread,
             language_registry,
             templates,
@@ -186,10 +185,6 @@ impl AgentTool for EditFileTool {
         acp::ToolKind::Edit
     }
 
-    fn set_project(&self, project: Entity<Project>) {
-        *self.project.lock() = project;
-    }
-
     fn initial_title(
         &self,
         input: Result<Self::Input, serde_json::Value>,
@@ -197,7 +192,7 @@ impl AgentTool for EditFileTool {
     ) -> SharedString {
         match input {
             Ok(input) => {
-                let project = self.project.lock().clone();
+                let project = self.project.clone();
                 project
                     .read(cx)
                     .find_project_path(&input.path, cx)
@@ -215,7 +210,7 @@ impl AgentTool for EditFileTool {
                 {
                     let path = input.path.trim();
                     if !path.is_empty() {
-                        let project = self.project.lock().clone();
+                        let project = self.project.clone();
                         return project
                             .read(cx)
                             .find_project_path(&input.path, cx)

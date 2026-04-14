@@ -110,8 +110,6 @@ impl AgentTool for SpawnAgentTool {
         acp::ToolKind::Other
     }
 
-    fn set_project(&self, _project: gpui::Entity<project::Project>) {}
-
     fn initial_title(
         &self,
         input: Result<Self::Input, serde_json::Value>,

@@ -38,8 +38,6 @@ impl AgentTool for StreamingEchoTool {
 
     const NAME: &'static str = "streaming_echo";
 
-    fn set_project(&self, _project: gpui::Entity<project::Project>) {}
-
     fn supports_input_streaming() -> bool {
         true
     }
@@ -89,8 +87,6 @@ impl AgentTool for StreamingJsonErrorContextTool {
     type Output = String;
 
     const NAME: &'static str = "streaming_json_error_context";
-
-    fn set_project(&self, _project: gpui::Entity<project::Project>) {}
 
     fn supports_input_streaming() -> bool {
         true
@@ -160,8 +156,6 @@ impl AgentTool for StreamingFailingEchoTool {
 
     const NAME: &'static str = "streaming_failing_echo";
 
-    fn set_project(&self, _project: gpui::Entity<project::Project>) {}
-
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other
     }
@@ -208,8 +202,6 @@ impl AgentTool for EchoTool {
 
     const NAME: &'static str = "echo";
 
-    fn set_project(&self, _project: gpui::Entity<project::Project>) {}
-
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other
     }
@@ -252,8 +244,6 @@ impl AgentTool for DelayTool {
     type Output = String;
 
     const NAME: &'static str = "delay";
-
-    fn set_project(&self, _project: gpui::Entity<project::Project>) {}
 
     fn initial_title(
         &self,
@@ -302,8 +292,6 @@ impl AgentTool for ToolRequiringPermission {
     type Output = String;
 
     const NAME: &'static str = "tool_requiring_permission";
-
-    fn set_project(&self, _project: gpui::Entity<project::Project>) {}
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other
@@ -370,8 +358,6 @@ impl AgentTool for InfiniteTool {
 
     const NAME: &'static str = "infinite";
 
-    fn set_project(&self, _project: gpui::Entity<project::Project>) {}
-
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other
     }
@@ -427,8 +413,6 @@ impl AgentTool for CancellationAwareTool {
     type Output = String;
 
     const NAME: &'static str = "cancellation_aware";
-
-    fn set_project(&self, _project: gpui::Entity<project::Project>) {}
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other
@@ -488,8 +472,6 @@ impl AgentTool for WordListTool {
     type Output = String;
 
     const NAME: &'static str = "word_list";
-
-    fn set_project(&self, _project: gpui::Entity<project::Project>) {}
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other

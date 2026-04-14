@@ -11,7 +11,6 @@ use agent_client_protocol::ToolKind;
 use agent_settings::AgentSettings;
 use futures::{FutureExt as _, SinkExt, StreamExt, channel::mpsc};
 use gpui::{App, AppContext, Entity, SharedString, Task};
-use parking_lot::Mutex;
 use project::{Project, ProjectPath};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -38,14 +37,14 @@ pub struct DeletePathToolInput {
 }
 
 pub struct DeletePathTool {
-    project: Mutex<Entity<Project>>,
+    project: Entity<Project>,
     action_log: Entity<ActionLog>,
 }
 
 impl DeletePathTool {
     pub fn new(project: Entity<Project>, action_log: Entity<ActionLog>) -> Self {
         Self {
-            project: Mutex::new(project),
+            project,
             action_log,
         }
     }
@@ -59,10 +58,6 @@ impl AgentTool for DeletePathTool {
 
     fn kind() -> ToolKind {
         ToolKind::Delete
-    }
-
-    fn set_project(&self, project: Entity<Project>) {
-        *self.project.lock() = project;
     }
 
     fn initial_title(
@@ -83,7 +78,7 @@ impl AgentTool for DeletePathTool {
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
-        let project = self.project.lock().clone();
+        let project = self.project.clone();
         let action_log = self.action_log.clone();
         cx.spawn(async move |cx| {
             let input = input

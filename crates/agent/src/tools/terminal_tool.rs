@@ -3,7 +3,6 @@ use agent_settings::AgentSettings;
 use anyhow::Result;
 use futures::FutureExt as _;
 use gpui::{App, Entity, SharedString, Task};
-use parking_lot::Mutex;
 use project::Project;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -51,14 +50,14 @@ pub struct TerminalToolInput {
 }
 
 pub struct TerminalTool {
-    project: Mutex<Entity<Project>>,
+    project: Entity<Project>,
     environment: Rc<dyn ThreadEnvironment>,
 }
 
 impl TerminalTool {
     pub fn new(project: Entity<Project>, environment: Rc<dyn ThreadEnvironment>) -> Self {
         Self {
-            project: Mutex::new(project),
+            project,
             environment,
         }
     }
@@ -72,10 +71,6 @@ impl AgentTool for TerminalTool {
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Execute
-    }
-
-    fn set_project(&self, project: Entity<Project>) {
-        *self.project.lock() = project;
     }
 
     fn initial_title(
@@ -103,7 +98,7 @@ impl AgentTool for TerminalTool {
                 .map_err(|e| format!("Failed to receive tool input: {e}"))?;
 
             let (working_dir, authorize) = cx.update(|cx| {
-                let project = self.project.lock().clone();
+                let project = self.project.clone();
                 let working_dir =
                     working_dir(&input, &project, cx).map_err(|err| err.to_string())?;
 

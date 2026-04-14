@@ -10,7 +10,6 @@ use agent_client_protocol::ToolKind;
 use agent_settings::AgentSettings;
 use futures::FutureExt as _;
 use gpui::{App, Entity, SharedString, Task};
-use parking_lot::Mutex;
 use project::Project;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -49,14 +48,12 @@ pub struct MovePathToolInput {
 }
 
 pub struct MovePathTool {
-    project: Mutex<Entity<Project>>,
+    project: Entity<Project>,
 }
 
 impl MovePathTool {
     pub fn new(project: Entity<Project>) -> Self {
-        Self {
-            project: Mutex::new(project),
-        }
+        Self { project }
     }
 }
 
@@ -68,10 +65,6 @@ impl AgentTool for MovePathTool {
 
     fn kind() -> ToolKind {
         ToolKind::Move
-    }
-
-    fn set_project(&self, project: Entity<Project>) {
-        *self.project.lock() = project;
     }
 
     fn initial_title(
@@ -106,7 +99,7 @@ impl AgentTool for MovePathTool {
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
-        let project = self.project.lock().clone();
+        let project = self.project.clone();
         cx.spawn(async move |cx| {
             let input = input
                 .recv()

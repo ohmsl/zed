@@ -5,7 +5,6 @@ use anyhow::Result;
 use futures::{FutureExt as _, StreamExt};
 use gpui::{App, Entity, SharedString, Task};
 use language::{OffsetRangeExt, ParseStatus, Point};
-use parking_lot::Mutex;
 use project::{
     Project, SearchResults, WorktreeSettings,
     search::{SearchQuery, SearchResult},
@@ -69,14 +68,12 @@ impl GrepToolInput {
 const RESULTS_PER_PAGE: u32 = 20;
 
 pub struct GrepTool {
-    project: Mutex<Entity<Project>>,
+    project: Entity<Project>,
 }
 
 impl GrepTool {
     pub fn new(project: Entity<Project>) -> Self {
-        Self {
-            project: Mutex::new(project),
-        }
+        Self { project }
     }
 }
 
@@ -88,10 +85,6 @@ impl AgentTool for GrepTool {
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Search
-    }
-
-    fn set_project(&self, project: Entity<Project>) {
-        *self.project.lock() = project;
     }
 
     fn initial_title(
@@ -129,7 +122,7 @@ impl AgentTool for GrepTool {
         const CONTEXT_LINES: u32 = 2;
         const MAX_ANCESTOR_LINES: u32 = 10;
 
-        let project = self.project.lock().clone();
+        let project = self.project.clone();
         cx.spawn(async move |cx|  {
             let input = input
                 .recv()

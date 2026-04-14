@@ -490,16 +490,26 @@ impl NativeAgent {
 
         let old_project_id = session.project_id;
         session.project_id = project_id;
+        let weak = cx.weak_entity();
         session.thread.update(cx, |thread, cx| {
             thread.rebind_project_context(
                 project.clone(),
                 project_state.project_context.clone(),
                 project_state.context_server_registry.clone(),
+                Rc::new(NativeThreadEnvironment {
+                    acp_thread: session.acp_thread.downgrade(),
+                    thread: cx.weak_entity(),
+                    agent: weak,
+                }) as _,
                 cx,
             );
         });
         session.acp_thread.update(cx, |thread, cx| {
-            thread.rebind_project(project.clone(), cx);
+            thread.rebind_project(
+                project.clone(),
+                session.thread.read(cx).action_log().clone(),
+                cx,
+            );
         });
         if let Some(state) = self.projects.get_mut(&project_id) {
             state.project_context_needs_refresh.send(()).ok();

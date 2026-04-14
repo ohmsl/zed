@@ -18,7 +18,6 @@ use agent_settings::{
 };
 use anyhow::{Context as _, Result, anyhow};
 use chrono::{DateTime, Utc};
-use client::UserStore;
 use cloud_api_types::Plan;
 use collections::{HashMap, HashSet, IndexMap};
 use fs::Fs;
@@ -942,7 +941,6 @@ pub struct Thread {
     pending_summary_generation: Option<Shared<Task<Option<SharedString>>>>,
     summary: Option<SharedString>,
     messages: Vec<Message>,
-    user_store: Entity<UserStore>,
     /// Holds the task that handles agent interaction until the end of the turn.
     /// Survives across multiple requests as the model performs tool calls and
     /// we run tools, report their results.
@@ -1068,7 +1066,6 @@ impl Thread {
             pending_summary_generation: None,
             summary: None,
             messages: Vec::new(),
-            user_store: project.read(cx).user_store(),
             running_turn: None,
             has_queued_message: false,
             pending_message: None,
@@ -1301,7 +1298,6 @@ impl Thread {
             pending_summary_generation: None,
             summary: db_thread.detailed_summary,
             messages: db_thread.messages,
-            user_store: project.read(cx).user_store(),
             running_turn: None,
             has_queued_message: false,
             pending_message: None,
@@ -1403,27 +1399,24 @@ impl Thread {
         project: Entity<Project>,
         project_context: Entity<ProjectContext>,
         context_server_registry: Entity<ContextServerRegistry>,
+        environment: Rc<dyn ThreadEnvironment>,
         cx: &mut Context<Self>,
     ) {
         self.project = project.clone();
-        self.user_store = project.read(cx).user_store();
-        self.project_context = project_context;
-        self.context_server_registry = context_server_registry;
-        self.action_log.update(cx, |action_log, cx| {
-            action_log.rebind_project(project.clone(), cx);
-        });
-        self.set_tools_project(project.clone());
+        self.project_context = project_context.clone();
+        self.context_server_registry = context_server_registry.clone();
+        self.action_log = cx.new(|_cx| ActionLog::new(project.clone()));
+        self.add_default_tools(environment.clone(), cx);
         self.refresh_turn_tools(cx);
 
-        let rebound_project_context = self.project_context.clone();
-        let rebound_context_server_registry = self.context_server_registry.clone();
         for subagent in &self.running_subagents {
             subagent
                 .update(cx, |thread, cx| {
                     thread.rebind_project_context(
                         project.clone(),
-                        rebound_project_context.clone(),
-                        rebound_context_server_registry.clone(),
+                        project_context.clone(),
+                        context_server_registry.clone(),
+                        environment.clone(),
                         cx,
                     )
                 })
@@ -1606,12 +1599,6 @@ impl Thread {
 
         if self.depth() < MAX_SUBAGENT_DEPTH {
             self.add_tool(SpawnAgentTool::new(environment));
-        }
-    }
-
-    fn set_tools_project(&self, project: Entity<Project>) {
-        for tool in self.tools.values() {
-            tool.set_project(project.clone());
         }
     }
 
@@ -2107,7 +2094,7 @@ impl Thread {
             if let Some(error) = error {
                 attempt += 1;
                 let retry = this.update(cx, |this, cx| {
-                    let user_store = this.user_store.read(cx);
+                    let user_store = this.project.read(cx).user_store().read(cx);
                     this.handle_completion_error(error, attempt, user_store.plan())
                 })??;
                 let timer = cx.background_executor().timer(retry.duration);
@@ -3411,8 +3398,6 @@ where
         Ok(())
     }
 
-    fn set_project(&self, _project: Entity<Project>);
-
     fn erase(self) -> Arc<dyn AnyAgentTool> {
         Arc::new(Erased(Arc::new(self)))
     }
@@ -3462,7 +3447,6 @@ pub trait AnyAgentTool {
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Result<()>;
-    fn set_project(&self, project: Entity<Project>);
 }
 
 impl<T> AnyAgentTool for Erased<Arc<T>>
@@ -3541,10 +3525,6 @@ where
         let input = serde_json::from_value::<T::Input>(input)?;
         let output = serde_json::from_value::<T::Output>(output)?;
         self.0.replay(input, output, event_stream, cx)
-    }
-
-    fn set_project(&self, project: Entity<Project>) {
-        self.0.set_project(project);
     }
 }
 

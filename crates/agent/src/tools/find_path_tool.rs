@@ -5,7 +5,6 @@ use anyhow::{Result, anyhow};
 use futures::FutureExt as _;
 use gpui::{App, AppContext, Entity, SharedString, Task};
 use language_model::LanguageModelToolResultContent;
-use parking_lot::Mutex;
 use project::Project;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -90,14 +89,12 @@ impl From<FindPathToolOutput> for LanguageModelToolResultContent {
 const RESULTS_PER_PAGE: usize = 50;
 
 pub struct FindPathTool {
-    project: Mutex<Entity<Project>>,
+    project: Entity<Project>,
 }
 
 impl FindPathTool {
     pub fn new(project: Entity<Project>) -> Self {
-        Self {
-            project: Mutex::new(project),
-        }
+        Self { project }
     }
 }
 
@@ -109,10 +106,6 @@ impl AgentTool for FindPathTool {
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Search
-    }
-
-    fn set_project(&self, project: Entity<Project>) {
-        *self.project.lock() = project;
     }
 
     fn initial_title(
@@ -133,7 +126,7 @@ impl AgentTool for FindPathTool {
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
-        let project = self.project.lock().clone();
+        let project = self.project.clone();
         cx.spawn(async move |cx| {
             let input = input.recv().await.map_err(|e| FindPathToolOutput::Error {
                 error: format!("Failed to receive tool input: {e}"),

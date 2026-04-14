@@ -59,8 +59,6 @@ impl AgentTool for WebSearchTool {
         acp::ToolKind::Fetch
     }
 
-    fn set_project(&self, _project: gpui::Entity<project::Project>) {}
-
     fn initial_title(
         &self,
         _input: Result<Self::Input, serde_json::Value>,

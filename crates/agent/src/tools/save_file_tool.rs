@@ -4,7 +4,6 @@ use collections::FxHashSet;
 use futures::FutureExt as _;
 use gpui::{App, Entity, SharedString, Task};
 use language::Buffer;
-use parking_lot::Mutex;
 use project::Project;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -33,14 +32,12 @@ pub struct SaveFileToolInput {
 }
 
 pub struct SaveFileTool {
-    project: Mutex<Entity<Project>>,
+    project: Entity<Project>,
 }
 
 impl SaveFileTool {
     pub fn new(project: Entity<Project>) -> Self {
-        Self {
-            project: Mutex::new(project),
-        }
+        Self { project }
     }
 }
 
@@ -52,10 +49,6 @@ impl AgentTool for SaveFileTool {
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other
-    }
-
-    fn set_project(&self, project: Entity<Project>) {
-        *self.project.lock() = project;
     }
 
     fn initial_title(
@@ -76,7 +69,7 @@ impl AgentTool for SaveFileTool {
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<String, String>> {
-        let project = self.project.lock().clone();
+        let project = self.project.clone();
 
         cx.spawn(async move |cx| {
             let input = input

@@ -5,7 +5,6 @@ use anyhow::Result;
 use futures::FutureExt as _;
 use gpui::{App, Entity, Task};
 use language::{DiagnosticSeverity, OffsetRangeExt};
-use parking_lot::Mutex;
 use project::Project;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -53,14 +52,12 @@ pub struct DiagnosticsToolInput {
 }
 
 pub struct DiagnosticsTool {
-    project: Mutex<Entity<Project>>,
+    project: Entity<Project>,
 }
 
 impl DiagnosticsTool {
     pub fn new(project: Entity<Project>) -> Self {
-        Self {
-            project: Mutex::new(project),
-        }
+        Self { project }
     }
 }
 
@@ -72,10 +69,6 @@ impl AgentTool for DiagnosticsTool {
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Read
-    }
-
-    fn set_project(&self, project: Entity<Project>) {
-        *self.project.lock() = project;
     }
 
     fn initial_title(
@@ -99,7 +92,7 @@ impl AgentTool for DiagnosticsTool {
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
-        let project = self.project.lock().clone();
+        let project = self.project.clone();
         cx.spawn(async move |cx| {
             let input = input
                 .recv()
