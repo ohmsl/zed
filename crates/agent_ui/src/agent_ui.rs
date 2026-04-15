@@ -259,6 +259,7 @@ pub struct NewNativeAgentThreadFromSummary {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Agent {
     #[default]
     #[serde(alias = "NativeAgent", alias = "TextThread")]

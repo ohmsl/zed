@@ -924,6 +924,7 @@ impl Sidebar {
             let icon = match agent {
                 Agent::NativeAgent => IconName::ZedAgent,
                 Agent::Custom { .. } => IconName::Terminal,
+
                 _ => IconName::ZedAgent,
             };
             let icon_from_external_svg = agent_server_store
