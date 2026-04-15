@@ -1266,6 +1266,10 @@ impl AcpThread {
         &self.available_commands
     }
 
+    pub fn is_draft_thread(&self) -> bool {
+        self.entries().is_empty()
+    }
+
     pub fn draft_prompt(&self) -> Option<&[acp::ContentBlock]> {
         self.draft_prompt.as_deref()
     }

@@ -138,7 +138,6 @@ fn assert_remote_project_integration_sidebar_state(
             {
                 saw_remote_thread = true;
             }
-            ListEntry::Thread(thread) if thread.is_draft => {}
             ListEntry::Thread(thread) => {
                 let title = thread.metadata.display_title();
                 panic!(
@@ -409,14 +408,7 @@ fn visible_entries_as_strings(
                         let title = thread.metadata.display_title();
                         let worktree = format_linked_worktree_chips(&thread.worktrees);
 
-                        if thread.is_draft {
-                            let is_active = sidebar
-                                .active_entry
-                                .as_ref()
-                                .is_some_and(|e| e.matches_entry(entry));
-                            let active_marker = if is_active { " *" } else { "" };
-                            format!("  [~ Draft{worktree}]{active_marker}{selected}")
-                        } else {
+                        {
                             let live = if thread.is_live { " *" } else { "" };
                             let status_str = match thread.status {
                                 AgentThreadStatus::Running => " (running)",
@@ -916,6 +908,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 waiting_thread_count: 0,
                 is_active: true,
                 has_threads: true,
+                draft_thread_id: None,
             },
             ListEntry::Thread(ThreadEntry {
                 metadata: ThreadMetadata {
@@ -936,7 +929,6 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 is_live: false,
                 is_background: false,
                 is_title_generating: false,
-                is_draft: false,
                 highlight_positions: Vec::new(),
                 worktrees: Vec::new(),
                 diff_stats: DiffStats::default(),
@@ -961,7 +953,6 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 is_live: true,
                 is_background: false,
                 is_title_generating: false,
-                is_draft: false,
                 highlight_positions: Vec::new(),
                 worktrees: Vec::new(),
                 diff_stats: DiffStats::default(),
@@ -986,7 +977,6 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 is_live: true,
                 is_background: false,
                 is_title_generating: false,
-                is_draft: false,
                 highlight_positions: Vec::new(),
                 worktrees: Vec::new(),
                 diff_stats: DiffStats::default(),
@@ -1012,7 +1002,6 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 is_live: false,
                 is_background: false,
                 is_title_generating: false,
-                is_draft: false,
                 highlight_positions: Vec::new(),
                 worktrees: Vec::new(),
                 diff_stats: DiffStats::default(),
@@ -1038,7 +1027,6 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 is_live: true,
                 is_background: true,
                 is_title_generating: false,
-                is_draft: false,
                 highlight_positions: Vec::new(),
                 worktrees: Vec::new(),
                 diff_stats: DiffStats::default(),
@@ -1057,6 +1045,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 waiting_thread_count: 0,
                 is_active: false,
                 has_threads: false,
+                draft_thread_id: None,
             },
         ];
 
@@ -3136,9 +3125,8 @@ async fn test_draft_title_survives_folder_addition(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn test_cmd_n_shows_new_thread_entry(cx: &mut TestAppContext) {
     // When the user presses Cmd-N (NewThread action) while viewing a
-    // non-empty thread, the sidebar should show the "New Thread" entry.
-    // This exercises the same code path as the workspace action handler
-    // (which bypasses the sidebar's create_new_thread method).
+    // non-empty thread, the panel should switch to the draft thread.
+    // Drafts are not shown as sidebar rows.
     let project = init_test_project_with_agent_panel("/my-project", cx).await;
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
@@ -3175,12 +3163,20 @@ async fn test_cmd_n_shows_new_thread_entry(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
 
+    // Drafts are not shown as sidebar rows, so entries stay the same.
     assert_eq!(
         visible_entries_as_strings(&sidebar, cx),
-        vec!["v [my-project]", "  [~ Draft] *", "  Hello *"],
-        "After Cmd-N the sidebar should show a highlighted Draft entry"
+        vec!["v [my-project]", "  Hello *"],
+        "After Cmd-N the sidebar should not show a Draft entry"
     );
 
+    // The panel should be on the draft and active_entry should track it.
+    panel.read_with(cx, |panel, cx| {
+        assert!(
+            panel.active_thread_is_draft(cx),
+            "panel should be showing the draft after Cmd-N",
+        );
+    });
     sidebar.read_with(cx, |sidebar, _cx| {
         assert_active_draft(
             sidebar,
@@ -3191,133 +3187,10 @@ async fn test_cmd_n_shows_new_thread_entry(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn test_draft_with_server_session_shows_as_draft(cx: &mut TestAppContext) {
-    let project = init_test_project_with_agent_panel("/my-project", cx).await;
-    let (multi_workspace, cx) =
-        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
-
-    // Create a saved thread so the workspace has history.
-    let connection = StubAgentConnection::new();
-    connection.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(
-        acp::ContentChunk::new("Done".into()),
-    )]);
-    open_thread_with_connection(&panel, connection, cx);
-    send_message(&panel, cx);
-    let saved_session_id = active_session_id(&panel, cx);
-    save_test_thread_metadata(&saved_session_id, &project, cx).await;
-    cx.run_until_parked();
-
-    assert_eq!(
-        visible_entries_as_strings(&sidebar, cx),
-        vec![
-            //
-            "v [my-project]",
-            "  Hello *",
-        ]
-    );
-
-    // Create a new draft via Cmd-N. Since new_thread() now creates a
-    // tracked draft in the AgentPanel, it appears in the sidebar.
-    panel.update_in(cx, |panel, window, cx| {
-        panel.new_thread(&NewThread, window, cx);
-    });
-    cx.run_until_parked();
-
-    assert_eq!(
-        visible_entries_as_strings(&sidebar, cx),
-        vec!["v [my-project]", "  [~ Draft] *", "  Hello *"],
-    );
-
-    let workspace = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
-    sidebar.read_with(cx, |sidebar, _cx| {
-        assert_active_draft(
-            sidebar,
-            &workspace,
-            "Draft with server session should be Draft, not Thread",
-        );
-    });
-}
-
-#[gpui::test]
-async fn test_sending_message_from_draft_removes_draft(cx: &mut TestAppContext) {
-    // When the user sends a message from a draft thread, the draft
-    // should be removed from the sidebar and the active_entry should
-    // transition to a Thread pointing at the new session.
-    let project = init_test_project_with_agent_panel("/my-project", cx).await;
-    let (multi_workspace, cx) =
-        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
-
-    // Create a saved thread so the group isn't empty.
-    let connection = StubAgentConnection::new();
-    connection.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(
-        acp::ContentChunk::new("Done".into()),
-    )]);
-    open_thread_with_connection(&panel, connection, cx);
-    send_message(&panel, cx);
-    let existing_session_id = active_session_id(&panel, cx);
-    save_test_thread_metadata(&existing_session_id, &project, cx).await;
-    cx.run_until_parked();
-
-    // Create a draft via Cmd-N.
-    panel.update_in(cx, |panel, window, cx| {
-        panel.new_thread(&NewThread, window, cx);
-    });
-    cx.run_until_parked();
-
-    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
-    assert_eq!(
-        visible_entries_as_strings(&sidebar, cx),
-        vec!["v [my-project]", "  [~ Draft] *", "  Hello *"],
-        "draft should be visible before sending",
-    );
-    sidebar.read_with(cx, |sidebar, _| {
-        assert_active_draft(sidebar, &workspace, "should be on draft before sending");
-    });
-
-    // Simulate what happens when a draft sends its first message:
-    // the AgentPanel's MessageSentOrQueued handler removes the draft
-    // from `draft_threads`, then the sidebar rebuilds. We can't use
-    // the NativeAgentServer in tests, so replicate the key steps:
-    // remove the draft, open a real thread with a stub connection,
-    // and send.
-    let thread_id = panel.read_with(cx, |panel, cx| panel.active_thread_id(cx).unwrap());
-    panel.update_in(cx, |panel, window, cx| {
-        panel.remove_thread(thread_id, window, cx);
-    });
-    let draft_connection = StubAgentConnection::new();
-    draft_connection.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(
-        acp::ContentChunk::new("World".into()),
-    )]);
-    open_thread_with_connection(&panel, draft_connection, cx);
-    send_message(&panel, cx);
-    let new_session_id = active_session_id(&panel, cx);
-    save_test_thread_metadata(&new_session_id, &project, cx).await;
-    cx.run_until_parked();
-
-    // The draft should be gone and the new thread should be active.
-    let entries = visible_entries_as_strings(&sidebar, cx);
-    let draft_count = entries.iter().filter(|e| e.contains("Draft")).count();
-    assert_eq!(
-        draft_count, 0,
-        "draft should be removed after sending a message"
-    );
-
-    sidebar.read_with(cx, |sidebar, _| {
-        assert_active_thread(
-            sidebar,
-            &new_session_id,
-            "active_entry should transition to the new thread after sending",
-        );
-    });
-}
-
-#[gpui::test]
 async fn test_cmd_n_shows_new_thread_entry_in_absorbed_worktree(cx: &mut TestAppContext) {
     // When the active workspace is an absorbed git worktree, cmd-n
-    // should still show the "New Thread" entry under the main repo's
-    // header and highlight it as active.
+    // should activate the draft thread in the panel. Drafts are not
+    // shown as sidebar rows.
     agent_ui::test_support::init_test(cx);
     cx.update(|cx| {
         ThreadStore::init_global(cx);
@@ -3411,18 +3284,24 @@ async fn test_cmd_n_shows_new_thread_entry_in_absorbed_worktree(cx: &mut TestApp
     });
     cx.run_until_parked();
 
+    // Drafts are not shown as sidebar rows, so entries stay the same.
     assert_eq!(
         visible_entries_as_strings(&sidebar, cx),
         vec![
             //
             "v [project]",
-            "  [~ Draft {wt-feature-a}] *",
             "  Hello {wt-feature-a} *"
         ],
-        "After Cmd-N in an absorbed worktree, the sidebar should show \
-             a highlighted Draft entry under the main repo header"
+        "After Cmd-N the sidebar should not show a Draft entry"
     );
 
+    // The panel should be on the draft and active_entry should track it.
+    worktree_panel.read_with(cx, |panel, cx| {
+        assert!(
+            panel.active_thread_is_draft(cx),
+            "panel should be showing the draft after Cmd-N",
+        );
+    });
     sidebar.read_with(cx, |sidebar, _cx| {
         assert_active_draft(
             sidebar,
@@ -4298,7 +4177,6 @@ async fn test_clicking_worktree_thread_does_not_briefly_render_as_separate_proje
                 {
                     saw_expected_thread = true;
                 }
-                ListEntry::Thread(thread) if thread.is_draft => {}
                 ListEntry::Thread(thread) => {
                     let title = thread.metadata.display_title();
                     let worktree_name = thread
@@ -6462,11 +6340,13 @@ async fn test_archive_thread_active_entry_management(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
 
-    // Archiving the active thread clears active_entry (no draft is created).
+    // Archiving the active thread activates a draft on the same workspace
+    // (via clear_base_view → activate_draft). The draft is not shown as a
+    // sidebar row but active_entry tracks it.
     sidebar.read_with(cx, |sidebar, _| {
         assert!(
-            sidebar.active_entry.is_none(),
-            "expected None after archiving active thread, got: {:?}",
+            matches!(&sidebar.active_entry, Some(ActiveEntry { workspace: ws, .. }) if ws == &workspace_b),
+            "expected draft on workspace_b after archiving active thread, got: {:?}",
             sidebar.active_entry,
         );
     });
@@ -6929,8 +6809,6 @@ async fn test_unarchive_into_inactive_existing_workspace_does_not_leave_active_d
     });
     let immediate_active_thread_id =
         panel_b_before_settle.read_with(cx, |panel, cx| panel.active_thread_id(cx));
-    let immediate_draft_ids =
-        panel_b_before_settle.read_with(cx, |panel, cx| panel.draft_thread_ids(cx));
 
     cx.run_until_parked();
 
@@ -6954,7 +6832,7 @@ async fn test_unarchive_into_inactive_existing_workspace_does_not_leave_active_d
     );
     assert!(
         immediate_active_thread_id.is_none() || immediate_active_thread_id == Some(thread_id),
-        "expected immediate panel state to be either still loading or already on the restored thread, got active_thread_id={immediate_active_thread_id:?}, draft_ids={immediate_draft_ids:?}"
+        "expected immediate panel state to be either still loading or already on the restored thread, got active_thread_id={immediate_active_thread_id:?}"
     );
 
     let entries = visible_entries_as_strings(&sidebar, cx);
@@ -7197,7 +7075,7 @@ async fn test_unarchive_does_not_create_duplicate_real_thread_metadata(cx: &mut 
         "expected unarchive to reuse the original thread id instead of creating a duplicate row"
     );
     assert!(
-        !session_entries[0].is_draft(),
+        session_entries[0].session_id.is_some(),
         "expected restored metadata to be a real thread, got: {:?}",
         session_entries[0]
     );
@@ -7223,8 +7101,8 @@ async fn test_switch_to_workspace_with_archived_thread_shows_no_active_entry(
     cx: &mut TestAppContext,
 ) {
     // When a thread is archived while the user is in a different workspace,
-    // the group is left empty (no draft is created). Switching back to that
-    // workspace should show no active entry.
+    // clear_base_view creates a draft on the archived workspace's panel.
+    // Switching back to that workspace shows the draft as active_entry.
     agent_ui::test_support::init_test(cx);
     cx.update(|cx| {
         ThreadStore::init_global(cx);
@@ -7269,8 +7147,9 @@ async fn test_switch_to_workspace_with_archived_thread_shows_no_active_entry(
     });
     cx.run_until_parked();
 
-    // Switch back to project-a. Its panel was cleared during archiving,
-    // so active_entry should be None (no draft is created).
+    // Switch back to project-a. Its panel was cleared during archiving
+    // (clear_base_view activated a draft), so active_entry should point
+    // to the draft on workspace_a.
     let workspace_a =
         multi_workspace.read_with(cx, |mw, _| mw.workspaces().next().unwrap().clone());
     multi_workspace.update_in(cx, |mw, window, cx| {
@@ -7284,10 +7163,10 @@ async fn test_switch_to_workspace_with_archived_thread_shows_no_active_entry(
     cx.run_until_parked();
 
     sidebar.read_with(cx, |sidebar, _| {
-        assert!(
-            sidebar.active_entry.is_none(),
-            "expected no active entry after switching to workspace with archived thread, got: {:?}",
-            sidebar.active_entry,
+        assert_active_draft(
+            sidebar,
+            &workspace_a,
+            "after switching to workspace with archived thread, active_entry should be the draft",
         );
     });
 }
@@ -8813,53 +8692,6 @@ async fn test_project_header_click_restores_last_viewed(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
-async fn test_plus_button_reuses_empty_draft(cx: &mut TestAppContext) {
-    // Clicking the + button when an empty draft already exists should
-    // focus the existing draft rather than creating a new one.
-    let project = init_test_project_with_agent_panel("/my-project", cx).await;
-    let (multi_workspace, cx) =
-        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-    let (sidebar, _panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
-
-    // Start: no drafts from reconciliation.
-    let entries = visible_entries_as_strings(&sidebar, cx);
-    let draft_count = entries.iter().filter(|e| e.contains("Draft")).count();
-    assert_eq!(draft_count, 0, "should start with 0 drafts");
-
-    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
-    let simulate_plus_button =
-        |sidebar: &mut Sidebar, window: &mut Window, cx: &mut Context<Sidebar>| {
-            sidebar.create_new_thread(&workspace, window, cx);
-        };
-
-    // First + click: should create a draft.
-    sidebar.update_in(cx, |sidebar, window, cx| {
-        simulate_plus_button(sidebar, window, cx);
-    });
-    cx.run_until_parked();
-
-    let entries = visible_entries_as_strings(&sidebar, cx);
-    let draft_count = entries.iter().filter(|e| e.contains("Draft")).count();
-    assert_eq!(draft_count, 1, "first + click should create a draft");
-
-    // Second + click with empty draft: should reuse it, not create a new one.
-    sidebar.update_in(cx, |sidebar, window, cx| {
-        simulate_plus_button(sidebar, window, cx);
-    });
-    cx.run_until_parked();
-
-    let entries = visible_entries_as_strings(&sidebar, cx);
-    let draft_count = entries.iter().filter(|e| e.contains("Draft")).count();
-    assert_eq!(
-        draft_count, 1,
-        "second + click should reuse the existing empty draft, not create a new one"
-    );
-
-    // The draft should be active.
-    assert_eq!(entries[1], "  [~ Draft] *");
-}
-
-#[gpui::test]
 async fn test_activating_workspace_with_draft_does_not_create_extras(cx: &mut TestAppContext) {
     // When a workspace has a draft (from the panel's load fallback)
     // and the user activates it (e.g. by clicking the placeholder or
@@ -9905,8 +9737,8 @@ mod property_test {
                 .unwrap_or_default();
 
             // Main code path queries (run for all groups, even without workspaces).
-            // Skip drafts (session_id: None) — they are shown via the
-            // panel's draft_thread_ids, not by session_id matching.
+            // Skip drafts (session_id: None) — they are not shown in the
+            // sidebar entries.
             for metadata in thread_store
                 .read(cx)
                 .entries_for_main_worktree_path(&path_list, None)
@@ -10056,8 +9888,8 @@ mod property_test {
                 .iter()
                 .filter_map(|e| match e {
                     ListEntry::Thread(t) => Some(format!(
-                        "tid={:?} sid={:?} draft={}",
-                        t.metadata.thread_id, t.metadata.session_id, t.is_draft
+                        "tid={:?} sid={:?}",
+                        t.metadata.thread_id, t.metadata.session_id
                     )),
                     _ => None,
                 })

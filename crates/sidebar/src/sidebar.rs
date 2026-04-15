@@ -192,7 +192,6 @@ struct ThreadEntry {
     is_live: bool,
     is_background: bool,
     is_title_generating: bool,
-    is_draft: bool,
     highlight_positions: Vec<usize>,
     worktrees: Vec<ThreadItemWorktreeInfo>,
     diff_stats: DiffStats,
@@ -377,7 +376,6 @@ pub struct Sidebar {
     recent_projects_popover_handle: PopoverMenuHandle<SidebarRecentProjects>,
     project_header_menu_ix: Option<usize>,
     _subscriptions: Vec<gpui::Subscription>,
-    _draft_observations: Vec<gpui::Subscription>,
 }
 
 impl Sidebar {
@@ -404,7 +402,6 @@ impl Sidebar {
                 MultiWorkspaceEvent::ActiveWorkspaceChanged => {
                     this.sync_active_entry_from_active_workspace(cx);
                     this.replace_archived_panel_thread(window, cx);
-                    this.observe_draft_editors(cx);
                     this.update_entries(cx);
                 }
                 MultiWorkspaceEvent::WorkspaceAdded(workspace) => {
@@ -466,7 +463,6 @@ impl Sidebar {
             recent_projects_popover_handle: PopoverMenuHandle::default(),
             project_header_menu_ix: None,
             _subscriptions: Vec::new(),
-            _draft_observations: Vec::new(),
         }
     }
 
@@ -544,12 +540,10 @@ impl Sidebar {
                 ProjectEvent::WorktreeAdded(_)
                 | ProjectEvent::WorktreeRemoved(_)
                 | ProjectEvent::WorktreeOrderChanged => {
-                    this.observe_draft_editors(cx);
                     this.update_entries(cx);
                 }
                 ProjectEvent::WorktreePathsChanged { old_worktree_paths } => {
                     this.move_thread_paths(project, old_worktree_paths, cx);
-                    this.observe_draft_editors(cx);
                     this.update_entries(cx);
                 }
                 _ => {}
@@ -595,7 +589,6 @@ impl Sidebar {
 
         if let Some(agent_panel) = workspace.read(cx).panel::<AgentPanel>(cx) {
             self.subscribe_to_agent_panel(&agent_panel, window, cx);
-            self.observe_draft_editors(cx);
         }
     }
 
@@ -660,7 +653,6 @@ impl Sidebar {
             |this, _agent_panel, event: &AgentPanelEvent, _window, cx| match event {
                 AgentPanelEvent::ActiveViewChanged => {
                     this.sync_active_entry_from_panel(_agent_panel, cx);
-                    this.observe_draft_editors(cx);
                     this.update_entries(cx);
                 }
                 AgentPanelEvent::ThreadFocused | AgentPanelEvent::RetainedThreadChanged => {
@@ -989,6 +981,7 @@ impl Sidebar {
             let icon = match agent {
                 Agent::NativeAgent => IconName::ZedAgent,
                 Agent::Custom { .. } => IconName::Terminal,
+                _ => IconName::ZedAgent,
             };
             let icon_from_external_svg = agent_server_store
                 .as_ref()
@@ -1049,6 +1042,20 @@ impl Sidebar {
                 .as_ref()
                 .is_some_and(|active| group_workspaces.contains(active));
 
+            let draft_thread_id = self
+                .active_entry
+                .as_ref()
+                .filter(|entry| group_workspaces.contains(entry.workspace()))
+                .and_then(|entry| {
+                    let ws = active_workspace.as_ref()?;
+                    let panel = ws.read(cx).panel::<AgentPanel>(cx)?;
+                    if panel.read(cx).active_thread_is_draft(cx) {
+                        Some(entry.thread_id)
+                    } else {
+                        None
+                    }
+                });
+
             // Collect live thread infos from all workspaces in this group.
             let live_infos: Vec<_> = group_workspaces
                 .iter()
@@ -1091,7 +1098,6 @@ impl Sidebar {
                         let (icon, icon_from_external_svg) = resolve_agent_icon(&row.agent_id);
                         let worktrees =
                             worktree_info_from_thread_paths(&row.worktree_paths, &branch_by_path);
-                        let is_draft = row.is_draft();
                         ThreadEntry {
                             metadata: row,
                             icon,
@@ -1101,7 +1107,6 @@ impl Sidebar {
                             is_live: false,
                             is_background: false,
                             is_title_generating: false,
-                            is_draft,
                             highlight_positions: Vec::new(),
                             worktrees,
                             diff_stats: DiffStats::default(),
@@ -1289,6 +1294,7 @@ impl Sidebar {
                     waiting_thread_count,
                     is_active,
                     has_threads,
+                    draft_thread_id,
                 });
 
                 for thread in matched_threads {
@@ -1308,6 +1314,7 @@ impl Sidebar {
                     waiting_thread_count,
                     is_active,
                     has_threads,
+                    draft_thread_id,
                 });
 
                 if is_collapsed {
@@ -1483,6 +1490,7 @@ impl Sidebar {
                 *is_active_group,
                 is_selected,
                 *has_threads,
+                draft_thread_id.is_some(),
                 cx,
             ),
             ListEntry::Thread(thread) => self.render_thread(ix, thread, is_active, is_selected, cx),
@@ -1540,6 +1548,7 @@ impl Sidebar {
         is_active: bool,
         is_focused: bool,
         has_threads: bool,
+        has_active_draft: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let host = key.host();
@@ -1664,7 +1673,7 @@ impl Sidebar {
             .child(gradient_overlay())
             .child(
                 h_flex()
-                    .when(!is_ellipsis_menu_open, |this| {
+                    .when(!is_ellipsis_menu_open && !has_active_draft, |this| {
                         this.visible_on_hover(&group_name)
                     })
                     .child(gradient_overlay())
@@ -1682,6 +1691,7 @@ impl Sidebar {
                             IconName::Plus,
                         )
                         .icon_size(IconSize::Small)
+                        .when(has_active_draft, |this| this.icon_color(Color::Accent))
                         .tooltip(move |_, cx| {
                             Tooltip::for_action_in(
                                 "Start New Agent Thread",
@@ -1946,6 +1956,7 @@ impl Sidebar {
             waiting_thread_count,
             is_active,
             has_threads,
+            draft_thread_id,
         } = self.contents.entries.get(header_idx)?
         else {
             return None;
@@ -1965,6 +1976,7 @@ impl Sidebar {
             *is_active,
             is_selected,
             *has_threads,
+            draft_thread_id.is_some(),
             cx,
         );
 
@@ -2958,9 +2970,7 @@ impl Sidebar {
                 .iter()
                 .chain(self.contents.entries[..pos].iter().rev())
                 .find_map(|entry| match entry {
-                    ListEntry::Thread(t)
-                        if !t.is_draft && t.metadata.session_id.as_ref() != Some(session_id) =>
-                    {
+                    ListEntry::Thread(t) if t.metadata.session_id.as_ref() != Some(session_id) => {
                         let (workspace_paths, project_group_key) = match &t.workspace {
                             ThreadEntryWorkspace::Open(ws) => (
                                 PathList::new(&ws.read(cx).root_paths(cx)),
@@ -3416,13 +3426,6 @@ impl Sidebar {
             return;
         };
         match self.contents.entries.get(ix) {
-            Some(ListEntry::Thread(thread)) if thread.is_draft => {
-                let draft_id = thread.metadata.thread_id;
-                if let ThreadEntryWorkspace::Open(workspace) = &thread.workspace {
-                    let workspace = workspace.clone();
-                    self.remove_draft(draft_id, &workspace, window, cx);
-                }
-            }
             Some(ListEntry::Thread(thread)) => {
                 match thread.status {
                     AgentThreadStatus::Running | AgentThreadStatus::WaitingForConfirmation => {
@@ -3735,7 +3738,6 @@ impl Sidebar {
         let title: SharedString = thread.metadata.display_title();
         let metadata = thread.metadata.clone();
         let thread_workspace = thread.workspace.clone();
-        let is_draft = thread.is_draft;
 
         let is_hovered = self.hovered_thread_index == Some(ix);
         let is_selected = is_active;
@@ -3746,7 +3748,6 @@ impl Sidebar {
 
         let thread_id_for_actions = thread.metadata.thread_id;
         let session_id_for_delete = thread.metadata.session_id.clone();
-        let thread_workspace_for_dismiss = thread.workspace.clone();
         let focus_handle = self.focus_handle.clone();
 
         let id = SharedString::from(format!("thread-entry-{}", ix));
@@ -4018,19 +4019,11 @@ impl Sidebar {
         let draft_id = workspace.update(cx, |workspace, cx| {
             let panel = workspace.panel::<AgentPanel>(cx)?;
             let draft_id = panel.update(cx, |panel, cx| {
-                if let Some(id) = panel.draft_thread_ids(cx).first().copied() {
-                    if panel.active_thread_id(cx) != Some(id) {
-                        panel.activate_retained_thread(id, true, window, cx);
-                    }
-                    id
-                } else {
-                    let id = panel.create_thread(window, cx);
-                    panel.activate_retained_thread(id, true, window, cx);
-                    id
-                }
+                panel.activate_draft(true, window, cx);
+                panel.active_thread_id(cx)
             });
             workspace.focus_panel::<AgentPanel>(window, cx);
-            Some(draft_id)
+            draft_id
         });
 
         if let Some(draft_id) = draft_id {
@@ -4040,80 +4033,6 @@ impl Sidebar {
                 workspace: workspace.clone(),
             });
         }
-    }
-
-    fn remove_draft(
-        &mut self,
-        draft_id: ThreadId,
-        workspace: &Entity<Workspace>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        workspace.update(cx, |ws, cx| {
-            if let Some(panel) = ws.panel::<AgentPanel>(cx) {
-                panel.update(cx, |panel, cx| {
-                    panel.remove_thread(draft_id, window, cx);
-                });
-            }
-        });
-
-        let was_active = self
-            .active_entry
-            .as_ref()
-            .is_some_and(|e| e.is_active_thread(&draft_id));
-
-        if was_active {
-            let group_key = workspace.read(cx).project_group_key(cx);
-
-            // Find any remaining thread in the same group.
-            let next = self.contents.entries.iter().find_map(|entry| {
-                if let ListEntry::Thread(thread) = entry {
-                    if thread.metadata.thread_id != draft_id {
-                        if let ThreadEntryWorkspace::Open(ws) = &thread.workspace {
-                            if ws.read(cx).project_group_key(cx) == group_key {
-                                return Some((thread.metadata.clone(), ws.clone()));
-                            }
-                        }
-                    }
-                }
-                None
-            });
-            if let Some((metadata, ws)) = next {
-                self.activate_thread(metadata, &ws, false, window, cx);
-            } else {
-                self.active_entry = None;
-            }
-        }
-
-        self.update_entries(cx);
-    }
-
-    /// Cleans, collapses whitespace, and truncates raw editor text
-    /// for display as a draft label in the sidebar.
-    fn truncate_draft_label(raw: &str) -> Option<SharedString> {
-        let first_line = raw.lines().next().unwrap_or("");
-        let cleaned = Self::clean_mention_links(first_line);
-        let mut text: String = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-        if text.is_empty() {
-            return None;
-        }
-        const MAX_CHARS: usize = 250;
-        if let Some((truncate_at, _)) = text.char_indices().nth(MAX_CHARS) {
-            text.truncate(truncate_at);
-        }
-        Some(text.into())
-    }
-
-    /// Reads a draft's prompt text from its ConversationView in the AgentPanel.
-    fn read_draft_text(
-        &self,
-        draft_id: ThreadId,
-        workspace: &Entity<Workspace>,
-        cx: &App,
-    ) -> Option<SharedString> {
-        let panel = workspace.read(cx).panel::<AgentPanel>(cx)?;
-        let raw = panel.read(cx).editor_text(draft_id, cx)?;
-        Self::truncate_draft_label(&raw)
     }
 
     fn selected_group_key(&self) -> Option<ProjectGroupKey> {
