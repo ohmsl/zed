@@ -299,7 +299,7 @@ pub struct ThreadView {
     pub plan_expanded: bool,
     pub queue_expanded: bool,
     pub editor_expanded: bool,
-    pub should_be_following: bool,
+    pub auto_follow: bool,
     pub editing_message: Option<usize>,
     pub local_queued_messages: Vec<QueuedMessage>,
     pub queued_message_editors: Vec<Entity<MessageEditor>>,
@@ -544,7 +544,7 @@ impl ThreadView {
             plan_expanded: false,
             queue_expanded: true,
             editor_expanded: false,
-            should_be_following: false,
+            auto_follow: false,
             editing_message: None,
             local_queued_messages: Vec::new(),
             queued_message_editors: Vec::new(),
@@ -981,7 +981,7 @@ impl ThreadView {
         self.thread_feedback.clear();
         self.editing_message.take();
 
-        if self.should_be_following {
+        if self.auto_follow {
             self.workspace
                 .update(cx, |workspace, cx| {
                     workspace.follow(CollaboratorId::Agent, window, cx);
@@ -1143,17 +1143,6 @@ impl ThreadView {
             if let Err(err) = task.await {
                 this.update(cx, |this, cx| {
                     this.handle_thread_error(err, cx);
-                })
-                .ok();
-            } else {
-                this.update(cx, |this, cx| {
-                    let should_be_following = this
-                        .workspace
-                        .update(cx, |workspace, _| {
-                            workspace.is_being_followed(CollaboratorId::Agent)
-                        })
-                        .unwrap_or_default();
-                    this.should_be_following = should_be_following;
                 })
                 .ok();
             }
@@ -1500,10 +1489,10 @@ impl ThreadView {
 
         let workspace = self.workspace.clone();
 
-        let should_be_following = self.should_be_following;
+        let auto_follow = self.auto_follow;
         let contents_task = cx.spawn_in(window, async move |_this, cx| {
             cancelled.await;
-            if should_be_following {
+            if auto_follow {
                 workspace
                     .update_in(cx, |workspace, window, cx| {
                         workspace.follow(CollaboratorId::Agent, window, cx);
@@ -1681,7 +1670,7 @@ impl ThreadView {
         self.conversation.update(cx, |conversation, cx| {
             conversation.authorize_tool_call(session_id, tool_call_id, outcome, cx);
         });
-        if self.should_be_following {
+        if self.auto_follow {
             self.workspace
                 .update(cx, |workspace, cx| {
                     workspace.follow(CollaboratorId::Agent, window, cx);
@@ -1713,7 +1702,7 @@ impl ThreadView {
         self.conversation.update(cx, |conversation, cx| {
             conversation.authorize_pending_tool_call(&session_id, kind, cx)
         })?;
-        if self.should_be_following {
+        if self.auto_follow {
             self.workspace
                 .update(cx, |workspace, cx| {
                     workspace.follow(CollaboratorId::Agent, window, cx);
@@ -2091,22 +2080,14 @@ impl ThreadView {
         cx.notify();
     }
 
-    fn is_following(&self, cx: &App) -> bool {
-        match self.thread.read(cx).status() {
-            ThreadStatus::Generating => self
-                .workspace
-                .read_with(cx, |workspace, _| {
-                    workspace.is_being_followed(CollaboratorId::Agent)
-                })
-                .unwrap_or(false),
-            _ => self.should_be_following,
-        }
+    fn is_following(&self, _cx: &App) -> bool {
+        self.auto_follow
     }
 
     fn toggle_following(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let following = self.is_following(cx);
 
-        self.should_be_following = !following;
+        self.auto_follow = !following;
         if self.thread.read(cx).status() == ThreadStatus::Generating {
             self.workspace
                 .update(cx, |workspace, cx| {
