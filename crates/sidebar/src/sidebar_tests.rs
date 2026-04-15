@@ -515,44 +515,6 @@ async fn test_restore_serialized_archive_view_does_not_panic(cx: &mut TestAppCon
     });
 }
 
-#[test]
-fn test_clean_mention_links() {
-    // Simple mention link
-    assert_eq!(
-        Sidebar::clean_mention_links("check [@Button.tsx](file:///path/to/Button.tsx)"),
-        "check @Button.tsx"
-    );
-
-    // Multiple mention links
-    assert_eq!(
-        Sidebar::clean_mention_links(
-            "look at [@foo.rs](file:///foo.rs) and [@bar.rs](file:///bar.rs)"
-        ),
-        "look at @foo.rs and @bar.rs"
-    );
-
-    // No mention links — passthrough
-    assert_eq!(
-        Sidebar::clean_mention_links("plain text with no mentions"),
-        "plain text with no mentions"
-    );
-
-    // Incomplete link syntax — preserved as-is
-    assert_eq!(
-        Sidebar::clean_mention_links("broken [@mention without closing"),
-        "broken [@mention without closing"
-    );
-
-    // Regular markdown link (no @) — not touched
-    assert_eq!(
-        Sidebar::clean_mention_links("see [docs](https://example.com)"),
-        "see [docs](https://example.com)"
-    );
-
-    // Empty input
-    assert_eq!(Sidebar::clean_mention_links(""), "");
-}
-
 #[gpui::test]
 async fn test_entities_released_on_window_close(cx: &mut TestAppContext) {
     let project = init_test_project("/my-project", cx).await;
@@ -908,7 +870,6 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 waiting_thread_count: 0,
                 is_active: true,
                 has_threads: true,
-                draft_thread_id: None,
             },
             ListEntry::Thread(ThreadEntry {
                 metadata: ThreadMetadata {
@@ -1045,7 +1006,6 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 waiting_thread_count: 0,
                 is_active: false,
                 has_threads: false,
-                draft_thread_id: None,
             },
         ];
 
@@ -7853,13 +7813,11 @@ async fn test_archive_thread_on_linked_worktree_selects_sibling_thread(cx: &mut 
     );
 }
 
+// TODO: Restore this test once linked worktree draft entries are re-implemented.
+// The draft-in-sidebar approach was reverted in favor of just the + button toggle.
 #[gpui::test]
+#[ignore = "linked worktree draft entries not yet implemented"]
 async fn test_linked_worktree_workspace_reachable_and_dismissable(cx: &mut TestAppContext) {
-    // When a linked worktree is opened as its own workspace and the user
-    // creates a draft thread from it, then switches away, the workspace must
-    // still be reachable from that DraftThread sidebar entry. Pressing
-    // RemoveSelectedThread (shift-backspace) on that entry should remove the
-    // workspace.
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
 
@@ -7962,51 +7920,8 @@ async fn test_linked_worktree_workspace_reachable_and_dismissable(cx: &mut TestA
     );
 
     // Find the draft Thread entry whose workspace is the linked worktree.
-    let new_thread_ix = sidebar.read_with(cx, |sidebar, _| {
-        sidebar
-            .contents
-            .entries
-            .iter()
-            .position(|entry| match entry {
-                ListEntry::Thread(thread) if thread.is_draft => matches!(
-                    &thread.workspace,
-                    ThreadEntryWorkspace::Open(ws) if ws.entity_id() == worktree_ws_id
-                ),
-                _ => false,
-            })
-            .expect("expected a draft thread entry for the linked worktree")
-    });
-
-    assert_eq!(
-        multi_workspace.read_with(cx, |mw, _| mw.workspaces().count()),
-        2
-    );
-
-    sidebar.update_in(cx, |sidebar, window, cx| {
-        sidebar.selection = Some(new_thread_ix);
-        sidebar.remove_selected_thread(&RemoveSelectedThread, window, cx);
-    });
-    cx.run_until_parked();
-
-    assert_eq!(
-        multi_workspace.read_with(cx, |mw, _| mw.workspaces().count()),
-        2,
-        "dismissing a draft no longer removes the linked worktree workspace"
-    );
-
-    let has_draft_for_worktree = sidebar.read_with(cx, |sidebar, _| {
-        sidebar.contents.entries.iter().any(|entry| match entry {
-            ListEntry::Thread(thread) if thread.is_draft => matches!(
-                &thread.workspace,
-                ThreadEntryWorkspace::Open(ws) if ws.entity_id() == worktree_ws_id
-            ),
-            _ => false,
-        })
-    });
-    assert!(
-        !has_draft_for_worktree,
-        "draft thread entry for the linked worktree should be removed after dismiss"
-    );
+    let _ = (worktree_ws_id, sidebar, multi_workspace);
+    // todo("re-implement once linked worktree draft entries exist");
 }
 
 #[gpui::test]
@@ -9874,7 +9789,15 @@ mod property_test {
         }
 
         // 4. Exactly one entry in sidebar contents must be uniquely
-        //    identified by the active_entry.
+        //    identified by the active_entry — unless the panel is showing
+        //    a draft, which is represented by the + button's active state
+        //    rather than a sidebar row.
+        // TODO: Make this check more complete
+        let is_draft = panel.read(cx).active_thread_is_draft(cx)
+            || panel.read(cx).active_conversation_view().is_none();
+        if is_draft {
+            return Ok(());
+        }
         let matching_count = sidebar
             .contents
             .entries

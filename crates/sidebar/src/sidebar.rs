@@ -787,63 +787,6 @@ impl Sidebar {
         }
     }
 
-    fn observe_draft_editors(&mut self, cx: &mut Context<Self>) {
-        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
-            self._draft_observations.clear();
-            return;
-        };
-
-        // Collect conversation views up front to avoid holding a
-        // borrow on `cx` across `cx.observe` calls.
-        let conversation_views: Vec<_> = multi_workspace
-            .read(cx)
-            .workspaces()
-            .filter_map(|ws| ws.read(cx).panel::<AgentPanel>(cx))
-            .flat_map(|panel| panel.read(cx).conversation_views())
-            .collect();
-
-        let mut subscriptions = Vec::with_capacity(conversation_views.len());
-        for cv in conversation_views {
-            if let Some(thread_view) = cv.read(cx).active_thread() {
-                let editor = thread_view.read(cx).message_editor.clone();
-                subscriptions.push(cx.observe(&editor, |this, _editor, cx| {
-                    this.update_entries(cx);
-                }));
-            } else {
-                subscriptions.push(cx.observe(&cv, |this, _cv, cx| {
-                    this.observe_draft_editors(cx);
-                    this.update_entries(cx);
-                }));
-            }
-        }
-
-        self._draft_observations = subscriptions;
-    }
-
-    fn clean_mention_links(input: &str) -> String {
-        let mut result = String::with_capacity(input.len());
-        let mut remaining = input;
-
-        while let Some(start) = remaining.find("[@") {
-            result.push_str(&remaining[..start]);
-            let after_bracket = &remaining[start + 1..]; // skip '['
-            if let Some(close_bracket) = after_bracket.find("](") {
-                let mention = &after_bracket[..close_bracket]; // "@something"
-                let after_link_start = &after_bracket[close_bracket + 2..]; // after "]("
-                if let Some(close_paren) = after_link_start.find(')') {
-                    result.push_str(mention);
-                    remaining = &after_link_start[close_paren + 1..];
-                    continue;
-                }
-            }
-            // Couldn't parse full link syntax — emit the literal "[@" and move on.
-            result.push_str("[@");
-            remaining = &remaining[start + 2..];
-        }
-        result.push_str(remaining);
-        result
-    }
-
     /// Opens a new workspace for a group that has no open workspaces.
     fn open_workspace_for_group(
         &mut self,
@@ -1041,20 +984,6 @@ impl Sidebar {
             let is_active = active_workspace
                 .as_ref()
                 .is_some_and(|active| group_workspaces.contains(active));
-
-            let draft_thread_id = self
-                .active_entry
-                .as_ref()
-                .filter(|entry| group_workspaces.contains(entry.workspace()))
-                .and_then(|entry| {
-                    let ws = active_workspace.as_ref()?;
-                    let panel = ws.read(cx).panel::<AgentPanel>(cx)?;
-                    if panel.read(cx).active_thread_is_draft(cx) {
-                        Some(entry.thread_id)
-                    } else {
-                        None
-                    }
-                });
 
             // Collect live thread infos from all workspaces in this group.
             let live_infos: Vec<_> = group_workspaces
@@ -1294,7 +1223,6 @@ impl Sidebar {
                     waiting_thread_count,
                     is_active,
                     has_threads,
-                    draft_thread_id,
                 });
 
                 for thread in matched_threads {
@@ -1314,31 +1242,10 @@ impl Sidebar {
                     waiting_thread_count,
                     is_active,
                     has_threads,
-                    draft_thread_id,
                 });
 
                 if is_collapsed {
                     continue;
-                }
-
-                {
-                    // Override titles with editor text for drafts and
-                    // threads that still have the default placeholder
-                    // title (panel considers them drafts even if they
-                    // have a session_id).
-                    for thread in &mut threads {
-                        let needs_title_override =
-                            thread.is_draft || thread.metadata.title.is_none();
-                        if needs_title_override {
-                            if let ThreadEntryWorkspace::Open(workspace) = &thread.workspace {
-                                if let Some(text) =
-                                    self.read_draft_text(thread.metadata.thread_id, workspace, cx)
-                                {
-                                    thread.metadata.title = Some(text);
-                                }
-                            }
-                        }
-                    }
                 }
 
                 let total = threads.len();
@@ -1479,20 +1386,31 @@ impl Sidebar {
                 waiting_thread_count,
                 is_active: is_active_group,
                 has_threads,
-            } => self.render_project_header(
-                ix,
-                false,
-                key,
-                label,
-                highlight_positions,
-                *has_running_threads,
-                *waiting_thread_count,
-                *is_active_group,
-                is_selected,
-                *has_threads,
-                draft_thread_id.is_some(),
-                cx,
-            ),
+            } => {
+                let has_active_draft = is_active
+                    && self
+                        .active_workspace(cx)
+                        .and_then(|ws| ws.read(cx).panel::<AgentPanel>(cx))
+                        .is_some_and(|panel| {
+                            let panel = panel.read(cx);
+                            panel.active_thread_is_draft(cx)
+                                || panel.active_conversation_view().is_none()
+                        });
+                self.render_project_header(
+                    ix,
+                    false,
+                    key,
+                    label,
+                    highlight_positions,
+                    *has_running_threads,
+                    *waiting_thread_count,
+                    *is_active_group,
+                    is_selected,
+                    *has_threads,
+                    has_active_draft,
+                    cx,
+                )
+            }
             ListEntry::Thread(thread) => self.render_thread(ix, thread, is_active, is_selected, cx),
             ListEntry::ViewMore {
                 key,
@@ -1956,7 +1874,6 @@ impl Sidebar {
             waiting_thread_count,
             is_active,
             has_threads,
-            draft_thread_id,
         } = self.contents.entries.get(header_idx)?
         else {
             return None;
@@ -1965,6 +1882,14 @@ impl Sidebar {
         let is_focused = self.focus_handle.is_focused(window);
         let is_selected = is_focused && self.selection == Some(header_idx);
 
+        let has_active_draft = *is_active
+            && self
+                .active_workspace(cx)
+                .and_then(|ws| ws.read(cx).panel::<AgentPanel>(cx))
+                .is_some_and(|panel| {
+                    let panel = panel.read(cx);
+                    panel.active_thread_is_draft(cx) || panel.active_conversation_view().is_none()
+                });
         let header_element = self.render_project_header(
             header_idx,
             true,
@@ -1976,7 +1901,7 @@ impl Sidebar {
             *is_active,
             is_selected,
             *has_threads,
-            draft_thread_id.is_some(),
+            has_active_draft,
             cx,
         );
 
@@ -2386,7 +2311,6 @@ impl Sidebar {
                 ws.focus_panel::<AgentPanel>(window, cx);
             });
             self.pending_thread_activation = None;
-            self.observe_draft_editors(cx);
         } else {
             Self::load_agent_thread_in_workspace(workspace, metadata, true, window, cx);
         }
@@ -3805,36 +3729,7 @@ impl Sidebar {
                         }),
                 )
             })
-            .when(is_hovered && !is_running && is_draft, |this| {
-                this.action_slot(
-                    div()
-                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                            cx.stop_propagation();
-                        })
-                        .child(
-                            IconButton::new("close-draft", IconName::Close)
-                                .icon_size(IconSize::Small)
-                                .icon_color(Color::Muted)
-                                .tooltip(Tooltip::text("Remove Draft"))
-                                .on_click({
-                                    let thread_workspace = thread_workspace_for_dismiss.clone();
-                                    cx.listener(move |this, _, window, cx| {
-                                        if let ThreadEntryWorkspace::Open(workspace) =
-                                            &thread_workspace
-                                        {
-                                            this.remove_draft(
-                                                thread_id_for_actions,
-                                                workspace,
-                                                window,
-                                                cx,
-                                            );
-                                        }
-                                    })
-                                }),
-                        ),
-                )
-            })
-            .when(is_hovered && !is_running && !is_draft, |this| {
+            .when(is_hovered && !is_running, |this| {
                 this.action_slot(
                     IconButton::new("archive-thread", IconName::Archive)
                         .icon_size(IconSize::Small)
