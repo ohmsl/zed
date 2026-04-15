@@ -299,7 +299,6 @@ pub struct ThreadView {
     pub plan_expanded: bool,
     pub queue_expanded: bool,
     pub editor_expanded: bool,
-    pub auto_follow: bool,
     pub editing_message: Option<usize>,
     pub local_queued_messages: Vec<QueuedMessage>,
     pub queued_message_editors: Vec<Entity<MessageEditor>>,
@@ -544,7 +543,6 @@ impl ThreadView {
             plan_expanded: false,
             queue_expanded: true,
             editor_expanded: false,
-            auto_follow: false,
             editing_message: None,
             local_queued_messages: Vec::new(),
             queued_message_editors: Vec::new(),
@@ -981,7 +979,7 @@ impl ThreadView {
         self.thread_feedback.clear();
         self.editing_message.take();
 
-        if self.auto_follow {
+        if AgentSettings::get_global(cx).auto_follow_agent {
             self.workspace
                 .update(cx, |workspace, cx| {
                     workspace.follow(CollaboratorId::Agent, window, cx);
@@ -1489,10 +1487,10 @@ impl ThreadView {
 
         let workspace = self.workspace.clone();
 
-        let auto_follow = self.auto_follow;
+        let auto_follow_agent = AgentSettings::get_global(cx).auto_follow_agent;
         let contents_task = cx.spawn_in(window, async move |_this, cx| {
             cancelled.await;
-            if auto_follow {
+            if auto_follow_agent {
                 workspace
                     .update_in(cx, |workspace, window, cx| {
                         workspace.follow(CollaboratorId::Agent, window, cx);
@@ -1670,7 +1668,7 @@ impl ThreadView {
         self.conversation.update(cx, |conversation, cx| {
             conversation.authorize_tool_call(session_id, tool_call_id, outcome, cx);
         });
-        if self.auto_follow {
+        if AgentSettings::get_global(cx).auto_follow_agent {
             self.workspace
                 .update(cx, |workspace, cx| {
                     workspace.follow(CollaboratorId::Agent, window, cx);
@@ -1702,7 +1700,7 @@ impl ThreadView {
         self.conversation.update(cx, |conversation, cx| {
             conversation.authorize_pending_tool_call(&session_id, kind, cx)
         })?;
-        if self.auto_follow {
+        if AgentSettings::get_global(cx).auto_follow_agent {
             self.workspace
                 .update(cx, |workspace, cx| {
                     workspace.follow(CollaboratorId::Agent, window, cx);
@@ -2080,14 +2078,14 @@ impl ThreadView {
         cx.notify();
     }
 
-    fn is_following(&self, _cx: &App) -> bool {
-        self.auto_follow
+    fn is_following(&self, cx: &App) -> bool {
+        AgentSettings::get_global(cx).auto_follow_agent
     }
 
     fn toggle_following(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let following = self.is_following(cx);
+        let new_value = !following;
 
-        self.auto_follow = !following;
         if self.thread.read(cx).status() == ThreadStatus::Generating {
             self.workspace
                 .update(cx, |workspace, cx| {
@@ -2100,7 +2098,17 @@ impl ThreadView {
                 .ok();
         }
 
-        telemetry::event!("Follow Agent Selected", following = !following);
+        if let Some(project) = self.project.upgrade() {
+            let fs = project.read(cx).fs().clone();
+            update_settings_file(fs, cx, move |settings, _| {
+                settings
+                    .agent
+                    .get_or_insert_default()
+                    .auto_follow_agent = Some(new_value);
+            });
+        }
+
+        telemetry::event!("Follow Agent Toggled", following = new_value);
     }
 
     // other

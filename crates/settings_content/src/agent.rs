@@ -215,6 +215,12 @@ pub struct AgentSettingsContent {
     ///
     /// Default: false
     pub show_turn_stats: Option<bool>,
+    /// Whether to automatically follow the agent's location as it reads and
+    /// edits files. When enabled, follow will re-engage each time a message
+    /// is sent, even if user interaction temporarily disengaged it.
+    ///
+    /// Default: false
+    pub auto_follow_agent: Option<bool>,
     /// Whether to show the merge conflict indicator in the status bar
     /// that offers to resolve conflicts using the agent.
     ///
