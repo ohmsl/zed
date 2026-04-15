@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use acp_thread::{AcpThread, MentionUri, ThreadStatus};
+use acp_thread::{AcpThread, AcpThreadEvent, MentionUri, ThreadStatus};
 use agent::{ContextServerRegistry, SharedThread, ThreadStore};
 use agent_client_protocol as acp;
 use agent_servers::AgentServer;
@@ -767,6 +767,7 @@ pub struct AgentPanel {
     _worktree_creation_task: Option<Task<()>>,
     show_trust_workspace_message: bool,
     _base_view_observation: Option<Subscription>,
+    _draft_editor_observation: Option<Subscription>,
 }
 
 impl AgentPanel {
@@ -958,6 +959,7 @@ impl AgentPanel {
                             cx,
                         );
                         panel.draft_thread = Some(thread.conversation_view.clone());
+                        panel.observe_draft_editor(&thread.conversation_view, cx);
 
                         if was_draft_active && last_active_thread.is_none() {
                             panel.set_base_view(
@@ -1176,6 +1178,7 @@ impl AgentPanel {
                 cx,
             )),
             _base_view_observation: None,
+            _draft_editor_observation: None,
         };
 
         // Initial sync of agent servers from extensions
@@ -1329,7 +1332,32 @@ impl AgentPanel {
         };
         let thread = self.create_agent_thread(agent, None, None, None, None, window, cx);
         self.draft_thread = Some(thread.conversation_view.clone());
+        self.observe_draft_editor(&thread.conversation_view, cx);
         thread.conversation_view
+    }
+
+    fn observe_draft_editor(
+        &mut self,
+        conversation_view: &Entity<ConversationView>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(acp_thread) = conversation_view.read(cx).root_acp_thread(cx) {
+            self._draft_editor_observation = Some(cx.subscribe(
+                &acp_thread,
+                |this, _, e: &AcpThreadEvent, cx| {
+                    if let AcpThreadEvent::PromptUpdated = e {
+                        this.serialize(cx);
+                    }
+                },
+            ));
+        } else {
+            let cv = conversation_view.clone();
+            self._draft_editor_observation = Some(cx.observe(&cv, |this, cv, cx| {
+                if cv.read(cx).root_acp_thread(cx).is_some() {
+                    this.observe_draft_editor(&cv, cx);
+                }
+            }));
+        }
     }
 
     pub fn create_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) -> ThreadId {
@@ -1375,6 +1403,7 @@ impl AgentPanel {
             .is_some_and(|d| d.read(cx).thread_id == id)
         {
             self.draft_thread = None;
+            self._draft_editor_observation = None;
         }
 
         if self.active_thread_id(cx) == Some(id) {
@@ -2386,6 +2415,7 @@ impl AgentPanel {
                                 .is_some_and(|active| active.entity_id() == d.entity_id())
                         }) {
                             this.draft_thread = None;
+                            this._draft_editor_observation = None;
                         }
                         this.retained_threads.remove(&thread_id);
                         cx.emit(AgentPanelEvent::MessageSentOrQueued { thread_id });
@@ -5879,8 +5909,8 @@ mod tests {
         ))];
         panel.update(cx, |panel, cx| {
             let thread = panel.active_agent_thread(cx).unwrap();
-            thread.update(cx, |thread, _cx| {
-                thread.set_draft_prompt(Some(draft_prompt_blocks.clone()));
+            thread.update(cx, |thread, cx| {
+                thread.set_draft_prompt(Some(draft_prompt_blocks.clone()), cx);
             });
             panel.serialize(cx);
         });

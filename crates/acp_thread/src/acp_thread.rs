@@ -1099,6 +1099,7 @@ impl From<&AcpThread> for ActionLogTelemetry {
 
 #[derive(Debug)]
 pub enum AcpThreadEvent {
+    PromptUpdated,
     NewEntry,
     TitleUpdated,
     TokenUsageUpdated,
@@ -1274,7 +1275,12 @@ impl AcpThread {
         self.draft_prompt.as_deref()
     }
 
-    pub fn set_draft_prompt(&mut self, prompt: Option<Vec<acp::ContentBlock>>) {
+    pub fn set_draft_prompt(
+        &mut self,
+        prompt: Option<Vec<acp::ContentBlock>>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(AcpThreadEvent::PromptUpdated);
         self.draft_prompt = prompt;
     }
 

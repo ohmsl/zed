@@ -285,7 +285,8 @@ impl Conversation {
                     | AcpThreadEvent::AvailableCommandsUpdated(_)
                     | AcpThreadEvent::ModeUpdated(_)
                     | AcpThreadEvent::ConfigOptionsUpdated(_)
-                    | AcpThreadEvent::WorkingDirectoriesUpdated => {}
+                    | AcpThreadEvent::WorkingDirectoriesUpdated
+                    | AcpThreadEvent::PromptUpdated => {}
                 }
             }
         });
@@ -408,7 +409,8 @@ fn affects_thread_metadata(event: &AcpThreadEvent) -> bool {
         | AcpThreadEvent::AvailableCommandsUpdated(_)
         | AcpThreadEvent::ModeUpdated(_)
         | AcpThreadEvent::ConfigOptionsUpdated(_)
-        | AcpThreadEvent::SubagentSpawned(_) => false,
+        | AcpThreadEvent::SubagentSpawned(_)
+        | AcpThreadEvent::PromptUpdated => false,
     }
 }
 
@@ -1620,6 +1622,9 @@ impl ConversationView {
                 cx.notify();
             }
             AcpThreadEvent::WorkingDirectoriesUpdated => {
+                cx.notify();
+            }
+            AcpThreadEvent::PromptUpdated => {
                 cx.notify();
             }
         }
