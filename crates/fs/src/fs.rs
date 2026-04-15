@@ -1,7 +1,7 @@
 pub mod fs_watcher;
 
 use parking_lot::Mutex;
-use slotmap::SlotMap;
+use slotmap::{KeyData, SlotMap};
 use std::ffi::OsString;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::time::Instant;
@@ -398,6 +398,16 @@ impl From<MTime> for proto::Timestamp {
 
 // TODO!(yara) for protocol get out u64 via keydata().ffi()
 slotmap::new_key_type! { pub struct TrashId; }
+
+impl TrashId {
+    pub fn from_u64(value: u64) -> Self {
+        KeyData::from_ffi(value).into()
+    }
+
+    pub fn to_u64(&self) -> u64 {
+        self.0.as_ffi()
+    }
+}
 
 pub struct RealFs {
     bundled_git_binary_path: Option<PathBuf>,

@@ -116,7 +116,13 @@ message CopyProjectEntry {
 message DeleteProjectEntry {
   uint64 project_id = 1;
   uint64 entry_id = 2;
+  // TODO! (yara) depracate in many week
   bool use_trash = 3;
+}
+
+message TrashProjectEntry {
+  uint64 project_id = 1;
+  uint64 entry_id = 2;
 }
 
 message ExpandProjectEntry {
@@ -137,17 +143,14 @@ message ExpandAllForProjectEntryResponse {
   uint64 worktree_scan_id = 1;
 }
 
+// TODO!(yara) split this up in future PR
 message ProjectEntryResponse {
   optional Entry entry = 1;
   uint64 worktree_scan_id = 2;
-  // TODO!(dino): new message for delete?
-  optional TrashedEntry trashed_entry = 3;
 }
 
-message TrashedEntry {
-  string trash_id = 1;
-  string file_name = 2;
-  string original_parent_path = 3;
+message TrashProjectEntryResponse {
+  uint64 trash_id = 1;
 }
 
 message UpdateWorktreeSettings {
