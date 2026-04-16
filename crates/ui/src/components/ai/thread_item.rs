@@ -407,14 +407,29 @@ impl RenderOnce for ThreadItem {
                 (WorktreeKind::Linked, branch) => {
                     let chip_index = worktree_labels.len();
 
-                    let label = if wt.highlight_positions.is_empty() {
-                        Label::new(wt.name)
+                    let (prefix, name, highlight_positions) =
+                        if let Some(colon_byte) = wt.name.find(':') {
+                            let prefix = SharedString::from(wt.name[..colon_byte].to_string());
+                            let rest = SharedString::from(wt.name[colon_byte + 1..].to_string());
+                            let rest_positions: Vec<usize> = wt
+                                .highlight_positions
+                                .iter()
+                                .filter(|&&pos| pos > colon_byte)
+                                .map(|&pos| pos - colon_byte - 1)
+                                .collect();
+                            (Some(prefix), rest, rest_positions)
+                        } else {
+                            (None, wt.name, wt.highlight_positions)
+                        };
+
+                    let label = if highlight_positions.is_empty() {
+                        Label::new(name)
                             .size(LabelSize::Small)
                             .color(Color::Muted)
                             .truncate()
                             .into_any_element()
                     } else {
-                        HighlightedLabel::new(wt.name, wt.highlight_positions)
+                        HighlightedLabel::new(name, highlight_positions)
                             .size(LabelSize::Small)
                             .color(Color::Muted)
                             .truncate()
@@ -431,6 +446,20 @@ impl RenderOnce for ThreadItem {
                                     .size(IconSize::XSmall)
                                     .color(Color::Muted),
                             )
+                            .when_some(prefix, |this, prefix| {
+                                this.child(
+                                    Label::new(prefix)
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted)
+                                        .truncate(),
+                                )
+                                .child(
+                                    Label::new(":")
+                                        .size(LabelSize::Small)
+                                        .color(slash_color)
+                                        .flex_shrink_0(),
+                                )
+                            })
                             .child(label)
                             .when_some(branch, |this, branch| {
                                 this.child(
