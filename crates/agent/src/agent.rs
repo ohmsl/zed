@@ -753,10 +753,6 @@ impl NativeAgent {
 
         for session in self.sessions.values_mut() {
             session.thread.update(cx, |thread, cx| {
-                // When the default model changes, update threads that
-                // don't yet have a model or haven't been used yet, so
-                // that a newly-picked environment fallback (e.g. Zed
-                // hosted models after sign in) replaces a stale choice.
                 let should_update_model = thread.model().is_none()
                     || (thread.is_empty()
                         && matches!(event, language_model::Event::DefaultModelChanged));

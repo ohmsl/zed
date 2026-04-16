@@ -358,9 +358,6 @@ impl LanguageModelRegistry {
         self.default_model = model;
     }
 
-    /// Sets the model used as the default when the user hasn't explicitly
-    /// configured a default model. Picked by authenticating all available
-    /// providers in the user's environment.
     pub fn set_environment_fallback_model(
         &mut self,
         model: Option<ConfiguredModel>,
