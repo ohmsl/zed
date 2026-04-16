@@ -180,19 +180,32 @@ fn authenticate_all_providers(registry: Entity<LanguageModelRegistry>, cx: &mut 
     for (provider_id, provider_name, authenticate_task) in providers_to_authenticate {
         tasks.push(cx.background_spawn(async move {
             if let Err(err) = authenticate_task.await {
-                if matches!(err, AuthenticateError::CredentialsNotFound) {
-                } else {
-                    // ignore noisy providers
-                    match provider_id.0.as_ref() {
-                        "lmstudio" | "ollama" => {}
-                        "copilot_chat" => {}
+                match err {
+                    AuthenticateError::CredentialsNotFound => {
+                        // We authenticate all providers in the background to
+                        // populate the language selector and pick a fallback
+                        // model, so missing credentials are expected.
+                    }
+                    AuthenticateError::ConnectionRefused => {
+                        // LM Studio only has one auth method (endpoint call)
+                        // that fails noisily for users who haven't enabled it.
+                    }
+                    _ => match provider_id.0.as_ref() {
+                        "lmstudio" | "ollama" => {
+                            // LM Studio and Ollama fetch the local API to
+                            // determine if they are "authenticated", which
+                            // fails noisily.
+                        }
+                        "copilot_chat" => {
+                            // Copilot Chat errors when Copilot is not enabled.
+                        }
                         _ => {
                             log::error!(
                                 "Failed to authenticate provider: {}: {err}",
                                 provider_name.0
                             );
                         }
-                    }
+                    },
                 }
             }
         }));
