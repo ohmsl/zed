@@ -5,7 +5,8 @@ use action_log::DiffStats;
 use agent_client_protocol::{self as acp};
 use agent_settings::AgentSettings;
 use agent_ui::thread_metadata_store::{
-    ThreadMetadata, ThreadMetadataStore, WorktreePaths, worktree_info_from_thread_paths,
+    ThreadMetadata, ThreadMetadataStore, WorktreeDisplayKind, WorktreePaths,
+    worktree_display_info_from_paths,
 };
 use agent_ui::thread_worktree_archive;
 use agent_ui::threads_archive_view::{
@@ -193,7 +194,8 @@ struct ThreadEntry {
     is_background: bool,
     is_title_generating: bool,
     highlight_positions: Vec<usize>,
-    worktrees: Vec<ThreadItemWorktreeInfo>,
+    worktree: Option<ThreadItemWorktreeInfo>,
+    branch_name: Option<SharedString>,
     diff_stats: DiffStats,
 }
 
@@ -1004,8 +1006,17 @@ impl Sidebar {
                 let make_thread_entry =
                     |row: ThreadMetadata, workspace: ThreadEntryWorkspace| -> ThreadEntry {
                         let (icon, icon_from_external_svg) = resolve_agent_icon(&row.agent_id);
-                        let worktrees =
-                            worktree_info_from_thread_paths(&row.worktree_paths, &branch_by_path);
+                        let display_infos =
+                            worktree_display_info_from_paths(&row.worktree_paths, &branch_by_path);
+                        let linked = display_infos
+                            .iter()
+                            .find(|i| i.kind == WorktreeDisplayKind::Linked);
+                        let worktree = linked.map(|wt| ThreadItemWorktreeInfo {
+                            name: wt.name.clone(),
+                            full_path: wt.full_path.clone(),
+                            highlight_positions: Vec::new(),
+                        });
+                        let branch_name = linked.and_then(|wt| wt.branch_name.clone());
                         ThreadEntry {
                             metadata: row,
                             icon,
@@ -1016,7 +1027,8 @@ impl Sidebar {
                             is_background: false,
                             is_title_generating: false,
                             highlight_positions: Vec::new(),
-                            worktrees,
+                            worktree,
+                            branch_name,
                             diff_stats: DiffStats::default(),
                         }
                     };
@@ -3368,15 +3380,8 @@ impl Sidebar {
                         metadata: thread.metadata.clone(),
                         workspace,
                         project_name: current_header_label.clone(),
-                        worktrees: thread
-                            .worktrees
-                            .iter()
-                            .cloned()
-                            .map(|mut wt| {
-                                wt.highlight_positions = Vec::new();
-                                wt
-                            })
-                            .collect(),
+                        worktree: thread.worktree.clone(),
+                        branch_name: thread.branch_name.clone(),
                         diff_stats: thread.diff_stats,
                         is_title_generating: thread.is_title_generating,
                         notified,
@@ -3636,7 +3641,10 @@ impl Sidebar {
             .when_some(thread.icon_from_external_svg.clone(), |this, svg| {
                 this.custom_icon_from_external_svg(svg)
             })
-            .worktrees(thread.worktrees.clone())
+            .when_some(thread.worktree.clone(), |this, wt| this.worktree(wt))
+            .when_some(thread.branch_name.clone(), |this, name| {
+                this.branch_name(name)
+            })
             .timestamp(timestamp)
             .highlight_positions(thread.highlight_positions.to_vec())
             .title_generating(thread.is_title_generating)
