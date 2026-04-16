@@ -1187,7 +1187,7 @@ impl Sidebar {
                         thread.highlight_positions = positions;
                     }
                     let mut worktree_matched = false;
-                    for worktree in &mut thread.worktrees {
+                    if let Some(ref mut worktree) = thread.worktree {
                         if let Some(positions) = fuzzy_match_positions(&query, &worktree.name) {
                             worktree.highlight_positions = positions;
                             worktree_matched = true;
