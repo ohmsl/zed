@@ -5,7 +5,8 @@ use std::sync::Arc;
 use crate::agent_connection_store::AgentConnectionStore;
 
 use crate::thread_metadata_store::{
-    ThreadId, ThreadMetadata, ThreadMetadataStore, worktree_info_from_thread_paths,
+    ThreadId, ThreadMetadata, ThreadMetadataStore, WorktreeDisplayKind,
+    worktree_display_info_from_paths,
 };
 use crate::{Agent, DEFAULT_THREAD_TITLE, RemoveSelectedThread};
 
@@ -32,7 +33,8 @@ use settings::Settings as _;
 use theme::ActiveTheme;
 use ui::{
     AgentThreadStatus, Divider, KeyBinding, ListItem, ListItemSpacing, ListSubHeader, Tab,
-    ThreadItem, Tooltip, WithScrollbar, prelude::*, utils::platform_title_bar_height,
+    ThreadItem, ThreadItemWorktreeInfo, Tooltip, WithScrollbar, prelude::*,
+    utils::platform_title_bar_height,
 };
 use ui_input::ErasedEditor;
 use util::ResultExt;
@@ -600,12 +602,34 @@ impl ThreadsArchiveView {
                     })
                     .unwrap_or_default();
 
-                let worktrees = worktree_info_from_thread_paths(
+                let display_infos = worktree_display_info_from_paths(
                     &thread.worktree_paths,
                     &branch_names_for_thread,
                 );
+                let linked = display_infos
+                    .iter()
+                    .find(|i| i.kind == WorktreeDisplayKind::Linked);
+                let worktree = linked.map(|wt| ThreadItemWorktreeInfo {
+                    name: wt.name.clone(),
+                    full_path: wt.full_path.clone(),
+                    highlight_positions: Vec::new(),
+                });
+
+                let branch_name = linked.and_then(|wt| wt.branch_name.clone());
 
                 let archived_color = Color::Custom(cx.theme().colors().text_muted.opacity(0.85));
+
+                let project_name: Option<String> = {
+                    let names: String = thread
+                        .folder_paths()
+                        .paths_owned()
+                        .iter()
+                        .filter_map(|p| p.file_name())
+                        .filter_map(|name| name.to_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if names.is_empty() { None } else { Some(names) }
+                };
 
                 let base = ThreadItem::new(id, thread.display_title())
                     .icon(icon)
@@ -616,10 +640,11 @@ impl ThreadsArchiveView {
                     .when_some(icon_from_external_svg, |this, svg| {
                         this.custom_icon_from_external_svg(svg)
                     })
-                    .timestamp(timestamp)
                     .highlight_positions(highlight_positions.clone())
-                    .project_paths(thread.folder_paths().paths_owned())
-                    .worktrees(worktrees)
+                    .when_some(project_name, |this, name| this.project_name(name))
+                    .when_some(worktree, |this, wt| this.worktree(wt))
+                    .when_some(branch_name, |this, name| this.branch_name(name))
+                    .timestamp(timestamp)
                     .focused(is_focused)
                     .hovered(is_hovered)
                     .on_hover(cx.listener(move |this, is_hovered, _window, cx| {

@@ -350,22 +350,10 @@ fn request_test_tool_authorization(
     cx.run_until_parked();
 }
 
-fn format_linked_worktree_chips(worktrees: &[ThreadItemWorktreeInfo]) -> String {
-    let mut seen = Vec::new();
-    let mut chips = Vec::new();
-    for wt in worktrees {
-        if wt.kind == ui::WorktreeKind::Main {
-            continue;
-        }
-        if !seen.contains(&wt.name) {
-            seen.push(wt.name.clone());
-            chips.push(format!("{{{}}}", wt.name));
-        }
-    }
-    if chips.is_empty() {
-        String::new()
-    } else {
-        format!(" {}", chips.join(", "))
+fn format_linked_worktree_chips(worktree: Option<&ThreadItemWorktreeInfo>) -> String {
+    match worktree {
+        Some(wt) => format!(" {{{}}}", wt.name),
+        None => String::new(),
     }
 }
 
@@ -401,7 +389,7 @@ fn visible_entries_as_strings(
                     }
                     ListEntry::Thread(thread) => {
                         let title = thread.metadata.display_title();
-                        let worktree = format_linked_worktree_chips(&thread.worktrees);
+                        let worktree = format_linked_worktree_chips(thread.worktree.as_ref());
 
                         {
                             let live = if thread.is_live { " *" } else { "" };
@@ -781,7 +769,8 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 is_background: false,
                 is_title_generating: false,
                 highlight_positions: Vec::new(),
-                worktrees: Vec::new(),
+                worktree: None,
+                branch_name: None,
                 diff_stats: DiffStats::default(),
             }),
             // Active thread with Running status
@@ -805,7 +794,8 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 is_background: false,
                 is_title_generating: false,
                 highlight_positions: Vec::new(),
-                worktrees: Vec::new(),
+                worktree: None,
+                branch_name: None,
                 diff_stats: DiffStats::default(),
             }),
             // Active thread with Error status
@@ -829,7 +819,8 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 is_background: false,
                 is_title_generating: false,
                 highlight_positions: Vec::new(),
-                worktrees: Vec::new(),
+                worktree: None,
+                branch_name: None,
                 diff_stats: DiffStats::default(),
             }),
             // Thread with WaitingForConfirmation status, not active
@@ -854,7 +845,8 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 is_background: false,
                 is_title_generating: false,
                 highlight_positions: Vec::new(),
-                worktrees: Vec::new(),
+                worktree: None,
+                branch_name: None,
                 diff_stats: DiffStats::default(),
             }),
             // Background thread that completed (should show notification)
@@ -879,7 +871,8 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 is_background: true,
                 is_title_generating: false,
                 highlight_positions: Vec::new(),
-                worktrees: Vec::new(),
+                worktree: None,
+                branch_name: None,
                 diff_stats: DiffStats::default(),
             }),
             // Collapsed project header
@@ -3720,7 +3713,7 @@ async fn test_clicking_worktree_thread_does_not_briefly_render_as_separate_proje
                 }
                 ListEntry::Thread(thread)
                     if thread.metadata.title.as_ref().map(|t| t.as_ref()) == Some("WT Thread")
-                        && thread.worktrees.first().map(|wt| wt.name.as_ref())
+                        && thread.worktree.as_ref().map(|wt| wt.name.as_ref())
                             == Some("wt-feature-a") =>
                 {
                     saw_expected_thread = true;
@@ -3728,8 +3721,8 @@ async fn test_clicking_worktree_thread_does_not_briefly_render_as_separate_proje
                 ListEntry::Thread(thread) => {
                     let title = thread.metadata.display_title();
                     let worktree_name = thread
-                        .worktrees
-                        .first()
+                        .worktree
+                        .as_ref()
                         .map(|wt| wt.name.as_ref())
                         .unwrap_or("<none>");
                     panic!(
@@ -10254,9 +10247,9 @@ fn test_worktree_info_branch_names_for_main_worktrees() {
             .into_iter()
             .collect();
 
-    let infos = worktree_info_from_thread_paths(&worktree_paths, &branch_by_path);
+    let infos = worktree_display_info_from_paths(&worktree_paths, &branch_by_path);
     assert_eq!(infos.len(), 1);
-    assert_eq!(infos[0].kind, ui::WorktreeKind::Main);
+    assert_eq!(infos[0].kind, WorktreeDisplayKind::Main);
     assert_eq!(infos[0].branch_name, Some(SharedString::from("feature-x")));
     assert_eq!(infos[0].name, SharedString::from("myapp"));
 }
@@ -10275,9 +10268,9 @@ fn test_worktree_info_branch_names_for_linked_worktrees() {
     .into_iter()
     .collect();
 
-    let infos = worktree_info_from_thread_paths(&worktree_paths, &branch_by_path);
+    let infos = worktree_display_info_from_paths(&worktree_paths, &branch_by_path);
     assert_eq!(infos.len(), 1);
-    assert_eq!(infos[0].kind, ui::WorktreeKind::Linked);
+    assert_eq!(infos[0].kind, WorktreeDisplayKind::Linked);
     assert_eq!(
         infos[0].branch_name,
         Some(SharedString::from("feature-branch"))
@@ -10291,9 +10284,9 @@ fn test_worktree_info_missing_branch_returns_none() {
 
     let branch_by_path: HashMap<PathBuf, SharedString> = HashMap::new();
 
-    let infos = worktree_info_from_thread_paths(&worktree_paths, &branch_by_path);
+    let infos = worktree_display_info_from_paths(&worktree_paths, &branch_by_path);
     assert_eq!(infos.len(), 1);
-    assert_eq!(infos[0].kind, ui::WorktreeKind::Main);
+    assert_eq!(infos[0].kind, WorktreeDisplayKind::Main);
     assert_eq!(infos[0].branch_name, None);
     assert_eq!(infos[0].name, SharedString::from("myapp"));
 }
