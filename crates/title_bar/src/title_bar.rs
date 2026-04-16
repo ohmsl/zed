@@ -54,7 +54,6 @@ pub use onboarding_banner::restore_banner;
 
 const MAX_PROJECT_NAME_LENGTH: usize = 40;
 const MAX_BRANCH_NAME_LENGTH: usize = 40;
-const MAX_SHORT_SHA_LENGTH: usize = 8;
 
 actions!(
     collab,
@@ -816,26 +815,18 @@ impl TitleBar {
         repository: Entity<project::git_store::Repository>,
         linked_worktree_name: Option<SharedString>,
         cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement> {
+    ) -> Option<AnyElement> {
         let workspace = self.workspace.upgrade()?;
 
-        let (branch_name, icon_info) = {
-            let repo = repository.read(cx);
+        let repo = repository.read(cx);
+        let has_branch = repo.branch.is_some();
 
+        if has_branch {
             let branch_name = repo
                 .branch
                 .as_ref()
                 .map(|branch| branch.name())
-                .map(|name| util::truncate_and_trailoff(name, MAX_BRANCH_NAME_LENGTH))
-                .or_else(|| {
-                    repo.head_commit.as_ref().map(|commit| {
-                        commit
-                            .sha
-                            .chars()
-                            .take(MAX_SHORT_SHA_LENGTH)
-                            .collect::<String>()
-                    })
-                });
+                .map(|name| util::truncate_and_trailoff(name, MAX_BRANCH_NAME_LENGTH))?;
 
             let status = repo.status_summary();
             let tracked = status.index + status.worktree;
@@ -851,68 +842,136 @@ impl TitleBar {
                 (IconName::GitBranch, Color::Muted)
             };
 
-            (branch_name, icon_info)
-        };
+            let settings = TitleBarSettings::get_global(cx);
+            let effective_repository = Some(repository);
 
-        let branch_name = branch_name?;
-        let settings = TitleBarSettings::get_global(cx);
-        let effective_repository = Some(repository);
-
-        Some(
-            PopoverMenu::new("branch-menu")
-                .menu(move |window, cx| {
-                    Some(git_ui::git_picker::popover(
-                        workspace.downgrade(),
-                        effective_repository.clone(),
-                        git_ui::git_picker::GitPickerTab::Branches,
-                        gpui::rems(34.),
-                        window,
-                        cx,
-                    ))
-                })
-                .trigger_with_tooltip(
-                    ButtonLike::new("project_branch_trigger")
-                        .selected_style(ButtonStyle::Tinted(TintColor::Accent))
-                        .child(
-                            h_flex()
-                                .gap_0p5()
-                                .when(settings.show_branch_icon, |this| {
-                                    let (icon, icon_color) = icon_info;
-                                    this.child(
-                                        Icon::new(icon).size(IconSize::XSmall).color(icon_color),
-                                    )
-                                })
-                                .when_some(linked_worktree_name.as_ref(), |this, worktree_name| {
-                                    this.child(
-                                        Label::new(worktree_name)
-                                            .size(LabelSize::Small)
-                                            .color(Color::Muted),
+            Some(
+                PopoverMenu::new("branch-menu")
+                    .menu(move |window, cx| {
+                        Some(git_ui::git_picker::popover(
+                            workspace.downgrade(),
+                            effective_repository.clone(),
+                            git_ui::git_picker::GitPickerTab::Branches,
+                            gpui::rems(34.),
+                            window,
+                            cx,
+                        ))
+                    })
+                    .trigger_with_tooltip(
+                        ButtonLike::new("project_branch_trigger")
+                            .selected_style(ButtonStyle::Tinted(TintColor::Accent))
+                            .child(
+                                h_flex()
+                                    .gap_0p5()
+                                    .when(settings.show_branch_icon, |this| {
+                                        let (icon, icon_color) = icon_info;
+                                        this.child(
+                                            Icon::new(icon)
+                                                .size(IconSize::XSmall)
+                                                .color(icon_color),
+                                        )
+                                    })
+                                    .when_some(
+                                        linked_worktree_name.as_ref(),
+                                        |this, worktree_name| {
+                                            this.child(
+                                                Label::new(worktree_name)
+                                                    .size(LabelSize::Small)
+                                                    .color(Color::Muted),
+                                            )
+                                            .child(
+                                                Label::new("/").size(LabelSize::Small).color(
+                                                    Color::Custom(
+                                                        cx.theme()
+                                                            .colors()
+                                                            .text_muted
+                                                            .opacity(0.4),
+                                                    ),
+                                                ),
+                                            )
+                                        },
                                     )
                                     .child(
-                                        Label::new("/").size(LabelSize::Small).color(
-                                            Color::Custom(
-                                                cx.theme().colors().text_muted.opacity(0.4),
-                                            ),
-                                        ),
-                                    )
-                                })
-                                .child(
-                                    Label::new(branch_name)
-                                        .size(LabelSize::Small)
-                                        .color(Color::Muted),
-                                ),
-                        ),
-                    move |_window, cx| {
-                        Tooltip::with_meta(
-                            "Git Switcher",
-                            Some(&zed_actions::git::Branch),
-                            "Worktrees, Branches, and Stashes",
-                            cx,
+                                        Label::new(branch_name)
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    ),
+                            ),
+                        move |_window, cx| {
+                            Tooltip::with_meta(
+                                "Git Switcher",
+                                Some(&zed_actions::git::Branch),
+                                "Worktrees, Branches, and Stashes",
+                                cx,
+                            )
+                        },
+                    )
+                    .anchor(gpui::Corner::TopLeft)
+                    .into_any_element(),
+            )
+        } else if repo.head_commit.is_some() {
+            let border_color = cx.theme().colors().border;
+            let effective_repository = Some(repository.clone());
+
+            Some(
+                h_flex()
+                    .gap_0p5()
+                    .when_some(linked_worktree_name, |this, worktree_name| {
+                        this.child(
+                            Label::new(worktree_name)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
                         )
-                    },
-                )
-                .anchor(gpui::Corner::TopLeft),
-        )
+                    })
+                    .child(
+                        PopoverMenu::new("create-branch-menu")
+                            .menu(move |window, cx| {
+                                Some(git_ui::git_picker::popover(
+                                    workspace.downgrade(),
+                                    effective_repository.clone(),
+                                    git_ui::git_picker::GitPickerTab::Branches,
+                                    gpui::rems(34.),
+                                    window,
+                                    cx,
+                                ))
+                            })
+                            .trigger_with_tooltip(
+                                ButtonLike::new("create_branch_trigger")
+                                    .child(
+                                        h_flex()
+                                            .gap_1()
+                                            .rounded_sm()
+                                            .border_1()
+                                            .border_color(border_color)
+                                            .px_1()
+                                            .py_0p5()
+                                            .child(
+                                                Icon::new(IconName::GitBranch)
+                                                    .size(IconSize::XSmall)
+                                                    .color(Color::Muted),
+                                            )
+                                            .child(
+                                                Label::new("Establish a Branch")
+                                                    .size(LabelSize::Small)
+                                                    .color(Color::Muted),
+                                            ),
+                                    ),
+                                move |_window, cx| {
+                                    Tooltip::with_meta(
+                                        "Establish a Branch",
+                                        Some(&zed_actions::git::Branch),
+                                        "Create a branch from the current detached HEAD",
+                                        cx,
+                                    )
+                                },
+                            )
+                            .anchor(gpui::Corner::TopLeft),
+                    )
+                    .into_any_element(),
+            )
+        } else {
+            None
+        }
     }
 
     fn window_activation_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
