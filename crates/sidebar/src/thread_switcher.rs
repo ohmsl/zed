@@ -18,7 +18,8 @@ pub(crate) struct ThreadSwitcherEntry {
     pub metadata: ThreadMetadata,
     pub workspace: Entity<Workspace>,
     pub project_name: Option<SharedString>,
-    pub worktrees: Vec<ThreadItemWorktreeInfo>,
+    pub worktree: Option<ThreadItemWorktreeInfo>,
+    pub branch_name: Option<SharedString>,
     pub diff_stats: DiffStats,
     pub is_title_generating: bool,
     pub notified: bool,
@@ -146,6 +147,15 @@ impl ThreadSwitcher {
         }
     }
 
+    fn select_index(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.entries.len() || index == self.selected_index {
+            return;
+        }
+        self.selected_index = index;
+        self.emit_preview(cx);
+        cx.notify();
+    }
+
     fn cancel(&mut self, _: &menu::Cancel, _window: &mut gpui::Window, cx: &mut Context<Self>) {
         cx.emit(ThreadSwitcherEvent::Dismissed);
         cx.emit(DismissEvent);
@@ -213,37 +223,36 @@ impl Render for ThreadSwitcher {
             .children(self.entries.iter().enumerate().map(|(ix, entry)| {
                 let id = SharedString::from(format!("thread-switcher-{}", entry.session_id));
 
-                div()
-                    .id(id.clone())
-                    .on_click(
-                        cx.listener(move |this, _event: &gpui::ClickEvent, _window, cx| {
-                            this.select_and_confirm(ix, cx);
-                        }),
-                    )
-                    .child(
-                        ThreadItem::new(id, entry.title.clone())
-                            .rounded(true)
-                            .icon(entry.icon)
-                            .status(entry.status)
-                            .when_some(entry.icon_from_external_svg.clone(), |this, svg| {
-                                this.custom_icon_from_external_svg(svg)
-                            })
-                            .when_some(entry.project_name.clone(), |this, name| {
-                                this.project_name(name)
-                            })
-                            .worktrees(entry.worktrees.clone())
-                            .timestamp(entry.timestamp.clone())
-                            .title_generating(entry.is_title_generating)
-                            .notified(entry.notified)
-                            .when(entry.diff_stats.lines_added > 0, |this| {
-                                this.added(entry.diff_stats.lines_added as usize)
-                            })
-                            .when(entry.diff_stats.lines_removed > 0, |this| {
-                                this.removed(entry.diff_stats.lines_removed as usize)
-                            })
-                            .selected(ix == selected_index)
-                            .base_bg(cx.theme().colors().elevated_surface_background),
-                    )
+                ThreadItem::new(id, entry.title.clone())
+                    .rounded(true)
+                    .icon(entry.icon)
+                    .status(entry.status)
+                    .when_some(entry.icon_from_external_svg.clone(), |this, svg| {
+                        this.custom_icon_from_external_svg(svg)
+                    })
+                    .when_some(entry.project_name.clone(), |this, name| {
+                        this.project_name(name)
+                    })
+                    .when_some(entry.worktree.clone(), |this, wt| this.worktree(wt))
+                    .when_some(entry.branch_name.clone(), |this, name| {
+                        this.branch_name(name)
+                    })
+                    .timestamp(entry.timestamp.clone())
+                    .title_generating(entry.is_title_generating)
+                    .notified(entry.notified)
+                    .when(entry.diff_stats.lines_added > 0, |this| {
+                        this.added(entry.diff_stats.lines_added as usize)
+                    })
+                    .when(entry.diff_stats.lines_removed > 0, |this| {
+                        this.removed(entry.diff_stats.lines_removed as usize)
+                    })
+                    .selected(ix == selected_index)
+                    .base_bg(cx.theme().colors().elevated_surface_background)
+                    .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+                        if *hovered {
+                            this.select_index(ix, cx);
+                        }
+                    }))
                     .into_any_element()
             }))
     }
