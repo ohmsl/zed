@@ -2856,7 +2856,7 @@ impl Fs for FakeFs {
                     .lock()
                     .trash
                     .lock()
-                    .insert((trashed_entry.clone(), fake_entry));
+                    .insert((trashed_entry, fake_entry));
 
                 Ok(trash_id)
             }

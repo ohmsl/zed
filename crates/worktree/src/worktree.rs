@@ -1062,7 +1062,7 @@ impl Worktree {
         let entry = task.await?;
 
         Ok(proto::RestoreProjectEntryResponse {
-            entry_id: entry.id.to_proto(),
+            entry: Some(proto::Entry::from(&entry)),
             worktree_scan_id: scan_id as u64,
         })
     }
@@ -2261,21 +2261,15 @@ impl RemoteWorktree {
         cx.spawn(async move |this, cx| {
             let response = request.await?;
             let scan_id = response.worktree_scan_id as usize;
-            let entry_id = ProjectEntryId(response.entry_id as usize);
+            let proto_entry = response.entry.context("Missing entry in in response")?;
 
-            let (task, entry) = this.update(cx, |worktree, cx| {
-                // TODO!(dino): Remove `entry_for_id(entry_id).unwrap()` call,
-                // avoid unwrapping.
-                let remote_worktree = worktree.as_remote_mut().unwrap();
-                let entry = remote_worktree.entry_for_id(entry_id).unwrap().clone();
-                let proto_entry = proto::Entry::from(&entry);
-                let task = remote_worktree.insert_entry(proto_entry, scan_id, cx);
-
-                (task, entry)
-            })?;
-
-            task.await?;
-            Ok(entry)
+            this.update(cx, move |worktree, cx| {
+                worktree
+                    .as_remote_mut()
+                    .unwrap()
+                    .insert_entry(proto_entry, scan_id, cx)
+            })?
+            .await
         })
     }
 

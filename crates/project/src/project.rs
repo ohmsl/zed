@@ -2620,7 +2620,7 @@ impl Project {
 
             Ok(ProjectPath {
                 worktree_id: worktree_id,
-                path: entry.path.clone(),
+                path: entry.path,
             })
         })
     }
