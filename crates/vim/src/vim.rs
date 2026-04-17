@@ -55,7 +55,7 @@ use theme_settings::ThemeSettings;
 use ui::{IntoElement, SharedString, px};
 use vim_mode_setting::HelixModeSetting;
 use vim_mode_setting::VimModeSetting;
-use workspace::{self, Pane, Workspace};
+use workspace::{self, ItemHandle, Pane, Workspace};
 
 use crate::{
     normal::{GoToPreviousTab, GoToTab},
@@ -1236,6 +1236,8 @@ impl Vim {
             }
         }
 
+        self.maybe_autosave_on_exit_insert_mode(last_mode, window, cx);
+
         if leave_selections {
             return;
         }
@@ -1572,6 +1574,34 @@ impl Vim {
         self.update_editor(cx, |vim, editor, cx| {
             editor.set_cursor_shape(vim.cursor_shape(cx), cx);
         });
+    }
+
+    fn maybe_autosave_on_exit_insert_mode(
+        &mut self,
+        last_mode: Mode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let should_autosave = last_mode.counts_as_insert_for_autosave()
+            && !self.mode.counts_as_insert_for_autosave()
+            && !self.temp_mode;
+        if !should_autosave {
+            return;
+        }
+
+        let Some(editor) = self.editor.upgrade() else {
+            return;
+        };
+
+        let Some(workspace) = self.workspace(window, cx) else {
+            return;
+        };
+        
+        if editor.workspace_settings(cx).autosave != settings::AutosaveSetting::OnExitInsertMode {
+            return;
+        }
+        let project = workspace.read(cx).project().clone();
+        Pane::autosave_item(&editor, project, window, cx).detach_and_log_err(cx);
     }
 
     fn update_editor<S>(

@@ -1217,7 +1217,7 @@
   "document_symbols": "off",
 
   // When to automatically save edited buffers. This setting can
-  // take four values.
+  // take five values.
   //
   // 1. Never automatically save:
   //     "autosave": "off",
@@ -1227,6 +1227,9 @@
   //     "autosave": "on_focus_change",
   // 4. Save when idle for a certain amount of time:
   //     "autosave": { "after_delay": {"milliseconds": 500} },
+  // 5. Save when exiting insert mode (only applies when Vim or Helix mode is
+  //    enabled; has no effect otherwise):
+  //     "autosave": "on_exit_insert_mode",
   "autosave": "off",
   // Maximum number of tabs per pane. Unset for unlimited.
   "max_tabs": null,

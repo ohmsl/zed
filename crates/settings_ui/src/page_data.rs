@@ -1410,6 +1410,9 @@ fn editor_page() -> SettingsPage {
                                 settings::AutosaveSettingDiscriminants::OnWindowChange => {
                                     settings::AutosaveSetting::OnWindowChange
                                 }
+                                settings::AutosaveSettingDiscriminants::OnExitInsertMode => {
+                                    settings::AutosaveSetting::OnExitInsertMode
+                                }
                             };
                         },
                     }),
@@ -1455,6 +1458,7 @@ fn editor_page() -> SettingsPage {
                         }],
                         settings::AutosaveSettingDiscriminants::OnFocusChange => vec![],
                         settings::AutosaveSettingDiscriminants::OnWindowChange => vec![],
+                        settings::AutosaveSettingDiscriminants::OnExitInsertMode => vec![],
                     })
                     .collect(),
             }),

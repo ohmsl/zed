@@ -78,6 +78,12 @@ impl Mode {
     pub fn is_helix(&self) -> bool {
         matches!(self, Self::HelixNormal | Self::HelixSelect)
     }
+    
+    /// Whether this mode is "insert-like" when deciding whether to autosave
+    /// when leaving insert mode
+    pub fn counts_as_insert_for_autosave(&self) -> bool {
+        matches!(self, Self::Insert | Self::Replace)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

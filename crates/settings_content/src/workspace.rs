@@ -547,6 +547,11 @@ pub enum AutosaveSetting {
     OnFocusChange,
     /// Autosave when the active window changes.
     OnWindowChange,
+    /// Autosave when exiting insert mode.
+    ///
+    /// Only applies when Vim or Helix mode is enabled; has no effect
+    /// otherwise.
+    OnExitInsertMode,
 }
 
 impl AutosaveSetting {
