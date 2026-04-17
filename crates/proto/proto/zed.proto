@@ -478,7 +478,9 @@ message Envelope {
     GitGetHeadSha git_get_head_sha = 440;
     GitGetHeadShaResponse git_get_head_sha_response = 441;
     TrashProjectEntry trash_project_entry = 442;
-    TrashProjectEntryResponse trash_project_entry_response = 443; // current max
+    TrashProjectEntryResponse trash_project_entry_response = 443;
+    RestoreProjectEntry restore_project_entry = 444;
+    RestoreProjectEntryResponse restore_project_entry_response = 445; // current max
   }
 
   reserved 87 to 88;

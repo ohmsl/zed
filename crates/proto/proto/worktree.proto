@@ -125,6 +125,12 @@ message TrashProjectEntry {
   uint64 entry_id = 2;
 }
 
+message RestoreProjectEntry {
+  uint64 project_id = 1;
+  uint64 worktree_id = 2;
+  uint64 trash_id = 3;
+}
+
 message ExpandProjectEntry {
   uint64 project_id = 1;
   uint64 entry_id = 2;
@@ -151,6 +157,11 @@ message ProjectEntryResponse {
 
 message TrashProjectEntryResponse {
   uint64 trash_id = 1;
+  uint64 worktree_scan_id = 2;
+}
+
+message RestoreProjectEntryResponse {
+  uint64 entry_id = 1;
   uint64 worktree_scan_id = 2;
 }
 

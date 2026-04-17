@@ -71,7 +71,7 @@ use text::{LineEnding, Rope};
 use util::{
     ResultExt, maybe,
     paths::{PathMatcher, PathStyle, SanitizedPath, home_dir},
-    rel_path::{RelPath, RelPathBuf},
+    rel_path::RelPath,
 };
 pub use worktree_settings::WorktreeSettings;
 
@@ -896,16 +896,14 @@ impl Worktree {
         Some(task)
     }
 
-    pub async fn restore_entry(
+    pub fn restore_entry(
+        &mut self,
         trash_id: TrashId,
-        worktree: Entity<Self>,
-        cx: &mut AsyncApp,
-    ) -> Result<RelPathBuf> {
-        let is_local = worktree.read_with(cx, |this, _| this.is_local());
-        if is_local {
-            LocalWorktree::restore_entry(trash_id, worktree, cx).await
-        } else {
-            RemoteWorktree::restore_entry(trash_id, worktree, cx).await
+        cx: &mut Context<'_, Worktree>,
+    ) -> Task<Result<Entry>> {
+        match self {
+            Worktree::Local(this) => this.restore_entry(trash_id, cx),
+            Worktree::Remote(this) => this.restore_entry(trash_id, cx),
         }
     }
 
@@ -1045,6 +1043,26 @@ impl Worktree {
             .await?;
         Ok(proto::ProjectEntryResponse {
             entry: None,
+            worktree_scan_id: scan_id as u64,
+        })
+    }
+
+    pub async fn handle_restore_entry(
+        this: Entity<Self>,
+        request: proto::RestoreProjectEntry,
+        mut cx: AsyncApp,
+    ) -> Result<proto::RestoreProjectEntryResponse> {
+        let (scan_id, task) = this.update(&mut cx, |this, cx| {
+            (
+                this.scan_id(),
+                this.restore_entry(TrashId::from_u64(request.trash_id), cx),
+            )
+        });
+
+        let entry = task.await?;
+
+        Ok(proto::RestoreProjectEntryResponse {
+            entry_id: entry.id.to_proto(),
             worktree_scan_id: scan_id as u64,
         })
     }
@@ -1784,32 +1802,31 @@ impl LocalWorktree {
         })
     }
 
-    pub async fn restore_entry(
-        trash_entry: TrashId,
-        this: Entity<Worktree>,
-        cx: &mut AsyncApp,
-    ) -> Result<RelPathBuf> {
-        let Some((fs, worktree_abs_path, path_style)) = this.read_with(cx, |this, _cx| {
-            let local_worktree = match this {
-                Worktree::Local(local_worktree) => local_worktree,
-                Worktree::Remote(_) => return None,
-            };
+    pub fn restore_entry(
+        &mut self,
+        trash_id: TrashId,
+        cx: &mut Context<'_, Worktree>,
+    ) -> Task<Result<Entry>> {
+        let fs = self.fs.clone();
+        let worktree_abs_path = self.abs_path().clone();
+        let path_style = self.path_style();
 
-            let fs = local_worktree.fs.clone();
-            let path_style = local_worktree.path_style();
-            Some((fs, Arc::clone(local_worktree.abs_path()), path_style))
-        }) else {
-            return Err(anyhow!("Localworktree should not change into a remote one"));
-        };
+        cx.spawn(async move |this, cx| {
+            let path_buf = fs.restore(trash_id).await?;
+            let path = path_buf
+                .strip_prefix(worktree_abs_path)
+                .context("Could not strip prefix")?;
+            let path = Arc::from(RelPath::new(&path, path_style)?.as_ref());
 
-        let path_buf = fs.restore(trash_entry).await?;
-        let path = path_buf
-            .strip_prefix(worktree_abs_path)
-            .context("Could not strip prefix")?;
-        let path = RelPath::new(&path, path_style)?;
-        let path = path.into_owned();
+            let entry = this
+                .update(cx, |this, cx| {
+                    this.as_local_mut().unwrap().refresh_entry(path, None, cx)
+                })?
+                .await?
+                .context("Entry not found after restore")?;
 
-        Ok(path)
+            Ok(entry)
+        })
     }
 
     pub fn copy_external_entries(
@@ -2227,6 +2244,38 @@ impl RemoteWorktree {
                 snapshot.delete_entry(entry_id);
                 this.snapshot = snapshot.clone();
             })
+        })
+    }
+
+    fn restore_entry(&mut self, trash_id: TrashId, cx: &Context<Worktree>) -> Task<Result<Entry>> {
+        let project_id = self.project_id();
+        let worktree_id = self.id().to_proto();
+        let trash_id = trash_id.to_u64();
+
+        let request = self.client.request(proto::RestoreProjectEntry {
+            project_id,
+            worktree_id,
+            trash_id,
+        });
+
+        cx.spawn(async move |this, cx| {
+            let response = request.await?;
+            let scan_id = response.worktree_scan_id as usize;
+            let entry_id = ProjectEntryId(response.entry_id as usize);
+
+            let (task, entry) = this.update(cx, |worktree, cx| {
+                // TODO!(dino): Remove `entry_for_id(entry_id).unwrap()` call,
+                // avoid unwrapping.
+                let remote_worktree = worktree.as_remote_mut().unwrap();
+                let entry = remote_worktree.entry_for_id(entry_id).unwrap().clone();
+                let proto_entry = proto::Entry::from(&entry);
+                let task = remote_worktree.insert_entry(proto_entry, scan_id, cx);
+
+                (task, entry)
+            })?;
+
+            task.await?;
+            Ok(entry)
         })
     }
 
