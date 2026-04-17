@@ -3192,12 +3192,16 @@ impl AgentPanel {
             WorktreeCreationArgs::New { .. } => "worktree".into(),
             WorktreeCreationArgs::Linked { display_name, .. } => display_name.clone().into(),
         };
+        let global_label = display_name.clone();
         let status = if matches!(args, WorktreeCreationArgs::Linked { .. }) {
             WorktreeCreationStatus::Loading(display_name)
         } else {
             WorktreeCreationStatus::Creating(display_name)
         };
         self.worktree_creation_status = Some((conversation_view_id, status));
+        cx.set_global(workspace::ActiveWorktreeCreation {
+            label: Some(global_label),
+        });
         cx.notify();
 
         let (git_repos, non_git_paths) = self.classify_worktrees(cx);
@@ -3621,6 +3625,7 @@ impl AgentPanel {
 
         this.update_in(cx, |this, window, cx| {
             this.worktree_creation_status = None;
+            cx.set_global(workspace::ActiveWorktreeCreation { label: None });
 
             if let Some(thread_view) = this.active_thread_view(cx) {
                 thread_view.update(cx, |thread_view, cx| {
@@ -4510,6 +4515,7 @@ impl AgentPanel {
                             .tooltip(Tooltip::text("Dismiss"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.worktree_creation_status = None;
+                                cx.set_global(workspace::ActiveWorktreeCreation { label: None });
                                 cx.notify();
                             })),
                     )

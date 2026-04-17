@@ -1111,6 +1111,16 @@ struct GlobalAppState(Arc<AppState>);
 
 impl Global for GlobalAppState {}
 
+/// Shared state for displaying worktree creation progress in the title bar.
+/// Written by the agent panel when creating/switching worktrees,
+/// read by the title bar to show a loading indicator on the worktree button.
+#[derive(Default)]
+pub struct ActiveWorktreeCreation {
+    pub label: Option<SharedString>,
+}
+
+impl Global for ActiveWorktreeCreation {}
+
 pub struct WorkspaceStore {
     workspaces: HashSet<(gpui::AnyWindowHandle, WeakEntity<Workspace>)>,
     client: Arc<Client>,

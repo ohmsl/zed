@@ -391,6 +391,8 @@ impl TitleBar {
         );
         subscriptions.push(cx.observe(&user_store, |_a, _, cx| cx.notify()));
         subscriptions.push(cx.observe_button_layout_changed(window, |_, _, cx| cx.notify()));
+        subscriptions
+            .push(cx.observe_global::<workspace::ActiveWorktreeCreation>(|_, cx| cx.notify()));
         if let Some(trusted_worktrees) = TrustedWorktrees::try_get_global(cx) {
             subscriptions.push(cx.subscribe(&trusted_worktrees, |_, _, _, cx| {
                 cx.notify();
@@ -863,6 +865,17 @@ impl TitleBar {
 
         let worktree_label: SharedString = linked_worktree_name.unwrap_or_else(|| "main".into());
 
+        let creation_in_progress = cx
+            .try_global::<workspace::ActiveWorktreeCreation>()
+            .and_then(|creation| creation.label.clone());
+        let is_creating = creation_in_progress.is_some();
+
+        let display_label: SharedString = if let Some(ref name) = creation_in_progress {
+            format!("Creating {}…", name).into()
+        } else {
+            worktree_label.clone()
+        };
+
         let worktree_tooltip_label = worktree_label.clone();
 
         let worktree_button = {
@@ -883,14 +896,14 @@ impl TitleBar {
                                         .color(Color::Muted),
                                 )
                                 .child(
-                                    Label::new(worktree_label)
+                                    Label::new(display_label)
                                         .size(LabelSize::Small)
                                         .color(Color::Muted),
                                 ),
                         ),
                     move |_window, cx| {
                         Tooltip::with_meta(
-                            "Worktree",
+                            "Worktree Picker",
                             Some(&zed_actions::git::Worktree),
                             format!("Currently In Use: {}", worktree_tooltip_label),
                             cx,
