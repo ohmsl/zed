@@ -67,6 +67,19 @@ impl FeatureFlag for UpdatePlanToolFeatureFlag {
     }
 }
 
+/// Gates the `create_thread` and `list_agents_and_models` tools, which let
+/// the agent spawn independent sibling threads that show up in the agent
+/// panel sidebar.
+pub struct CreateThreadToolFeatureFlag;
+
+impl FeatureFlag for CreateThreadToolFeatureFlag {
+    const NAME: &'static str = "create-thread-tool";
+
+    fn enabled_for_staff() -> bool {
+        true
+    }
+}
+
 pub struct ProjectPanelUndoRedoFeatureFlag;
 
 impl FeatureFlag for ProjectPanelUndoRedoFeatureFlag {
