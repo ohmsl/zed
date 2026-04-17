@@ -285,6 +285,17 @@ impl WorktreePickerDelegate {
         &self.all_worktrees
     }
 
+    fn creation_blocked_reason(&self, cx: &App) -> Option<SharedString> {
+        let project = self.project.read(cx);
+        if project.is_via_collab() {
+            Some("Worktree creation is not supported in collaborative projects".into())
+        } else if project.repositories(cx).is_empty() {
+            Some("Requires a Git repository in the project".into())
+        } else {
+            None
+        }
+    }
+
     fn can_delete_worktree(&self, worktree: &GitWorktree) -> bool {
         !worktree.is_main && !self.project_worktree_paths.contains(&worktree.path)
     }
@@ -550,6 +561,9 @@ impl PickerDelegate for WorktreePickerDelegate {
         match entry {
             WorktreeEntry::Separator => return,
             WorktreeEntry::CreateFromCurrentBranch => {
+                if self.creation_blocked_reason(cx).is_some() {
+                    return;
+                }
                 window.dispatch_action(
                     Box::new(CreateWorktree {
                         worktree_name: None,
@@ -561,6 +575,9 @@ impl PickerDelegate for WorktreePickerDelegate {
             WorktreeEntry::CreateFromDefaultBranch {
                 default_branch_name,
             } => {
+                if self.creation_blocked_reason(cx).is_some() {
+                    return;
+                }
                 window.dispatch_action(
                     Box::new(CreateWorktree {
                         worktree_name: None,
@@ -638,10 +655,6 @@ impl PickerDelegate for WorktreePickerDelegate {
         cx: &mut Context<Picker<Self>>,
     ) -> Option<Self::ListItem> {
         let entry = self.matches.get(ix)?;
-        let project = self.project.read(cx);
-        let is_create_disabled = project.repositories(cx).is_empty() || project.is_via_collab();
-
-        let no_git_reason: SharedString = "Requires a Git repository in the project".into();
 
         match entry {
             WorktreeEntry::Separator => Some(
@@ -661,12 +674,10 @@ impl PickerDelegate for WorktreePickerDelegate {
 
                 let label = format!("Create new worktree based on {branch_label}");
 
-                let disabled_tooltip = is_create_disabled.then(|| no_git_reason.clone());
-
                 let item = create_new_list_item(
                     "create-from-current".to_string().into(),
                     label.into(),
-                    disabled_tooltip,
+                    self.creation_blocked_reason(cx),
                     selected,
                 );
 
@@ -677,12 +688,10 @@ impl PickerDelegate for WorktreePickerDelegate {
             } => {
                 let label = format!("Create new worktree based on {default_branch_name}");
 
-                let disabled_tooltip = is_create_disabled.then(|| no_git_reason.clone());
-
                 let item = create_new_list_item(
                     "create-from-main".to_string().into(),
                     label.into(),
-                    disabled_tooltip,
+                    self.creation_blocked_reason(cx),
                     selected,
                 );
 
