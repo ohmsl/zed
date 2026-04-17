@@ -46,10 +46,11 @@ pub fn create_embedded(
     repository: Option<Entity<Repository>>,
     workspace: WeakEntity<Workspace>,
     width: Rems,
+    show_footer: bool,
     window: &mut Window,
     cx: &mut Context<StashList>,
 ) -> StashList {
-    StashList::new_embedded(repository, workspace, width, window, cx)
+    StashList::new_embedded(repository, workspace, width, show_footer, window, cx)
 }
 
 pub struct StashList {
@@ -148,10 +149,14 @@ impl StashList {
         repository: Option<Entity<Repository>>,
         workspace: WeakEntity<Workspace>,
         width: Rems,
+        show_footer: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut this = Self::new_inner(repository, workspace, width, true, window, cx);
+        this.picker.update(cx, |picker, _| {
+            picker.delegate.show_footer = show_footer;
+        });
         this._subscriptions
             .push(cx.subscribe(&this.picker, |_, _, _, cx| {
                 cx.emit(DismissEvent);

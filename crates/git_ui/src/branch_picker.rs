@@ -97,10 +97,11 @@ pub fn create_embedded(
     workspace: WeakEntity<Workspace>,
     repository: Option<Entity<Repository>>,
     width: Rems,
+    show_footer: bool,
     window: &mut Window,
     cx: &mut Context<BranchList>,
 ) -> BranchList {
-    BranchList::new_embedded(workspace, repository, width, window, cx)
+    BranchList::new_embedded(workspace, repository, width, show_footer, window, cx)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -224,6 +225,7 @@ impl BranchList {
         workspace: WeakEntity<Workspace>,
         repository: Option<Entity<Repository>>,
         width: Rems,
+        show_footer: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -236,6 +238,9 @@ impl BranchList {
             window,
             cx,
         );
+        this.picker.update(cx, |picker, _| {
+            picker.delegate.show_footer = show_footer;
+        });
         this._subscriptions
             .push(cx.subscribe(&this.picker, |_, _, _, cx| {
                 cx.emit(DismissEvent);

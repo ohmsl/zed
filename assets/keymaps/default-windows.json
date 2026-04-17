@@ -1505,6 +1505,13 @@
     },
   },
   {
+    "context": "WorktreePicker || (WorktreePicker > Picker > Editor)",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-shift-backspace": "worktree_picker::DeleteWorktree",
+    },
+  },
+  {
     "context": "NotebookEditor",
     "bindings": {
       "shift-enter": "notebook::RunAndAdvance",

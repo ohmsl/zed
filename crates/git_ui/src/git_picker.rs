@@ -97,11 +97,13 @@ impl GitPicker {
         cx: &mut Context<Self>,
     ) -> Entity<BranchList> {
         if self.branch_list.is_none() {
+            let show_footer = !self.popover_style;
             let branch_list = cx.new(|cx| {
                 branch_picker::create_embedded(
                     self.workspace.clone(),
                     self.repository.clone(),
                     self.width,
+                    show_footer,
                     window,
                     cx,
                 )
@@ -125,11 +127,13 @@ impl GitPicker {
         cx: &mut Context<Self>,
     ) -> Entity<StashList> {
         if self.stash_list.is_none() {
+            let show_footer = !self.popover_style;
             let stash_list = cx.new(|cx| {
                 stash_picker::create_embedded(
                     self.repository.clone(),
                     self.workspace.clone(),
                     self.width,
+                    show_footer,
                     window,
                     cx,
                 )
