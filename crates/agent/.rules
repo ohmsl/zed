@@ -1,0 +1,25 @@
+# Registering a new built-in agent tool
+
+Registering a tool in `Thread::add_default_tools()` and the `tools!` macro in
+`crates/agent/src/tools.rs` is **not enough** for the model to actually receive
+it. There are two additional gates that must be updated or the tool will be
+silently filtered out:
+
+1. **Built-in profiles in `assets/settings/default.json`.** The `write` and
+   `ask` profiles under `agent.profiles` each contain an explicit `tools` map
+   that acts as a per-profile allowlist. `Thread::enabled_tools()` calls
+   `profile.is_tool_enabled(name)` and excludes any tool not present with value
+   `true`. Add the new tool name to both profiles (or whichever profiles it
+   should be available in).
+
+2. **`test_all_tools_are_in_tool_info_or_excluded` in
+   `crates/settings_ui/src/pages/tool_permissions_setup.rs`.** This test walks
+   `agent::ALL_TOOL_NAMES` and asserts each entry is either in the `TOOLS`
+   permission-UI list or in `EXCLUDED_TOOLS`. Add a `ToolInfo` entry if the
+   tool has permission checks (i.e. calls `decide_permission_from_settings`);
+   otherwise add the tool name to `EXCLUDED_TOOLS` with a comment explaining
+   why it doesn't need one.
+
+The symptom of skipping step 1 is that the tool appears nowhere in the LLM's
+tool list even though it's registered and compiles fine. The symptom of
+skipping step 2 is a failing unit test in `settings_ui`.
