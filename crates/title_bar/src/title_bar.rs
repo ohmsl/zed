@@ -915,7 +915,7 @@ impl TitleBar {
                         ),
                     move |_window, cx| {
                         Tooltip::with_meta(
-                            "Worktree Picker",
+                            "Worktree",
                             Some(&zed_actions::git::Worktree),
                             format!("Currently In Use: {}", worktree_label),
                             cx,
