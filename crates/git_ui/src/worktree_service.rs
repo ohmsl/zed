@@ -19,6 +19,14 @@ use util::ResultExt as _;
 use crate::git_panel::show_error_toast;
 use crate::worktree_names;
 
+/// Whether a worktree operation is creating a new one or switching to an
+/// existing one. Controls whether the source workspace's state (dock layout,
+/// open files, agent panel draft) is inherited by the destination.
+enum WorktreeOperation {
+    Create,
+    Switch,
+}
+
 /// Classifies the project's visible worktrees into git-managed repositories
 /// and non-git paths. Each unique repository is returned only once.
 pub fn classify_worktrees(
@@ -649,6 +657,7 @@ async fn do_create_worktree(
         workspace,
         window_handle,
         remote_connection_options,
+        WorktreeOperation::Create,
         cx,
     )
     .await
@@ -682,14 +691,13 @@ async fn do_switch_worktree(
         workspace,
         window_handle,
         remote_connection_options,
+        WorktreeOperation::Switch,
         cx,
     )
     .await
 }
 
 /// Core workspace opening logic shared by both create and switch flows.
-/// Opens (or finds) a workspace for the given paths, restores dock layout,
-/// remaps previously-open files, and propagates trust.
 async fn open_worktree_workspace(
     all_paths: Vec<PathBuf>,
     path_remapping: Vec<(PathBuf, PathBuf)>,
@@ -699,6 +707,7 @@ async fn open_worktree_workspace(
     workspace: WeakEntity<Workspace>,
     window_handle: Option<gpui::WindowHandle<MultiWorkspace>>,
     remote_connection_options: Option<RemoteConnectionOptions>,
+    operation: WorktreeOperation,
     cx: &mut AsyncWindowContext,
 ) -> anyhow::Result<()> {
     let window_handle = window_handle
@@ -706,20 +715,37 @@ async fn open_worktree_workspace(
 
     let focused_dock = previous_state.focused_dock;
 
+    let is_creating_new_worktree = matches!(operation, WorktreeOperation::Create);
+
+    let source_for_transfer = if is_creating_new_worktree {
+        Some(workspace.clone())
+    } else {
+        None
+    };
+
     let (workspace_task, modal_workspace) =
         window_handle.update(cx, |multi_workspace, window, cx| {
             let path_list = util::path_list::PathList::new(&all_paths);
             let active_workspace = multi_workspace.workspace().clone();
             let modal_workspace = active_workspace.clone();
 
-            let dock_structure = previous_state.dock_structure;
-            let init = Box::new(
-                move |workspace: &mut Workspace,
-                      window: &mut gpui::Window,
-                      cx: &mut gpui::Context<Workspace>| {
-                    workspace.set_dock_structure(dock_structure, window, cx);
-                },
-            );
+            let init: Option<
+                Box<
+                    dyn FnOnce(&mut Workspace, &mut gpui::Window, &mut gpui::Context<Workspace>)
+                        + Send,
+                >,
+            > = if is_creating_new_worktree {
+                let dock_structure = previous_state.dock_structure;
+                Some(Box::new(
+                    move |workspace: &mut Workspace,
+                          window: &mut gpui::Window,
+                          cx: &mut gpui::Context<Workspace>| {
+                        workspace.set_dock_structure(dock_structure, window, cx);
+                    },
+                ))
+            } else {
+                None
+            };
 
             let task = multi_workspace.find_or_create_workspace_with_source_workspace(
                 path_list,
@@ -734,9 +760,9 @@ async fn open_worktree_workspace(
                     )
                 },
                 &[],
-                Some(init),
+                init,
                 OpenMode::Add,
-                Some(workspace.clone()),
+                source_for_transfer.clone(),
                 window,
                 cx,
             );
@@ -778,92 +804,95 @@ async fn open_worktree_workspace(
 
     maybe_propagate_worktree_trust(&workspace, &new_workspace, &all_paths, cx);
 
-    window_handle.update(cx, |_multi_workspace, window, cx| {
-        new_workspace.update(cx, |workspace, cx| {
-            if has_non_git {
-                struct WorktreeCreationToast;
-                let toast_id =
-                    workspace::notifications::NotificationId::unique::<WorktreeCreationToast>();
-                workspace.show_toast(
-                    workspace::Toast::new(
-                        toast_id,
-                        "Some project folders are not git repositories. \
-                         They were included as-is without creating a worktree.",
-                    ),
-                    cx,
-                );
-            }
+    if is_creating_new_worktree {
+        window_handle.update(cx, |_multi_workspace, window, cx| {
+            new_workspace.update(cx, |workspace, cx| {
+                if has_non_git {
+                    struct WorktreeCreationToast;
+                    let toast_id =
+                        workspace::notifications::NotificationId::unique::<WorktreeCreationToast>();
+                    workspace.show_toast(
+                        workspace::Toast::new(
+                            toast_id,
+                            "Some project folders are not git repositories. \
+                             They were included as-is without creating a worktree.",
+                        ),
+                        cx,
+                    );
+                }
 
-            // Remap every previously-open file path into the new worktree.
-            let remap_path = |original_path: PathBuf| -> Option<PathBuf> {
-                let best_match = path_remapping
-                    .iter()
-                    .filter_map(|(old_root, new_root)| {
-                        original_path.strip_prefix(old_root).ok().map(|relative| {
-                            (old_root.components().count(), new_root.join(relative))
+                // Remap every previously-open file path into the new worktree.
+                let remap_path = |original_path: PathBuf| -> Option<PathBuf> {
+                    let best_match = path_remapping
+                        .iter()
+                        .filter_map(|(old_root, new_root)| {
+                            original_path.strip_prefix(old_root).ok().map(|relative| {
+                                (old_root.components().count(), new_root.join(relative))
+                            })
                         })
+                        .max_by_key(|(depth, _)| *depth);
+
+                    if let Some((_, remapped_path)) = best_match {
+                        return Some(remapped_path);
+                    }
+
+                    for non_git in &non_git_paths {
+                        if original_path.starts_with(non_git) {
+                            return Some(original_path);
+                        }
+                    }
+                    None
+                };
+
+                let remapped_active_path =
+                    previous_state.active_file_path.and_then(|p| remap_path(p));
+
+                let mut paths_to_open: Vec<PathBuf> = Vec::new();
+                let mut seen = HashSet::default();
+                for path in previous_state.open_file_paths {
+                    if let Some(remapped) = remap_path(path) {
+                        if remapped_active_path.as_ref() != Some(&remapped)
+                            && seen.insert(remapped.clone())
+                        {
+                            paths_to_open.push(remapped);
+                        }
+                    }
+                }
+
+                if let Some(active) = &remapped_active_path {
+                    if seen.insert(active.clone()) {
+                        paths_to_open.push(active.clone());
+                    }
+                }
+
+                if !paths_to_open.is_empty() {
+                    let should_focus_center = focused_dock.is_none();
+                    let open_task = workspace.open_paths(
+                        paths_to_open,
+                        workspace::OpenOptions {
+                            focus: Some(false),
+                            ..Default::default()
+                        },
+                        None,
+                        window,
+                        cx,
+                    );
+                    cx.spawn_in(window, async move |workspace, cx| {
+                        for item in open_task.await.into_iter().flatten() {
+                            item.log_err();
+                        }
+                        if should_focus_center {
+                            workspace.update_in(cx, |workspace, window, cx| {
+                                workspace.focus_center_pane(window, cx);
+                            })?;
+                        }
+                        anyhow::Ok(())
                     })
-                    .max_by_key(|(depth, _)| *depth);
-
-                if let Some((_, remapped_path)) = best_match {
-                    return Some(remapped_path);
+                    .detach_and_log_err(cx);
                 }
-
-                for non_git in &non_git_paths {
-                    if original_path.starts_with(non_git) {
-                        return Some(original_path);
-                    }
-                }
-                None
-            };
-
-            let remapped_active_path = previous_state.active_file_path.and_then(|p| remap_path(p));
-
-            let mut paths_to_open: Vec<PathBuf> = Vec::new();
-            let mut seen = HashSet::default();
-            for path in previous_state.open_file_paths {
-                if let Some(remapped) = remap_path(path) {
-                    if remapped_active_path.as_ref() != Some(&remapped)
-                        && seen.insert(remapped.clone())
-                    {
-                        paths_to_open.push(remapped);
-                    }
-                }
-            }
-
-            if let Some(active) = &remapped_active_path {
-                if seen.insert(active.clone()) {
-                    paths_to_open.push(active.clone());
-                }
-            }
-
-            if !paths_to_open.is_empty() {
-                let should_focus_center = focused_dock.is_none();
-                let open_task = workspace.open_paths(
-                    paths_to_open,
-                    workspace::OpenOptions {
-                        focus: Some(false),
-                        ..Default::default()
-                    },
-                    None,
-                    window,
-                    cx,
-                );
-                cx.spawn_in(window, async move |workspace, cx| {
-                    for item in open_task.await.into_iter().flatten() {
-                        item.log_err();
-                    }
-                    if should_focus_center {
-                        workspace.update_in(cx, |workspace, window, cx| {
-                            workspace.focus_center_pane(window, cx);
-                        })?;
-                    }
-                    anyhow::Ok(())
-                })
-                .detach_and_log_err(cx);
-            }
-        });
-    })?;
+            });
+        })?;
+    }
 
     // Clear the creation status on the SOURCE workspace so its title bar
     // stops showing the loading indicator immediately.
@@ -874,22 +903,24 @@ async fn open_worktree_workspace(
         .ok();
 
     window_handle.update(cx, |multi_workspace, window, cx| {
-        multi_workspace.activate(new_workspace.clone(), Some(workspace.clone()), window, cx);
+        multi_workspace.activate(new_workspace.clone(), source_for_transfer, window, cx);
 
         new_workspace.update(cx, |workspace, cx| {
             workspace.run_create_worktree_tasks(window, cx);
         });
     })?;
 
-    if let Some(dock_position) = focused_dock {
-        window_handle.update(cx, |_multi_workspace, window, cx| {
-            new_workspace.update(cx, |workspace, cx| {
-                let dock = workspace.dock_at_position(dock_position);
-                if let Some(panel) = dock.read(cx).active_panel() {
-                    panel.panel_focus_handle(cx).focus(window, cx);
-                }
-            });
-        })?;
+    if is_creating_new_worktree {
+        if let Some(dock_position) = focused_dock {
+            window_handle.update(cx, |_multi_workspace, window, cx| {
+                new_workspace.update(cx, |workspace, cx| {
+                    let dock = workspace.dock_at_position(dock_position);
+                    if let Some(panel) = dock.read(cx).active_panel() {
+                        panel.panel_focus_handle(cx).focus(window, cx);
+                    }
+                });
+            })?;
+        }
     }
 
     anyhow::Ok(())
