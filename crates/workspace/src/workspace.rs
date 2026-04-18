@@ -10054,9 +10054,15 @@ async fn open_remote_project_inner(
         });
 
         if let Some(project_group_key) = provisional_project_group_key.clone() {
-            multi_workspace.retain_workspace(new_workspace.clone(), project_group_key, cx);
+            multi_workspace.activate_provisional_workspace(
+                new_workspace.clone(),
+                project_group_key,
+                window,
+                cx,
+            );
+        } else {
+            multi_workspace.activate(new_workspace.clone(), source_workspace, window, cx);
         }
-        multi_workspace.activate(new_workspace.clone(), source_workspace, window, cx);
         new_workspace
     })?;
 
