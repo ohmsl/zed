@@ -256,14 +256,12 @@ pub mod workspace {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum NewWorktreeBranchTarget {
-    /// Create a new randomly named branch from the current HEAD.
-    /// Will match worktree name if the newly created worktree was also randomly named.
+    /// Create a detached worktree from the current HEAD.
     #[default]
     CurrentBranch,
-    /// Check out an existing branch, or create a new branch from it if it's
-    /// already occupied by another worktree.
+    /// Create a detached worktree at the tip of an existing branch.
     ExistingBranch { name: String },
-    /// Create a new branch with an explicit name, optionally from a specific ref.
+    /// Create a detached worktree at the given ref, then check out a new branch.
     CreateBranch {
         name: String,
         #[serde(default)]
