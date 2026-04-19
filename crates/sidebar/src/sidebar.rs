@@ -192,6 +192,9 @@ struct ThreadEntry {
     is_live: bool,
     is_background: bool,
     is_title_generating: bool,
+    /// A draft is a thread with no `session_id`: it has been persisted in the
+    /// metadata store but the user hasn't sent its first message yet.
+    is_draft: bool,
     highlight_positions: Vec<usize>,
     worktrees: Vec<ThreadItemWorktreeInfo>,
     diff_stats: DiffStats,
@@ -328,6 +331,59 @@ fn workspace_path_list(workspace: &Entity<Workspace>, cx: &App) -> PathList {
     PathList::new(&workspace.read(cx).root_paths(cx))
 }
 
+/// Rewrites `[@Something](scheme://...)` mention links as `@Something` so the
+/// sidebar's draft-title preview doesn't show raw markdown link syntax.
+fn clean_mention_links(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut remaining = input;
+
+    while let Some(start) = remaining.find("[@") {
+        result.push_str(&remaining[..start]);
+        let after_bracket = &remaining[start + 1..];
+        if let Some(close_bracket) = after_bracket.find("](") {
+            let mention = &after_bracket[..close_bracket];
+            let after_link_start = &after_bracket[close_bracket + 2..];
+            if let Some(close_paren) = after_link_start.find(')') {
+                result.push_str(mention);
+                remaining = &after_link_start[close_paren + 1..];
+                continue;
+            }
+        }
+        result.push_str("[@");
+        remaining = &remaining[start + 2..];
+    }
+    result.push_str(remaining);
+    result
+}
+
+/// Collapses whitespace and truncates raw editor text for display as a draft
+/// label in the sidebar.
+fn truncate_draft_label(raw: &str) -> Option<SharedString> {
+    let first_line = raw.lines().next().unwrap_or("");
+    let cleaned = clean_mention_links(first_line);
+    let mut text: String = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        return None;
+    }
+    const MAX_CHARS: usize = 250;
+    if let Some((truncate_at, _)) = text.char_indices().nth(MAX_CHARS) {
+        text.truncate(truncate_at);
+    }
+    Some(text.into())
+}
+
+/// Reads the current editor text for a thread hosted by an `AgentPanel`,
+/// cleaning and truncating it for use as a draft's sidebar title.
+fn read_draft_text(
+    workspace: &Entity<Workspace>,
+    thread_id: ThreadId,
+    cx: &App,
+) -> Option<SharedString> {
+    let panel = workspace.read(cx).panel::<AgentPanel>(cx)?;
+    let raw = panel.read(cx).editor_text(thread_id, cx)?;
+    truncate_draft_label(&raw)
+}
+
 /// Shows a [`RemoteConnectionModal`] on the given workspace and establishes
 /// an SSH connection. Suitable for passing to
 /// [`MultiWorkspace::find_or_create_workspace`] as the `connect_remote`
@@ -376,6 +432,10 @@ pub struct Sidebar {
     recent_projects_popover_handle: PopoverMenuHandle<SidebarRecentProjects>,
     project_header_menu_ix: Option<usize>,
     _subscriptions: Vec<gpui::Subscription>,
+    /// Subscriptions to each workspace's draft ConversationView so the
+    /// sidebar re-renders when the user types in a draft. Rebuilt every
+    /// time entries are computed since the set of live drafts varies.
+    _draft_editor_observations: Vec<gpui::Subscription>,
 }
 
 impl Sidebar {
@@ -463,6 +523,7 @@ impl Sidebar {
             recent_projects_popover_handle: PopoverMenuHandle::default(),
             project_header_menu_ix: None,
             _subscriptions: Vec::new(),
+            _draft_editor_observations: Vec::new(),
         }
     }
 
@@ -1000,6 +1061,23 @@ impl Sidebar {
             if should_load_threads {
                 let thread_store = ThreadMetadataStore::global(cx);
 
+                // The MultiWorkspace's currently-active workspace is the
+                // only one whose ephemeral draft we hide from the sidebar:
+                // it is represented by the `+` button's active state
+                // instead. Drafts on other workspaces in the group — even
+                // active-on-those-workspaces ones — remain visible so the
+                // user can reach them.
+                let active_ephemeral_drafts: HashSet<ThreadId> = active_workspace
+                    .as_ref()
+                    .filter(|aws| group_workspaces.contains(aws))
+                    .and_then(|aws| {
+                        aws.read(cx)
+                            .panel::<AgentPanel>(cx)
+                            .and_then(|panel| panel.read(cx).active_draft_thread_id(cx))
+                    })
+                    .into_iter()
+                    .collect();
+
                 // Build a lookup from workspace root paths to their workspace
                 // entity, used to assign ThreadEntryWorkspace::Open for threads
                 // whose folder_paths match an open workspace.
@@ -1028,6 +1106,7 @@ impl Sidebar {
                         let (icon, icon_from_external_svg) = resolve_agent_icon(&row.agent_id);
                         let worktrees =
                             worktree_info_from_thread_paths(&row.worktree_paths, &branch_by_path);
+                        let is_draft = row.is_draft();
                         ThreadEntry {
                             metadata: row,
                             icon,
@@ -1037,6 +1116,7 @@ impl Sidebar {
                             is_live: false,
                             is_background: false,
                             is_title_generating: false,
+                            is_draft,
                             highlight_positions: Vec::new(),
                             worktrees,
                             diff_stats: DiffStats::default(),
@@ -1104,6 +1184,31 @@ impl Sidebar {
                                 project_group_key: group_key.clone(),
                             },
                         ));
+                    }
+                }
+
+                // Hide the currently-active ephemeral draft from each
+                // workspace's group: while it exists as a metadata row
+                // (so the promotion-on-send flow is straightforward), we
+                // surface it through the `+` button instead of a row.
+                if !active_ephemeral_drafts.is_empty() {
+                    threads.retain(|thread| {
+                        !active_ephemeral_drafts.contains(&thread.metadata.thread_id)
+                    });
+                }
+
+                // Override draft titles with the thread's editor text so a
+                // parked draft shows what the user was in the middle of
+                // writing instead of the generic "New Agent Thread".
+                for thread in &mut threads {
+                    if !thread.is_draft {
+                        continue;
+                    }
+                    let ThreadEntryWorkspace::Open(workspace) = &thread.workspace else {
+                        continue;
+                    };
+                    if let Some(text) = read_draft_text(workspace, thread.metadata.thread_id, cx) {
+                        thread.metadata.title = Some(text);
                     }
                 }
 
@@ -1329,6 +1434,7 @@ impl Sidebar {
         let scroll_position = self.list_state.logical_scroll_top();
 
         self.rebuild_contents(cx);
+        self.refresh_draft_editor_observations(cx);
 
         self.list_state.reset(self.contents.entries.len());
         self.list_state.scroll_to(scroll_position);
@@ -1340,6 +1446,41 @@ impl Sidebar {
         }
 
         cx.notify();
+    }
+
+    /// Re-establishes subscriptions to each visible draft's message editor
+    /// so we rebuild entries (and their displayed titles) as the user types.
+    fn refresh_draft_editor_observations(&mut self, cx: &mut Context<Self>) {
+        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
+            self._draft_editor_observations.clear();
+            return;
+        };
+
+        let draft_conversation_views: Vec<Entity<agent_ui::ConversationView>> = multi_workspace
+            .read(cx)
+            .workspaces()
+            .filter_map(|ws| ws.read(cx).panel::<AgentPanel>(cx))
+            .flat_map(|panel| panel.read(cx).conversation_views())
+            .collect();
+
+        let mut subscriptions = Vec::with_capacity(draft_conversation_views.len());
+        for cv in draft_conversation_views {
+            if let Some(thread_view) = cv.read(cx).active_thread() {
+                let editor = thread_view.read(cx).message_editor.clone();
+                subscriptions.push(cx.observe(&editor, |this, _editor, cx| {
+                    this.update_entries(cx);
+                }));
+            } else {
+                // Editor hasn't been constructed yet (still Loading). Observe
+                // the ConversationView and re-run this wiring once it flips
+                // to Connected.
+                subscriptions.push(cx.observe(&cv, |this, _cv, cx| {
+                    this.refresh_draft_editor_observations(cx);
+                    this.update_entries(cx);
+                }));
+            }
+        }
+        self._draft_editor_observations = subscriptions;
     }
 
     fn select_first_entry(&mut self) {
@@ -1394,7 +1535,7 @@ impl Sidebar {
                         .and_then(|ws| ws.read(cx).panel::<AgentPanel>(cx))
                         .is_some_and(|panel| {
                             let panel = panel.read(cx);
-                            panel.active_thread_is_draft(cx)
+                            panel.active_view_is_new_draft(cx)
                                 || panel.active_conversation_view().is_none()
                         });
                 self.render_project_header(
@@ -1889,7 +2030,7 @@ impl Sidebar {
                 .and_then(|ws| ws.read(cx).panel::<AgentPanel>(cx))
                 .is_some_and(|panel| {
                     let panel = panel.read(cx);
-                    panel.active_thread_is_draft(cx) || panel.active_conversation_view().is_none()
+                    panel.active_view_is_new_draft(cx) || panel.active_conversation_view().is_none()
                 });
         let header_element = self.render_project_header(
             header_idx,
@@ -2205,13 +2346,10 @@ impl Sidebar {
                            focus: bool,
                            window: &mut Window,
                            cx: &mut App| {
-            let Some(session_id) = metadata.session_id.clone() else {
-                return;
-            };
             agent_panel.update(cx, |panel, cx| {
                 panel.load_agent_thread(
                     Agent::from(metadata.agent_id.clone()),
-                    session_id,
+                    metadata.thread_id,
                     Some(metadata.folder_paths().clone()),
                     metadata.title.clone(),
                     focus,
@@ -2287,10 +2425,7 @@ impl Sidebar {
             workspace: workspace.clone(),
         });
         self.record_thread_access(&metadata.session_id);
-
-        if metadata.session_id.is_some() {
-            self.pending_thread_activation = Some(metadata.thread_id);
-        }
+        self.pending_thread_activation = Some(metadata.thread_id);
 
         multi_workspace.update(cx, |multi_workspace, cx| {
             multi_workspace.activate(workspace.clone(), window, cx);
@@ -2299,22 +2434,7 @@ impl Sidebar {
             }
         });
 
-        // Drafts (and other retained threads without a session_id) are
-        // already in memory — activate them directly instead of loading.
-        let thread_id = metadata.thread_id;
-        if metadata.session_id.is_none() {
-            workspace.update(cx, |ws, cx| {
-                if let Some(panel) = ws.panel::<AgentPanel>(cx) {
-                    panel.update(cx, |panel, cx| {
-                        panel.activate_retained_thread(thread_id, true, window, cx);
-                    });
-                }
-                ws.focus_panel::<AgentPanel>(window, cx);
-            });
-            self.pending_thread_activation = None;
-        } else {
-            Self::load_agent_thread_in_workspace(workspace, metadata, true, window, cx);
-        }
+        Self::load_agent_thread_in_workspace(workspace, metadata, true, window, cx);
 
         self.update_entries(cx);
     }
@@ -2895,7 +3015,13 @@ impl Sidebar {
                 .iter()
                 .chain(self.contents.entries[..pos].iter().rev())
                 .find_map(|entry| match entry {
-                    ListEntry::Thread(t) if t.metadata.session_id.as_ref() != Some(session_id) => {
+                    // Drafts aren't real threads and shouldn't be activated
+                    // as the "next thing to look at" after an archive;
+                    // fall through to the panel-clear path which activates
+                    // a fresh draft on the archived thread's own workspace.
+                    ListEntry::Thread(t)
+                        if !t.is_draft && t.metadata.session_id.as_ref() != Some(session_id) =>
+                    {
                         let (workspace_paths, project_group_key) = match &t.workspace {
                             ThreadEntryWorkspace::Open(ws) => (
                                 PathList::new(&ws.read(cx).root_paths(cx)),
@@ -3358,7 +3484,13 @@ impl Sidebar {
                     }
                     AgentThreadStatus::Completed | AgentThreadStatus::Error => {}
                 }
-                if let Some(session_id) = thread.metadata.session_id.clone() {
+                if thread.is_draft {
+                    if let ThreadEntryWorkspace::Open(workspace) = &thread.workspace {
+                        let workspace = workspace.clone();
+                        let draft_id = thread.metadata.thread_id;
+                        self.remove_draft(draft_id, &workspace, window, cx);
+                    }
+                } else if let Some(session_id) = thread.metadata.session_id.clone() {
                     self.archive_thread(&session_id, window, cx);
                 }
             }
@@ -3666,6 +3798,7 @@ impl Sidebar {
 
         let is_hovered = self.hovered_thread_index == Some(ix);
         let is_selected = is_active;
+        let is_draft = thread.is_draft;
         let is_running = matches!(
             thread.status,
             AgentThreadStatus::Running | AgentThreadStatus::WaitingForConfirmation
@@ -3730,7 +3863,7 @@ impl Sidebar {
                         }),
                 )
             })
-            .when(is_hovered && !is_running, |this| {
+            .when(is_hovered && !is_running && !is_draft, |this| {
                 this.action_slot(
                     IconButton::new("archive-thread", IconName::Archive)
                         .icon_size(IconSize::Small)
@@ -3751,6 +3884,22 @@ impl Sidebar {
                             cx.listener(move |this, _, window, cx| {
                                 if let Some(ref session_id) = session_id {
                                     this.archive_thread(session_id, window, cx);
+                                }
+                            })
+                        }),
+                )
+            })
+            .when(is_hovered && !is_running && is_draft, |this| {
+                this.action_slot(
+                    IconButton::new("close-draft", IconName::Close)
+                        .icon_size(IconSize::Small)
+                        .icon_color(Color::Muted)
+                        .tooltip(Tooltip::text("Remove Draft"))
+                        .on_click({
+                            let thread_workspace = thread_workspace.clone();
+                            cx.listener(move |this, _, window, cx| {
+                                if let ThreadEntryWorkspace::Open(workspace) = &thread_workspace {
+                                    this.remove_draft(thread_id_for_actions, workspace, window, cx);
                                 }
                             })
                         }),
@@ -3898,6 +4047,36 @@ impl Sidebar {
         }
     }
 
+    /// Deletes a parked draft thread (its metadata row, any kvp-stored
+    /// draft prompt) and promotes a sibling in the same group, if any, to
+    /// the active entry.
+    fn remove_draft(
+        &mut self,
+        draft_id: ThreadId,
+        workspace: &Entity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // TODO: Drop workspaces?
+        workspace.update(cx, |ws, cx| {
+            if let Some(panel) = ws.panel::<AgentPanel>(cx) {
+                panel.update(cx, |panel, cx| {
+                    panel.remove_thread(draft_id, window, cx);
+                });
+            }
+        });
+
+        let was_active = self
+            .active_entry
+            .as_ref()
+            .is_some_and(|e| e.is_active_thread(&draft_id));
+        if was_active {
+            self.active_entry = None;
+        }
+
+        self.update_entries(cx);
+    }
+
     fn create_new_thread(
         &mut self,
         workspace: &Entity<Workspace>,
@@ -3915,7 +4094,7 @@ impl Sidebar {
         let draft_id = workspace.update(cx, |workspace, cx| {
             let panel = workspace.panel::<AgentPanel>(cx)?;
             let draft_id = panel.update(cx, |panel, cx| {
-                panel.activate_draft(true, window, cx);
+                panel.new_draft(true, window, cx);
                 panel.active_thread_id(cx)
             });
             workspace.focus_panel::<AgentPanel>(window, cx);

@@ -11,6 +11,7 @@ mod context;
 mod context_server_configuration;
 pub(crate) mod conversation_view;
 mod diagnostics;
+pub(crate) mod draft_prompt_store;
 mod entry_view_state;
 mod external_source_prompt;
 mod favorite_models;
@@ -278,6 +279,10 @@ impl From<AgentId> for Agent {
         if id.as_ref() == agent::ZED_AGENT_ID.as_ref() {
             Self::NativeAgent
         } else {
+            #[cfg(any(test, feature = "test-support"))]
+            if id.as_ref() == "stub" {
+                return Self::Stub;
+            }
             Self::Custom { id }
         }
     }

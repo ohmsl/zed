@@ -727,6 +727,9 @@ impl ConversationView {
 
         self.server_state = state;
         cx.emit(AcpServerViewEvent::ActiveThreadChanged);
+        if matches!(&self.server_state, ServerState::Connected(_)) {
+            cx.emit(RootThreadUpdated);
+        }
         cx.notify();
     }
 
@@ -1625,6 +1628,22 @@ impl ConversationView {
                 cx.notify();
             }
             AcpThreadEvent::PromptUpdated => {
+                if !is_subagent {
+                    let thread_ref = thread.read(cx);
+                    if thread_ref.is_draft_thread() {
+                        let thread_id = self.thread_id;
+                        match thread_ref.draft_prompt() {
+                            Some(prompt) if !prompt.is_empty() => {
+                                crate::draft_prompt_store::write(thread_id, prompt, cx)
+                                    .detach_and_log_err(cx);
+                            }
+                            _ => {
+                                crate::draft_prompt_store::delete(thread_id, cx)
+                                    .detach_and_log_err(cx);
+                            }
+                        }
+                    }
+                }
                 cx.notify();
             }
         }
@@ -2527,7 +2546,7 @@ impl ConversationView {
             return;
         };
         let root_thread = root_thread.read(cx).thread.read(cx);
-        let root_session_id = root_thread.session_id().clone();
+        let root_thread_id = self.thread_id;
         let root_work_dirs = root_thread.work_dirs().cloned();
         let root_title = root_thread.title();
 
@@ -2541,7 +2560,7 @@ impl ConversationView {
                         icon,
                         caption.into(),
                         title,
-                        root_session_id,
+                        root_thread_id,
                         root_work_dirs,
                         root_title,
                         window,
@@ -2557,7 +2576,7 @@ impl ConversationView {
                         icon,
                         caption.clone(),
                         title.clone(),
-                        root_session_id.clone(),
+                        root_thread_id,
                         root_work_dirs.clone(),
                         root_title.clone(),
                         window,
@@ -2577,7 +2596,7 @@ impl ConversationView {
         icon: IconName,
         caption: SharedString,
         title: SharedString,
-        root_session_id: acp::SessionId,
+        root_thread_id: ThreadId,
         root_work_dirs: Option<PathList>,
         root_title: Option<SharedString>,
         window: &mut Window,
@@ -2620,7 +2639,6 @@ impl ConversationView {
 
                             let workspace_handle = this.workspace.clone();
                             let agent = this.connection_key.clone();
-                            let root_session_id = root_session_id.clone();
                             let root_work_dirs = root_work_dirs.clone();
                             let root_title = root_title.clone();
 
@@ -2638,7 +2656,7 @@ impl ConversationView {
                                                     panel.update(cx, |panel, cx| {
                                                         panel.load_agent_thread(
                                                             agent.clone(),
-                                                            root_session_id.clone(),
+                                                            root_thread_id,
                                                             root_work_dirs.clone(),
                                                             root_title.clone(),
                                                             true,

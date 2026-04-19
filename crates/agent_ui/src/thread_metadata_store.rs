@@ -37,6 +37,11 @@ impl ThreadId {
     pub fn new() -> Self {
         Self(uuid::Uuid::new_v4())
     }
+
+    /// Stable, hyphenated string form suitable for use as a key.
+    pub fn to_key_string(&self) -> String {
+        self.0.hyphenated().to_string()
+    }
 }
 
 impl Bind for ThreadId {
@@ -275,6 +280,12 @@ pub struct ThreadMetadata {
 }
 
 impl ThreadMetadata {
+    /// A thread is a draft until its first message is sent, at which point
+    /// it gets an ACP `session_id`.
+    pub fn is_draft(&self) -> bool {
+        self.session_id.is_none()
+    }
+
     pub fn display_title(&self) -> SharedString {
         self.title
             .clone()
@@ -1019,6 +1030,7 @@ impl ThreadMetadataStore {
         self.pending_thread_ops_tx
             .try_send(DbOperation::Delete(thread_id))
             .log_err();
+        crate::draft_prompt_store::delete(thread_id, cx).detach_and_log_err(cx);
         cx.notify();
     }
 
@@ -1115,12 +1127,15 @@ impl ThreadMetadataStore {
         };
 
         let thread_ref = thread.read(cx);
-        if thread_ref.is_draft_thread() {
-            return;
-        }
-
+        let is_draft = thread_ref.is_draft_thread();
         let existing_thread = self.entry(thread_id);
-        let session_id = Some(thread_ref.session_id().clone());
+
+        // Draft session IDs may change on reload, so let's not save them until they're valid
+        let session_id = if is_draft {
+            None
+        } else {
+            Some(thread_ref.session_id().clone())
+        };
         let title = thread_ref.title();
 
         let updated_at = Utc::now();
@@ -1157,6 +1172,14 @@ impl ThreadMetadataStore {
         let archived = existing_thread
             .map(|t| t.archived)
             .unwrap_or(worktree_paths.is_empty());
+
+        let was_draft = existing_thread.map_or(true, |t| t.is_draft());
+        if was_draft && !is_draft {
+            // Draft has been promoted: drop its persisted prompt since the
+            // promoted thread now owns its prompt state via the native
+            // agent's thread database.
+            crate::draft_prompt_store::delete(thread_id, cx).detach_and_log_err(cx);
+        }
 
         let metadata = ThreadMetadata {
             thread_id,
@@ -2233,7 +2256,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_empty_thread_events_do_not_create_metadata(cx: &mut TestAppContext) {
+    async fn test_draft_thread_metadata_promotes_on_first_message(cx: &mut TestAppContext) {
         init_test(cx);
 
         let fs = FakeFs::new(cx.executor());
@@ -2247,14 +2270,19 @@ mod tests {
         let session_id = thread.read_with(&vcx, |t, _| t.session_id().clone());
         let thread_id = crate::test_support::active_thread_id(&panel, &vcx);
 
-        // Draft threads no longer create metadata entries.
+        // Empty (draft) threads are persisted with `session_id: None`.
         cx.read(|cx| {
             let store = ThreadMetadataStore::global(cx).read(cx);
-            assert_eq!(store.entry_ids().count(), 0);
+            assert_eq!(store.entry_ids().count(), 1);
+            let entry = store.entry(thread_id).expect("draft metadata row");
+            assert!(
+                entry.is_draft(),
+                "expected draft row to have session_id=None, got {:?}",
+                entry.session_id
+            );
         });
 
-        // Setting a title on an empty thread should be ignored by the
-        // event handler (entries are empty), so no metadata is created.
+        // Updating the title while still a draft keeps the row as a draft.
         thread.update_in(&mut vcx, |thread, _window, cx| {
             thread.set_title("Draft Thread".into(), cx).detach();
         });
@@ -2262,15 +2290,15 @@ mod tests {
 
         cx.read(|cx| {
             let store = ThreadMetadataStore::global(cx).read(cx);
+            let entry = store.entry(thread_id).expect("draft metadata row");
+            assert!(entry.is_draft(), "still a draft after title update");
             assert_eq!(
-                store.entry_ids().count(),
-                0,
-                "expected title updates on empty thread to not create metadata"
+                entry.title.as_ref().map(|t| t.as_ref()),
+                Some("Draft Thread")
             );
         });
 
-        // Pushing content makes entries non-empty, so the event handler
-        // should now update metadata with the real session_id.
+        // Pushing content promotes the draft: session_id is now populated.
         thread.update_in(&mut vcx, |thread, _window, cx| {
             thread.push_user_content_block(None, "Hello".into(), cx);
         });
