@@ -372,15 +372,37 @@ fn truncate_draft_label(raw: &str) -> Option<SharedString> {
     Some(text.into())
 }
 
-/// Reads the current editor text for a thread hosted by an `AgentPanel`,
-/// cleaning and truncating it for use as a draft's sidebar title.
+/// Reads the current editor text for a draft thread, cleaning and truncating
+/// it for use as a sidebar title.
+///
+/// Prefers the live message editor's text (when the thread's `ConversationView`
+/// is loaded), and otherwise falls back to the persisted draft prompt in the
+/// kvp store so drafts restored from disk — but not yet opened — still show
+/// a meaningful title instead of the generic default.
 fn read_draft_text(
-    workspace: &Entity<Workspace>,
+    workspace: Option<&Entity<Workspace>>,
     thread_id: ThreadId,
     cx: &App,
 ) -> Option<SharedString> {
-    let panel = workspace.read(cx).panel::<AgentPanel>(cx)?;
-    let raw = panel.read(cx).editor_text(thread_id, cx)?;
+    let from_editor = workspace
+        .and_then(|ws| ws.read(cx).panel::<AgentPanel>(cx))
+        .and_then(|panel| panel.read(cx).editor_text(thread_id, cx));
+    if let Some(raw) = from_editor
+        && let Some(label) = truncate_draft_label(&raw)
+    {
+        return Some(label);
+    }
+
+    let blocks = agent_ui::draft_prompt_store::read(thread_id, cx)?;
+    let raw = blocks
+        .iter()
+        .filter_map(|block| match block {
+            acp::ContentBlock::Text(text) => Some(text.text.as_str()),
+            acp::ContentBlock::ResourceLink(link) => Some(link.uri.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
     truncate_draft_label(&raw)
 }
 
@@ -1061,12 +1083,17 @@ impl Sidebar {
             if should_load_threads {
                 let thread_store = ThreadMetadataStore::global(cx);
 
-                let active_ephemeral_drafts: HashSet<ThreadId> = group_workspaces
+                // Every workspace's ephemeral new-draft slot is surfaced
+                // through its own `+` button, so we hide every workspace's
+                // ephemeral draft from the sidebar rows — regardless of
+                // whether it's also that workspace's active view. Parked
+                // (retained) drafts continue to appear as rows.
+                let ephemeral_drafts: HashSet<ThreadId> = group_workspaces
                     .iter()
                     .filter_map(|ws| {
                         ws.read(cx)
                             .panel::<AgentPanel>(cx)
-                            .and_then(|panel| panel.read(cx).active_draft_thread_id(cx))
+                            .and_then(|panel| panel.read(cx).ephemeral_draft_thread_id(cx))
                     })
                     .collect();
 
@@ -1179,25 +1206,26 @@ impl Sidebar {
                     }
                 }
 
-                // Hide the currently-active ephemeral draft from each
-                // workspace's group: while it exists as a metadata row
-                // (so the promotion-on-send flow is straightforward), we
-                // surface it through the `+` button instead of a row.
-                if !active_ephemeral_drafts.is_empty() {
-                    threads.retain(|thread| {
-                        !active_ephemeral_drafts.contains(&thread.metadata.thread_id)
-                    });
+                // Hide every workspace's ephemeral draft from its group:
+                // while the draft exists as a metadata row (so the
+                // promotion-on-send flow is straightforward), we surface
+                // it through the `+` button instead of a row.
+                if !ephemeral_drafts.is_empty() {
+                    threads.retain(|thread| !ephemeral_drafts.contains(&thread.metadata.thread_id));
                 }
 
-                // Override draft titles with the thread's editor text so a
-                // parked draft shows what the user was in the middle of
+                // Override draft titles with the thread's editor text (if
+                // the ConversationView is loaded) or the persisted kvp
+                // draft prompt (for drafts restored from disk that haven't
+                // been opened yet), so the sidebar shows what the user was
                 // writing instead of the generic "New Agent Thread".
                 for thread in &mut threads {
                     if !thread.is_draft {
                         continue;
                     }
-                    let ThreadEntryWorkspace::Open(workspace) = &thread.workspace else {
-                        continue;
+                    let workspace = match &thread.workspace {
+                        ThreadEntryWorkspace::Open(workspace) => Some(workspace),
+                        ThreadEntryWorkspace::Closed { .. } => None,
                     };
                     if let Some(text) = read_draft_text(workspace, thread.metadata.thread_id, cx) {
                         thread.metadata.title = Some(text);

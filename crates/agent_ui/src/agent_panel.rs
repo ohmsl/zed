@@ -1525,17 +1525,16 @@ impl AgentPanel {
         }
     }
 
-    /// Returns the [`ThreadId`] of the currently-active **ephemeral** draft,
-    /// if any.
+    /// Returns the [`ThreadId`] of the panel's **ephemeral** new-draft
+    /// slot, if any — regardless of whether it is also the active view.
     ///
-    /// This is the one draft the sidebar should hide from the active
-    /// workspace's group: all retained/parked drafts continue to show as
-    /// sidebar rows. Returns `None` when the active view is a parked draft,
-    /// a real thread, or nothing at all.
-    pub fn active_draft_thread_id(&self, cx: &App) -> Option<ThreadId> {
-        let draft = self.draft_thread.as_ref()?;
-        let active = self.active_conversation_view()?;
-        (active.entity_id() == draft.entity_id()).then(|| draft.read(cx).thread_id)
+    /// This is the draft the sidebar hides from its project group: it is
+    /// surfaced by the panel's `+` button instead of a sidebar row. Parked
+    /// (retained) drafts continue to show as sidebar rows.
+    pub fn ephemeral_draft_thread_id(&self, cx: &App) -> Option<ThreadId> {
+        self.draft_thread
+            .as_ref()
+            .map(|draft| draft.read(cx).thread_id)
     }
 
     pub fn editor_text(&self, id: ThreadId, cx: &App) -> Option<String> {
@@ -5297,6 +5296,12 @@ impl Dismissable for TrialEndUpsell {
 impl AgentPanel {
     pub fn test_new(workspace: &Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::new(workspace, None, window, cx)
+    }
+
+    /// Drops a thread's `ConversationView` from `retained_threads` without
+    /// deleting its metadata or kvp state. Simulates the post-restart
+    pub fn test_unload_retained_thread(&mut self, id: ThreadId) -> bool {
+        self.retained_threads.remove(&id).is_some()
     }
 
     /// Opens an external thread using an arbitrary AgentServer.

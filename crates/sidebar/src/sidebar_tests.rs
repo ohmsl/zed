@@ -2931,7 +2931,10 @@ async fn test_new_thread_button_works_after_adding_folder(cx: &mut TestAppContex
 #[gpui::test]
 async fn test_draft_title_updates_from_editor_text(cx: &mut TestAppContext) {
     // When the user types into a draft, the parked draft entry's title in
-    // the sidebar should reflect the editor's text.
+    // the sidebar should reflect the editor's text — both while the
+    // draft's `ConversationView` is still loaded (source: live message
+    // editor) and after it has been evicted (source: kvp draft prompt
+    // store, the same path used when drafts are restored from disk).
     let project = init_test_project_with_agent_panel("/my-project", cx).await;
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
@@ -2944,6 +2947,7 @@ async fn test_draft_title_updates_from_editor_text(cx: &mut TestAppContext) {
     let connection = StubAgentConnection::new();
     agent_ui::test_support::open_draft_with_connection(&panel, connection, cx);
     cx.run_until_parked();
+    let draft_id = panel.read_with(cx, |panel, cx| panel.active_thread_id(cx).unwrap());
 
     // Type into the (active) draft's message editor.
     let thread_view = panel.read_with(cx, |panel, cx| panel.active_thread_view(cx).unwrap());
@@ -2959,24 +2963,52 @@ async fn test_draft_title_updates_from_editor_text(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
 
-    // The parked draft should show its editor text as the entry title.
-    let parked_title = sidebar.read_with(cx, |sidebar, _cx| {
-        sidebar
-            .contents
-            .entries
-            .iter()
-            .find_map(|entry| match entry {
-                ListEntry::Thread(thread) if thread.is_draft => {
-                    Some(thread.metadata.display_title())
-                }
-                _ => None,
-            })
-            .expect("parked draft entry should be present")
-    });
+    let draft_title = |sidebar: &Entity<Sidebar>, cx: &mut gpui::VisualTestContext| {
+        sidebar.read_with(cx, |sidebar, _cx| {
+            sidebar
+                .contents
+                .entries
+                .iter()
+                .find_map(|entry| match entry {
+                    ListEntry::Thread(thread)
+                        if thread.is_draft && thread.metadata.thread_id == draft_id =>
+                    {
+                        Some(thread.metadata.display_title())
+                    }
+                    _ => None,
+                })
+                .expect("parked draft entry should be present")
+        })
+    };
+
+    // Phase 1: ConversationView is still loaded in `retained_threads`;
+    // the title comes from its live message editor.
     assert_eq!(
-        parked_title.as_ref(),
+        draft_title(&sidebar, cx).as_ref(),
         "Fix the login bug",
-        "parked draft title should match its editor text"
+        "parked draft title should match its editor text while loaded"
+    );
+    panel.read_with(cx, |panel, _cx| {
+        assert!(
+            panel.retained_threads().contains_key(&draft_id),
+            "draft should be in retained_threads while loaded"
+        );
+    });
+
+    // Phase 2: drop the draft's ConversationView from memory, mirroring
+    // the state the sidebar sees immediately after a process restart
+    // — the metadata row and the kvp draft prompt are on disk, but no
+    // ConversationView has been rehydrated yet.
+    let unloaded = panel.update(cx, |panel, _cx| panel.test_unload_retained_thread(draft_id));
+    assert!(unloaded, "draft should have been present before unload");
+    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+    cx.run_until_parked();
+
+    assert_eq!(
+        draft_title(&sidebar, cx).as_ref(),
+        "Fix the login bug",
+        "parked draft title should still come from the kvp draft prompt store \
+         even after its ConversationView is unloaded"
     );
 }
 
@@ -3190,7 +3222,7 @@ async fn test_sending_message_from_draft_promotes_in_place(cx: &mut TestAppConte
             "should no longer be a draft after send"
         );
         assert!(
-            panel.active_draft_thread_id(cx).is_none(),
+            panel.ephemeral_draft_thread_id(cx).is_none(),
             "ephemeral draft pointer should be cleared after promotion"
         );
         assert_eq!(
@@ -3400,6 +3432,13 @@ async fn test_cmd_n_shows_new_thread_entry_in_absorbed_worktree(cx: &mut TestApp
 
 #[gpui::test]
 async fn test_all_ephemeral_drafts_in_group_are_hidden_from_sidebar(cx: &mut TestAppContext) {
+    // An ephemeral new-draft is surfaced through its panel's `+` button,
+    // never as a sidebar row. This rule must hold:
+    //   1. For every workspace in a project group (not just the active one).
+    //   2. Whether or not the draft is the active view of its panel —
+    //      i.e. even when the user has navigated away to a real thread
+    //      within that same panel, the draft stays in the new-draft slot
+    //      and stays out of the sidebar.
     agent_ui::test_support::init_test(cx);
     cx.update(|cx| {
         ThreadStore::init_global(cx);
@@ -3449,18 +3488,31 @@ async fn test_all_ephemeral_drafts_in_group_are_hidden_from_sidebar(cx: &mut Tes
     let worktree_panel = add_agent_panel(&worktree_workspace, cx);
     cx.run_until_parked();
 
-    // Create an ephemeral draft in each workspace's panel via a stub
-    // connection (so each ConversationView reaches Connected and the
-    // panel's `draft_thread` pointer is populated).
+    // Give the main panel a real thread we can park the draft behind
+    // later. Send a message to promote the draft→real thread.
+    let real_connection = StubAgentConnection::new();
+    real_connection.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(
+        acp::ContentChunk::new("done".into()),
+    )]);
+    agent_ui::test_support::open_thread_with_connection(&main_panel, real_connection, cx);
+    agent_ui::test_support::send_message(&main_panel, cx);
+    let main_real_thread_id =
+        main_panel.read_with(cx, |panel, cx| panel.active_thread_id(cx).unwrap());
+    cx.run_until_parked();
+
+    // Now open a fresh ephemeral draft in the main panel.
     agent_ui::test_support::open_draft_with_connection(&main_panel, StubAgentConnection::new(), cx);
+    cx.run_until_parked();
+    let main_draft_id = main_panel.read_with(cx, |panel, cx| panel.active_thread_id(cx).unwrap());
+    assert_ne!(main_draft_id, main_real_thread_id);
+
+    // And an ephemeral draft in the worktree panel as well.
     agent_ui::test_support::open_draft_with_connection(
         &worktree_panel,
         StubAgentConnection::new(),
         cx,
     );
     cx.run_until_parked();
-
-    let main_draft_id = main_panel.read_with(cx, |panel, cx| panel.active_thread_id(cx).unwrap());
     let worktree_draft_id =
         worktree_panel.read_with(cx, |panel, cx| panel.active_thread_id(cx).unwrap());
     assert_ne!(main_draft_id, worktree_draft_id);
@@ -3474,18 +3526,57 @@ async fn test_all_ephemeral_drafts_in_group_are_hidden_from_sidebar(cx: &mut Tes
             })
         };
 
-    // Main workspace is active: both workspaces' ephemeral drafts
-    // should be hidden from sidebar rows.
+    // Baseline: both ephemeral drafts are hidden while each is the
+    // active view of its own panel.
     assert!(
         !is_draft_row_visible(&sidebar, cx, main_draft_id),
-        "main workspace's ephemeral draft should be hidden while main is active"
+        "main panel's ephemeral draft should be hidden while it is active"
     );
     assert!(
         !is_draft_row_visible(&sidebar, cx, worktree_draft_id),
-        "worktree workspace's ephemeral draft should also be hidden while main is active"
+        "worktree panel's ephemeral draft should be hidden while it is active"
     );
 
-    // Switch to the worktree workspace — same rule still applies.
+    // Navigate the main panel AWAY from its draft to the real thread.
+    // The draft is no longer the active view of its panel, but it is
+    // still in the ephemeral slot — it must stay out of the sidebar.
+    main_panel.update_in(cx, |panel, window, cx| {
+        panel.load_agent_thread(
+            agent_ui::Agent::NativeAgent,
+            main_real_thread_id,
+            None,
+            None,
+            false,
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    main_panel.read_with(cx, |panel, cx| {
+        assert_eq!(
+            panel.active_thread_id(cx),
+            Some(main_real_thread_id),
+            "main panel should now be viewing the real thread"
+        );
+        assert_eq!(
+            panel.ephemeral_draft_thread_id(cx),
+            Some(main_draft_id),
+            "the ephemeral draft slot should still hold the parked draft"
+        );
+    });
+
+    assert!(
+        !is_draft_row_visible(&sidebar, cx, main_draft_id),
+        "parked ephemeral draft should stay hidden when the panel's active view is a real thread"
+    );
+    assert!(
+        !is_draft_row_visible(&sidebar, cx, worktree_draft_id),
+        "worktree panel's ephemeral draft should also stay hidden"
+    );
+
+    // Switch the active workspace to the worktree: all of the above
+    // assertions still hold, from the other side.
     multi_workspace.update_in(cx, |mw, window, cx| {
         mw.activate(worktree_workspace.clone(), window, cx);
     });
@@ -3493,11 +3584,11 @@ async fn test_all_ephemeral_drafts_in_group_are_hidden_from_sidebar(cx: &mut Tes
 
     assert!(
         !is_draft_row_visible(&sidebar, cx, main_draft_id),
-        "main workspace's ephemeral draft should still be hidden when worktree is active"
+        "main panel's parked ephemeral draft should stay hidden when worktree is active"
     );
     assert!(
         !is_draft_row_visible(&sidebar, cx, worktree_draft_id),
-        "worktree workspace's ephemeral draft should be hidden when worktree is active"
+        "worktree panel's ephemeral draft should stay hidden when worktree is active"
     );
 }
 
