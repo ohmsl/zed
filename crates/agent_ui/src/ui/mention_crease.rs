@@ -268,7 +268,7 @@ fn open_thread(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    use crate::AgentPanel;
+    use crate::{Agent, AgentPanel, thread_metadata_store::ThreadMetadataStore};
 
     let Some(panel) = workspace.panel::<AgentPanel>(cx) else {
         return;
@@ -276,7 +276,22 @@ fn open_thread(
 
     // Right now we only support loading threads in the native agent.
     panel.update(cx, |panel, cx| {
-        panel.open_thread(id, None, Some(name.into()), window, cx)
+        let thread_id = ThreadMetadataStore::try_global(cx)
+            .and_then(|store| store.read(cx).entry_by_session(&id).map(|m| m.thread_id));
+        if let Some(thread_id) = thread_id {
+            panel.load_agent_thread(
+                Agent::NativeAgent,
+                thread_id,
+                None,
+                Some(name.into()),
+                true,
+                "agent_panel",
+                window,
+                cx,
+            );
+        } else {
+            panel.open_thread(id, None, Some(name.into()), window, cx);
+        }
     });
 }
 
