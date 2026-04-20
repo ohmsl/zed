@@ -1281,7 +1281,18 @@ fn into_copilot_responses(
         temperature,
         tools: converted_tools,
         tool_choice: mapped_tool_choice,
-        reasoning,
+        reasoning: if thinking_allowed {
+            let effort = thinking_effort
+                .as_deref()
+                .and_then(|e| e.parse::<copilot_responses::ReasoningEffort>().ok())
+                .unwrap_or(copilot_responses::ReasoningEffort::Medium);
+            Some(copilot_responses::ReasoningConfig {
+                effort,
+                summary: Some(copilot_responses::ReasoningSummary::Detailed),
+            })
+        } else {
+            None
+        },
         include: Some(vec![
             copilot_responses::ResponseIncludable::ReasoningEncryptedContent,
         ]),
