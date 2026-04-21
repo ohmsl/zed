@@ -262,20 +262,22 @@ impl GitHostingProvider for Bitbucket {
         source_branch: &str,
     ) -> Option<Url> {
         let ParsedGitRemote { owner, repo } = remote;
-        let encoded_branch = encode(source_branch);
 
         if self.is_self_hosted() {
             let mut url = self
                 .base_url()
                 .join(&format!("projects/{owner}/repos/{repo}/compare/commits"))
                 .ok()?;
-            url.set_query(Some(&format!("sourceBranch=refs/heads/{encoded_branch}")));
+            let source_ref = format!("refs/heads/{source_branch}");
+            let encoded_ref = encode(&source_ref);
+            url.set_query(Some(&format!("sourceBranch={encoded_ref}")));
             Some(url)
         } else {
             let mut url = self
                 .base_url()
                 .join(&format!("{owner}/{repo}/pull-requests/new"))
                 .ok()?;
+            let encoded_branch = encode(source_branch);
             url.set_query(Some(&format!("source={encoded_branch}")));
             Some(url)
         }
@@ -586,7 +588,7 @@ mod tests {
 
         assert_eq!(
             url.as_str(),
-            "https://bitbucket.company.com/projects/zed-industries/repos/zed/compare/commits?sourceBranch=refs%2Fheads%2Ffeature%252Fmy-branch"
+            "https://bitbucket.company.com/projects/zed-industries/repos/zed/compare/commits?sourceBranch=refs%2Fheads%2Ffeature%2Fmy-branch"
         );
     }
 
