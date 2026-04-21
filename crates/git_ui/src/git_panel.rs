@@ -3886,7 +3886,11 @@ impl GitPanel {
 
             let status_toast = StatusToast::new(message, cx, move |this, _cx| {
                 use remote_output::SuccessStyle::*;
-                let this = this.icon(Icon::new(IconName::GitBranch).size(IconSize::Small).color(Color::Muted));
+                let this = this.icon(
+                    Icon::new(IconName::GitBranch)
+                        .size(IconSize::Small)
+                        .color(Color::Muted),
+                );
                 match (style, is_push) {
                     (Toast | ToastWithLog { .. }, true) => {
                         this.action("Create Pull Request", move |window, cx| {
