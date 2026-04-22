@@ -3034,6 +3034,8 @@ async fn test_search_results_refreshed_on_worktree_updates(cx: &mut gpui::TestAp
         .await
         .expect("unable to remove file");
     cx.executor().advance_clock(FS_WATCH_LATENCY);
+    cx.executor()
+        .advance_clock(FileFinderDelegate::SCAN_REFRESH_DEBOUNCE);
 
     // main.rs is in not among search results anymore
     picker.update(cx, |finder, _| {
@@ -3049,6 +3051,8 @@ async fn test_search_results_refreshed_on_worktree_updates(cx: &mut gpui::TestAp
         .await
         .expect("unable to create file");
     cx.executor().advance_clock(FS_WATCH_LATENCY);
+    cx.executor()
+        .advance_clock(FileFinderDelegate::SCAN_REFRESH_DEBOUNCE);
 
     // util.rs is among search results
     picker.update(cx, |finder, _| {
@@ -3176,6 +3180,8 @@ async fn test_search_results_refreshed_on_adding_and_removing_worktrees(
         .await
         .expect("unable to create workdir");
     cx.executor().advance_clock(FS_WATCH_LATENCY);
+    cx.executor()
+        .advance_clock(FileFinderDelegate::SCAN_REFRESH_DEBOUNCE);
 
     // main.rs is among search results
     picker.update(cx, |finder, _| {
@@ -3191,6 +3197,8 @@ async fn test_search_results_refreshed_on_adding_and_removing_worktrees(
         project.remove_worktree(worktree_1_id, cx);
     });
     cx.executor().advance_clock(FS_WATCH_LATENCY);
+    cx.executor()
+        .advance_clock(FileFinderDelegate::SCAN_REFRESH_DEBOUNCE);
 
     // Files from the first worktree are not in the search results anymore
     picker.update(cx, |finder, _| {
@@ -3407,6 +3415,8 @@ async fn test_selected_match_stays_selected_after_matches_refreshed(cx: &mut gpu
             .expect("unable to create file");
         // Wait for each file system event to be fully processed before adding the next
         cx.executor().advance_clock(FS_WATCH_LATENCY);
+        cx.executor()
+            .advance_clock(FileFinderDelegate::SCAN_REFRESH_DEBOUNCE);
         cx.run_until_parked();
     }
 
@@ -3454,6 +3464,8 @@ async fn test_first_match_selected_if_previous_one_is_not_in_the_match_list(
         .await
         .expect("unable to remove file");
     cx.executor().advance_clock(FS_WATCH_LATENCY);
+    cx.executor()
+        .advance_clock(FileFinderDelegate::SCAN_REFRESH_DEBOUNCE);
 
     // file_1.txt is now selected
     picker.update(cx, |finder, _| {
