@@ -77,7 +77,7 @@ jobs:
             echo "project_name=$PROJECT_NAME"
         } >> "$GITHUB_OUTPUT"
       env:
-        CHANNEL: inputs.channel
+        CHANNEL: ${{ inputs.channel }}
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:

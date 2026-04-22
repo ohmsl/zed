@@ -255,7 +255,7 @@ pub(crate) fn deploy_docs_job(
     checkout_ref_input: &WorkflowInput,
 ) -> NamedJob {
     docs_job(
-        channel_input.expr(),
+        channel_input.to_string(),
         Some(format!(
             "${{{{ {} != '' && {} || github.sha }}}}",
             checkout_ref_input.expr(),
