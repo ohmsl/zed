@@ -2,16 +2,19 @@ export default {
   async fetch(request, _env, _ctx) {
     const url = new URL(request.url);
 
-    let hostname;
-    if (url.pathname.startsWith("/docs/nightly")) {
-      hostname = "docs-nightly.pages.dev";
-    } else if (url.pathname.startsWith("/docs/preview")) {
-      hostname = "docs-preview.pages.dev";
+    if (url.pathname === "/docs/nightly" || url.pathname.startsWith("/docs/nightly/")) {
+      url.hostname = "docs-nightly.pages.dev";
+      url.pathname = url.pathname.replace("/docs/nightly", "/docs");
+    } else if (
+      url.pathname === "/docs/preview" ||
+      url.pathname.startsWith("/docs/preview/")
+    ) {
+      url.hostname = "docs-preview-5xd.pages.dev";
+      url.pathname = url.pathname.replace("/docs/preview", "/docs");
     } else {
-      hostname = "docs-anw.pages.dev";
+      url.hostname = "docs-anw.pages.dev";
     }
 
-    url.hostname = hostname;
     let res = await fetch(url, request);
 
     if (res.status === 404) {
