@@ -63,16 +63,13 @@ pub(crate) fn install_mdbook() -> Step<Use> {
     .with(("mdbook-version", "0.4.37"))
 }
 
-pub(crate) fn build_docs_book(
-    docs_channel: impl Into<String>,
-    site_url: impl Into<String>,
-) -> Step<Run> {
+pub(crate) fn build_docs_book(docs_channel: String, site_url: String) -> Step<Run> {
     named::bash(indoc::formatdoc! {r#"
         mkdir -p {BUILD_OUTPUT_DIR}
         mdbook build ./docs --dest-dir=../{BUILD_OUTPUT_DIR}/docs/
     "#})
-    .add_env(("DOCS_CHANNEL", docs_channel.into()))
-    .add_env(("MDBOOK_BOOK__SITE_URL", site_url.into()))
+    .add_env(("DOCS_CHANNEL", docs_channel))
+    .add_env(("MDBOOK_BOOK__SITE_URL", site_url))
 }
 
 fn docs_build_steps(
@@ -98,7 +95,10 @@ fn docs_build_steps(
             .add_step(steps::script("./script/generate-action-metadata"))
             .add_step(lychee_link_check("./docs/src/**/*"))
             .add_step(install_mdbook())
-            .add_step(build_docs_book(docs_channel, site_url))
+            .add_step(build_docs_book(
+                docs_channel.to_string(),
+                site_url.to_string(),
+            ))
             .add_step(lychee_link_check(&format!("{BUILD_OUTPUT_DIR}/docs"))),
     )
 }
