@@ -455,28 +455,40 @@ impl Search {
                         snapshot = worktree.read_with(cx, |this, _| this.snapshot());
                     }
 
-                    for entry in snapshot.files(include_ignored, 0) {
-                        Self::queue_file_for_search(
-                            entry.clone(),
-                            snapshot.clone(),
-                            tx.clone(),
-                            results.clone(),
-                        )
-                        .await?;
-                    }
+                    cx.background_spawn({
+                        let snapshot = snapshot.clone();
+                        let tx = tx.clone();
+                        let results = results.clone();
+                        async move {
+                            for entry in snapshot.files(include_ignored, 0) {
+                                Self::queue_file_for_search(
+                                    entry.clone(),
+                                    snapshot.clone(),
+                                    tx.clone(),
+                                    results.clone(),
+                                )
+                                .await?;
+                            }
+                            anyhow::Ok(())
+                        }
+                    })
+                    .await
+                    .context("queueing initial search files")?;
 
                     if snapshot_scan_incomplete {
                         let updated_snapshot = Self::wait_for_stable_snapshot(worktree.clone(), cx)
                             .await
                             .context("waiting for worktree scan to complete")?;
-                        Self::queue_newly_discovered_files(
+
+                        cx.background_spawn(Self::queue_newly_discovered_files(
                             snapshot,
                             updated_snapshot,
                             include_ignored,
                             tx.clone(),
                             results.clone(),
-                        )
-                        .await?;
+                        ))
+                        .await
+                        .context("queueing newly discovered search files")?;
                     }
                 }
                 anyhow::Ok(())
