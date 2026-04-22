@@ -11,7 +11,8 @@ const TAG_NAME_ENV: &str = "${{ github.event.release.tag_name || inputs.tag_name
 const IS_PRERELEASE_ENV: &str = "${{ github.event.release.prerelease || inputs.prerelease }}";
 const TAG_NAME: &str = "${{ env.TAG_NAME }}";
 const RELEASE_BODY: &str = "${{ github.event.release.body || inputs.body }}";
-const DOCS_CHANNEL: &str = "${{ env.IS_PRERELEASE == 'true' && 'preview' || 'stable' }}";
+const DOCS_CHANNEL: &str =
+    "${{ (github.event.release.prerelease || inputs.prerelease) && 'preview' || 'stable' }}";
 
 pub fn after_release() -> Workflow {
     let tag_name = WorkflowInput::string("tag_name", None);
@@ -70,7 +71,7 @@ fn deploy_docs() -> NamedJob<UsesJob> {
         .with(
             Input::default()
                 .add("channel", DOCS_CHANNEL)
-                .add("checkout_ref", TAG_NAME),
+                .add("checkout_ref", TAG_NAME_ENV),
         )
         .secrets(indexmap::IndexMap::from([
             (
@@ -95,7 +96,7 @@ fn deploy_docs() -> NamedJob<UsesJob> {
 
 fn rebuild_releases_page() -> NamedJob {
     fn refresh_cloud_releases() -> Step<Run> {
-        named::bash("curl -fX POST https://cloud.zed.dev/releases/refresh?expect_tag=$TAG_NAME")
+        named::bash("curl -fX POST \"https://cloud.zed.dev/releases/refresh?expect_tag=$TAG_NAME\"")
     }
 
     fn redeploy_zed_dev() -> Step<Run> {

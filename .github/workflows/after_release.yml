@@ -28,7 +28,7 @@ jobs:
     runs-on: namespace-profile-2x4-ubuntu-2404
     steps:
     - name: after_release::rebuild_releases_page::refresh_cloud_releases
-      run: curl -fX POST https://cloud.zed.dev/releases/refresh?expect_tag=$TAG_NAME
+      run: curl -fX POST "https://cloud.zed.dev/releases/refresh?expect_tag=$TAG_NAME"
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
@@ -47,8 +47,8 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     with:
-      channel: ${{ env.IS_PRERELEASE == 'true' && 'preview' || 'stable' }}
-      checkout_ref: ${{ env.TAG_NAME }}
+      channel: ${{ (github.event.release.prerelease || inputs.prerelease) && 'preview' || 'stable' }}
+      checkout_ref: ${{ github.event.release.tag_name || inputs.tag_name }}
   post_to_discord:
     needs:
     - rebuild_releases_page

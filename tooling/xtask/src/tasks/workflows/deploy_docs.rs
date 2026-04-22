@@ -63,11 +63,16 @@ pub(crate) fn install_mdbook() -> Step<Use> {
     .with(("mdbook-version", "0.4.37"))
 }
 
-pub(crate) fn build_docs_book() -> Step<Run> {
+pub(crate) fn build_docs_book(
+    docs_channel: impl Into<String>,
+    site_url: impl Into<String>,
+) -> Step<Run> {
     named::bash(indoc::formatdoc! {r#"
         mkdir -p {BUILD_OUTPUT_DIR}
         mdbook build ./docs --dest-dir=../{BUILD_OUTPUT_DIR}/docs/
     "#})
+    .add_env(("DOCS_CHANNEL", docs_channel.into()))
+    .add_env(("MDBOOK_BOOK__SITE_URL", site_url.into()))
 }
 
 fn docs_build_steps(
@@ -76,14 +81,15 @@ fn docs_build_steps(
     docs_channel: impl Into<String>,
     site_url: impl Into<String>,
 ) -> Job {
+    let docs_channel = docs_channel.into();
+    let site_url = site_url.into();
+
     job.add_env(("DOCS_AMPLITUDE_API_KEY", vars::DOCS_AMPLITUDE_API_KEY))
         .add_step(
             steps::checkout_repo().when_some(checkout_ref, |step, checkout_ref| {
                 step.with_ref(checkout_ref)
             }),
         )
-        .add_env(("MDBOOK_BOOK__SITE_URL", site_url.into()))
-        .add_env(("DOCS_CHANNEL", docs_channel.into()))
         .runs_on(runners::LINUX_XL)
         .add_step(steps::setup_cargo_config(runners::Platform::Linux))
         .add_step(steps::cache_rust_dependencies_namespace())
@@ -91,7 +97,7 @@ fn docs_build_steps(
         .add_step(steps::script("./script/generate-action-metadata"))
         .add_step(lychee_link_check("./docs/src/**/*"))
         .add_step(install_mdbook())
-        .add_step(build_docs_book())
+        .add_step(build_docs_book(docs_channel, site_url))
         .add_step(lychee_link_check(&format!("{BUILD_OUTPUT_DIR}/docs")))
 }
 
@@ -200,9 +206,11 @@ fn resolve_channel_step(
                     ;;
             esac
 
-            echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
-            echo "site_url=$SITE_URL" >> "$GITHUB_OUTPUT"
-            echo "project_name=$PROJECT_NAME" >> "$GITHUB_OUTPUT"
+            {{
+                echo "channel=$CHANNEL"
+                echo "site_url=$SITE_URL"
+                echo "project_name=$PROJECT_NAME"
+            }} >> "$GITHUB_OUTPUT"
         "#},
         nightly_site_url = DocsChannel::Nightly.site_url(),
         preview_site_url = DocsChannel::Preview.site_url(),
