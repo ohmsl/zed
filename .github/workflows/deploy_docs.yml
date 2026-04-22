@@ -2,14 +2,34 @@
 # Rebuild with `cargo xtask workflows`.
 name: deploy_docs
 on:
+  workflow_call:
+    inputs:
+      channel:
+        description: channel
+        type: string
+        default: ''
+      checkout_ref:
+        description: checkout_ref
+        type: string
+        default: ''
+    secrets:
+      DOCS_AMPLITUDE_API_KEY:
+        description: DOCS_AMPLITUDE_API_KEY
+        required: true
+      CLOUDFLARE_API_TOKEN:
+        description: CLOUDFLARE_API_TOKEN
+        required: true
+      CLOUDFLARE_ACCOUNT_ID:
+        description: CLOUDFLARE_ACCOUNT_ID
+        required: true
   workflow_dispatch:
     inputs:
       channel:
         description: 'Docs channel to deploy: nightly, preview, or stable'
         type: string
         default: ''
-      commit_sha:
-        description: Exact commit SHA to checkout and deploy. Defaults to event SHA when omitted.
+      checkout_ref:
+        description: Git ref to checkout and deploy. Defaults to event SHA when omitted.
         type: string
         default: ''
 jobs:
@@ -62,7 +82,7 @@ jobs:
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
-        ref: ${{ inputs.commit_sha != '' && inputs.commit_sha || github.sha }}
+        ref: ${{ inputs.checkout_ref != '' && inputs.checkout_ref || github.sha }}
     - name: steps::setup_cargo_config
       run: |
         mkdir -p ./../.cargo

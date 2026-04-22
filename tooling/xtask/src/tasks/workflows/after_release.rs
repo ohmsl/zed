@@ -1,7 +1,6 @@
 use gh_workflow::*;
 
 use crate::tasks::workflows::{
-    deploy_docs,
     release::{self, notify_on_failure},
     runners,
     steps::{CommonJobConditions, NamedJob, checkout_repo, dependant_job, named},
@@ -9,28 +8,32 @@ use crate::tasks::workflows::{
 };
 
 const TAG_NAME: &str = "${{ github.event.release.tag_name || inputs.tag_name }}";
-const IS_PRERELEASE: &str = "${{ github.event.release.prerelease || inputs.prerelease }}";
+const IS_PRERELEASE: &str =
+    "${{ endsWith(github.event.release.tag_name || inputs.tag_name, '-pre') }}";
 const RELEASE_BODY: &str = "${{ github.event.release.body || inputs.body }}";
-const DOCS_CHANNEL: &str =
-    "${{ (github.event.release.prerelease || inputs.prerelease) && 'preview' || 'stable' }}";
+const DOCS_CHANNEL: &str = "${{ endsWith(github.event.release.tag_name || inputs.tag_name, '-pre') && 'preview' || 'stable' }}";
 
 pub fn after_release() -> Workflow {
     let tag_name = WorkflowInput::string("tag_name", None);
-    let prerelease = WorkflowInput::bool("prerelease", None);
     let body = WorkflowInput::string("body", Some(String::new()));
 
     let refresh_zed_dev = rebuild_releases_page();
-    let deploy_docs = deploy_docs::release_docs_job(DOCS_CHANNEL, TAG_NAME);
+    let deploy_docs = deploy_docs();
     let post_to_discord = post_to_discord(&[&refresh_zed_dev]);
     let publish_winget = publish_winget();
     let create_sentry_release = create_sentry_release();
-    let notify_on_failure = notify_on_failure(&[
-        &refresh_zed_dev,
-        &deploy_docs,
-        &post_to_discord,
-        &publish_winget,
-        &create_sentry_release,
-    ]);
+    let notify_on_failure = {
+        let notify_on_failure = notify_on_failure(&[
+            &refresh_zed_dev,
+            &post_to_discord,
+            &publish_winget,
+            &create_sentry_release,
+        ]);
+        NamedJob {
+            name: notify_on_failure.name,
+            job: notify_on_failure.job.add_need(deploy_docs.name.clone()),
+        }
+    };
 
     named::workflow()
         .on(Event::default()
@@ -38,7 +41,6 @@ pub fn after_release() -> Workflow {
             .workflow_dispatch(
                 WorkflowDispatch::default()
                     .add_input(tag_name.name, tag_name.input())
-                    .add_input(prerelease.name, prerelease.input())
                     .add_input(body.name, body.input()),
             ))
         .add_job(refresh_zed_dev.name, refresh_zed_dev.job)
@@ -47,6 +49,44 @@ pub fn after_release() -> Workflow {
         .add_job(publish_winget.name, publish_winget.job)
         .add_job(create_sentry_release.name, create_sentry_release.job)
         .add_job(notify_on_failure.name, notify_on_failure.job)
+}
+
+fn deploy_docs() -> NamedJob<UsesJob> {
+    let job = Job::default()
+        .cond(Expression::new(
+            "github.repository_owner == 'zed-industries'",
+        ))
+        .permissions(Permissions::default().contents(Level::Read))
+        .uses(
+            "zed-industries",
+            "zed",
+            ".github/workflows/deploy_docs.yml",
+            "main",
+        )
+        .with(
+            Input::default()
+                .add("channel", DOCS_CHANNEL)
+                .add("checkout_ref", TAG_NAME),
+        )
+        .secrets(indexmap::IndexMap::from([
+            (
+                "DOCS_AMPLITUDE_API_KEY".to_owned(),
+                vars::DOCS_AMPLITUDE_API_KEY.to_owned(),
+            ),
+            (
+                "CLOUDFLARE_API_TOKEN".to_owned(),
+                vars::CLOUDFLARE_API_TOKEN.to_owned(),
+            ),
+            (
+                "CLOUDFLARE_ACCOUNT_ID".to_owned(),
+                vars::CLOUDFLARE_ACCOUNT_ID.to_owned(),
+            ),
+        ]));
+
+    NamedJob {
+        name: "deploy_docs".to_owned(),
+        job,
+    }
 }
 
 fn rebuild_releases_page() -> NamedJob {

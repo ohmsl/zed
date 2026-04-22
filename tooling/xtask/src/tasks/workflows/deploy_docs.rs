@@ -1,4 +1,7 @@
-use gh_workflow::{Event, Expression, Job, Run, Step, Use, Workflow, WorkflowDispatch};
+use gh_workflow::{
+    Event, Expression, Job, Run, Step, Use, Workflow, WorkflowCall, WorkflowCallSecret,
+    WorkflowDispatch,
+};
 
 use crate::tasks::workflows::{
     runners,
@@ -239,23 +242,16 @@ fn docs_job(channel_expr: impl Into<String>, checkout_ref: Option<String>) -> Na
     }
 }
 
-pub(crate) fn release_docs_job(
-    channel_expr: impl Into<String>,
-    checkout_ref: impl Into<String>,
-) -> NamedJob {
-    docs_job(channel_expr, Some(checkout_ref.into()))
-}
-
 pub(crate) fn deploy_docs_job(
     channel_input: &WorkflowInput,
-    commit_sha_input: &WorkflowInput,
+    checkout_ref_input: &WorkflowInput,
 ) -> NamedJob {
     docs_job(
         channel_input.expr(),
         Some(format!(
             "${{{{ {} != '' && {} || github.sha }}}}",
-            commit_sha_input.expr(),
-            commit_sha_input.expr()
+            checkout_ref_input.expr(),
+            checkout_ref_input.expr()
         )),
     )
 }
@@ -263,16 +259,47 @@ pub(crate) fn deploy_docs_job(
 pub(crate) fn deploy_docs() -> Workflow {
     let channel = WorkflowInput::string("channel", Some(String::new()))
         .description("Docs channel to deploy: nightly, preview, or stable");
-    let commit_sha = WorkflowInput::string("commit_sha", Some(String::new())).description(
-        "Exact commit SHA to checkout and deploy. Defaults to event SHA when omitted.",
-    );
-    let deploy_docs = deploy_docs_job(&channel, &commit_sha);
+    let checkout_ref = WorkflowInput::string("checkout_ref", Some(String::new()))
+        .description("Git ref to checkout and deploy. Defaults to event SHA when omitted.");
+    let deploy_docs = deploy_docs_job(&channel, &checkout_ref);
 
     named::workflow()
-        .on(Event::default().workflow_dispatch(
-            WorkflowDispatch::default()
-                .add_input(channel.name, channel.input())
-                .add_input(commit_sha.name, commit_sha.input()),
-        ))
+        .add_event(
+            Event::default().workflow_dispatch(
+                WorkflowDispatch::default()
+                    .add_input(channel.name, channel.input())
+                    .add_input(checkout_ref.name, checkout_ref.input()),
+            ),
+        )
+        .add_event(
+            Event::default().workflow_call(
+                WorkflowCall::default()
+                    .add_input(channel.name, channel.call_input())
+                    .add_input(checkout_ref.name, checkout_ref.call_input())
+                    .secrets([
+                        (
+                            "DOCS_AMPLITUDE_API_KEY".to_owned(),
+                            WorkflowCallSecret {
+                                description: "DOCS_AMPLITUDE_API_KEY".to_owned(),
+                                required: true,
+                            },
+                        ),
+                        (
+                            "CLOUDFLARE_API_TOKEN".to_owned(),
+                            WorkflowCallSecret {
+                                description: "CLOUDFLARE_API_TOKEN".to_owned(),
+                                required: true,
+                            },
+                        ),
+                        (
+                            "CLOUDFLARE_ACCOUNT_ID".to_owned(),
+                            WorkflowCallSecret {
+                                description: "CLOUDFLARE_ACCOUNT_ID".to_owned(),
+                                required: true,
+                            },
+                        ),
+                    ]),
+            ),
+        )
         .add_job(deploy_docs.name, deploy_docs.job)
 }
