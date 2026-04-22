@@ -15,7 +15,6 @@ mod compliance_check;
 mod danger;
 mod deploy_collab;
 mod deploy_docs;
-mod deploy_docs_nightly_pr;
 mod extension_auto_bump;
 mod extension_bump;
 mod extension_tests;
@@ -204,7 +203,6 @@ pub fn run_workflows(args: GenerateWorkflowArgs) -> Result<()> {
         WorkflowFile::zed(danger::danger),
         WorkflowFile::zed(deploy_collab::deploy_collab),
         WorkflowFile::zed(deploy_docs::deploy_docs),
-        WorkflowFile::zed(deploy_docs_nightly_pr::deploy_docs_nightly_pr),
         WorkflowFile::zed(extension_bump::extension_bump),
         WorkflowFile::zed(extension_auto_bump::extension_auto_bump),
         WorkflowFile::zed(extension_tests::extension_tests),
