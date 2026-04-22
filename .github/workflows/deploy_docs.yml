@@ -2,29 +2,6 @@
 # Rebuild with `cargo xtask workflows`.
 name: deploy_docs
 on:
-  push:
-    branches:
-    - main
-  workflow_call:
-    inputs:
-      channel:
-        description: channel
-        type: string
-        default: ''
-      commit_sha:
-        description: commit_sha
-        type: string
-        default: ''
-    secrets:
-      DOCS_AMPLITUDE_API_KEY:
-        description: DOCS_AMPLITUDE_API_KEY
-        required: true
-      CLOUDFLARE_API_TOKEN:
-        description: CLOUDFLARE_API_TOKEN
-        required: true
-      CLOUDFLARE_ACCOUNT_ID:
-        description: CLOUDFLARE_ACCOUNT_ID
-        required: true
   workflow_dispatch:
     inputs:
       channel:
@@ -46,7 +23,7 @@ jobs:
       DOCS_CHANNEL: ${{ steps.resolve-channel.outputs.channel }}
     steps:
     - id: resolve-channel
-      name: deploy_docs::deploy_docs_job::resolve_channel_step
+      name: deploy_docs::resolve_channel_step
       run: |
         if [ -z "$CHANNEL" ]; then
             if [ "$GITHUB_REF" = "refs/heads/main" ]; then
@@ -80,7 +57,7 @@ jobs:
         echo "site_url=$SITE_URL" >> "$GITHUB_OUTPUT"
         echo "project_name=$PROJECT_NAME" >> "$GITHUB_OUTPUT"
       env:
-        CHANNEL: ${ inputs.channel }
+        CHANNEL: inputs.channel
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:

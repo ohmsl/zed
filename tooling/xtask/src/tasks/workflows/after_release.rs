@@ -1,6 +1,7 @@
 use gh_workflow::*;
 
 use crate::tasks::workflows::{
+    deploy_docs,
     release::{self, notify_on_failure},
     runners,
     steps::{CommonJobConditions, NamedJob, checkout_repo, dependant_job, named},
@@ -10,6 +11,8 @@ use crate::tasks::workflows::{
 const TAG_NAME: &str = "${{ github.event.release.tag_name || inputs.tag_name }}";
 const IS_PRERELEASE: &str = "${{ github.event.release.prerelease || inputs.prerelease }}";
 const RELEASE_BODY: &str = "${{ github.event.release.body || inputs.body }}";
+const DOCS_CHANNEL: &str =
+    "${{ (github.event.release.prerelease || inputs.prerelease) && 'preview' || 'stable' }}";
 
 pub fn after_release() -> Workflow {
     let tag_name = WorkflowInput::string("tag_name", None);
@@ -17,11 +20,13 @@ pub fn after_release() -> Workflow {
     let body = WorkflowInput::string("body", Some(String::new()));
 
     let refresh_zed_dev = rebuild_releases_page();
+    let deploy_docs = deploy_docs::release_docs_job(DOCS_CHANNEL, TAG_NAME);
     let post_to_discord = post_to_discord(&[&refresh_zed_dev]);
     let publish_winget = publish_winget();
     let create_sentry_release = create_sentry_release();
     let notify_on_failure = notify_on_failure(&[
         &refresh_zed_dev,
+        &deploy_docs,
         &post_to_discord,
         &publish_winget,
         &create_sentry_release,
@@ -37,6 +42,7 @@ pub fn after_release() -> Workflow {
                     .add_input(body.name, body.input()),
             ))
         .add_job(refresh_zed_dev.name, refresh_zed_dev.job)
+        .add_job(deploy_docs.name, deploy_docs.job)
         .add_job(post_to_discord.name, post_to_discord.job)
         .add_job(publish_winget.name, publish_winget.job)
         .add_job(create_sentry_release.name, create_sentry_release.job)

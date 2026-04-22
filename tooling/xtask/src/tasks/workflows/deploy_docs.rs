@@ -1,7 +1,4 @@
-use gh_workflow::{
-    Event, Expression, Job, Push, Run, Step, Use, Workflow, WorkflowCall, WorkflowCallSecret,
-    WorkflowDispatch,
-};
+use gh_workflow::{Event, Expression, Job, Run, Step, Use, Workflow, WorkflowDispatch};
 
 use crate::tasks::workflows::{
     runners,
@@ -167,64 +164,61 @@ pub(crate) fn check_docs() -> NamedJob {
     }
 }
 
-pub(crate) fn deploy_docs_job(
-    channel_input: &WorkflowInput,
-    commit_sha_input: &WorkflowInput,
-) -> NamedJob {
-    fn resolve_channel_step(
-        channel_input: &WorkflowInput,
-    ) -> (Step<Run>, StepOutput, StepOutput, StepOutput) {
-        let step = named::bash(format!(
-            indoc::indoc! {r#"
-                if [ -z "$CHANNEL" ]; then
-                    if [ "$GITHUB_REF" = "refs/heads/main" ]; then
-                        CHANNEL="nightly"
-                    else
-                        echo "::error::channel input is required when ref is not main."
-                        exit 1
-                    fi
+fn resolve_channel_step(
+    channel_expr: impl Into<String>,
+) -> (Step<Run>, StepOutput, StepOutput, StepOutput) {
+    let step = Step::new("deploy_docs::resolve_channel_step").run(format!(
+        indoc::indoc! {r#"
+            if [ -z "$CHANNEL" ]; then
+                if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+                    CHANNEL="nightly"
+                else
+                    echo "::error::channel input is required when ref is not main."
+                    exit 1
                 fi
+            fi
 
-                case "$CHANNEL" in
-                    "nightly")
-                        SITE_URL="{nightly_site_url}"
-                        PROJECT_NAME="{nightly_project_name}"
-                        ;;
-                    "preview")
-                        SITE_URL="{preview_site_url}"
-                        PROJECT_NAME="{preview_project_name}"
-                        ;;
-                    "stable")
-                        SITE_URL="{stable_site_url}"
-                        PROJECT_NAME="{stable_project_name}"
-                        ;;
-                    *)
-                        echo "::error::Invalid docs channel '$CHANNEL'. Expected one of: nightly, preview, stable."
-                        exit 1
-                        ;;
-                esac
+            case "$CHANNEL" in
+                "nightly")
+                    SITE_URL="{nightly_site_url}"
+                    PROJECT_NAME="{nightly_project_name}"
+                    ;;
+                "preview")
+                    SITE_URL="{preview_site_url}"
+                    PROJECT_NAME="{preview_project_name}"
+                    ;;
+                "stable")
+                    SITE_URL="{stable_site_url}"
+                    PROJECT_NAME="{stable_project_name}"
+                    ;;
+                *)
+                    echo "::error::Invalid docs channel '$CHANNEL'. Expected one of: nightly, preview, stable."
+                    exit 1
+                    ;;
+            esac
 
-                echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
-                echo "site_url=$SITE_URL" >> "$GITHUB_OUTPUT"
-                echo "project_name=$PROJECT_NAME" >> "$GITHUB_OUTPUT"
-            "#},
-            nightly_site_url = DocsChannel::Nightly.site_url(),
-            preview_site_url = DocsChannel::Preview.site_url(),
-            stable_site_url = DocsChannel::Stable.site_url(),
-            nightly_project_name = DocsChannel::Nightly.project_name(),
-            preview_project_name = DocsChannel::Preview.project_name(),
-            stable_project_name = DocsChannel::Stable.project_name(),
-        ))
-        .id("resolve-channel")
-        .add_env(("CHANNEL", channel_input.expr()))
-        ;
+            echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+            echo "site_url=$SITE_URL" >> "$GITHUB_OUTPUT"
+            echo "project_name=$PROJECT_NAME" >> "$GITHUB_OUTPUT"
+        "#},
+        nightly_site_url = DocsChannel::Nightly.site_url(),
+        preview_site_url = DocsChannel::Preview.site_url(),
+        stable_site_url = DocsChannel::Stable.site_url(),
+        nightly_project_name = DocsChannel::Nightly.project_name(),
+        preview_project_name = DocsChannel::Preview.project_name(),
+        stable_project_name = DocsChannel::Stable.project_name(),
+    ))
+    .id("resolve-channel")
+    .add_env(("CHANNEL", channel_expr.into()));
 
-        let channel = StepOutput::new(&step, "channel");
-        let site_url = StepOutput::new(&step, "site_url");
-        let project_name = StepOutput::new(&step, "project_name");
-        (step, channel, site_url, project_name)
-    }
-    let (resolve_step, channel, site_url, project_name) = resolve_channel_step(channel_input);
+    let channel = StepOutput::new(&step, "channel");
+    let site_url = StepOutput::new(&step, "site_url");
+    let project_name = StepOutput::new(&step, "project_name");
+    (step, channel, site_url, project_name)
+}
+
+fn docs_job(channel_expr: impl Into<String>, checkout_ref: Option<String>) -> NamedJob {
+    let (resolve_step, channel, site_url, project_name) = resolve_channel_step(channel_expr);
 
     NamedJob {
         name: "deploy_docs".to_owned(),
@@ -236,17 +230,34 @@ pub(crate) fn deploy_docs_job(
                         "github.repository_owner == 'zed-industries'",
                     ))
                     .add_step(resolve_step),
-                Some(format!(
-                    "${{{{ {} != '' && {} || github.sha }}}}",
-                    commit_sha_input.expr(),
-                    commit_sha_input.expr()
-                )),
+                checkout_ref,
                 channel.to_string(),
                 site_url.to_string(),
             ),
             &project_name,
         ),
     }
+}
+
+pub(crate) fn release_docs_job(
+    channel_expr: impl Into<String>,
+    checkout_ref: impl Into<String>,
+) -> NamedJob {
+    docs_job(channel_expr, Some(checkout_ref.into()))
+}
+
+pub(crate) fn deploy_docs_job(
+    channel_input: &WorkflowInput,
+    commit_sha_input: &WorkflowInput,
+) -> NamedJob {
+    docs_job(
+        channel_input.expr(),
+        Some(format!(
+            "${{{{ {} != '' && {} || github.sha }}}}",
+            commit_sha_input.expr(),
+            commit_sha_input.expr()
+        )),
+    )
 }
 
 pub(crate) fn deploy_docs() -> Workflow {
@@ -258,44 +269,10 @@ pub(crate) fn deploy_docs() -> Workflow {
     let deploy_docs = deploy_docs_job(&channel, &commit_sha);
 
     named::workflow()
-        .add_event(
-            Event::default()
-                .push(Push::default().add_branch("main"))
-                .workflow_dispatch(
-                    WorkflowDispatch::default()
-                        .add_input(channel.name, channel.input())
-                        .add_input(commit_sha.name, commit_sha.input()),
-                ),
-        )
-        .add_event(
-            Event::default().workflow_call(
-                WorkflowCall::default()
-                    .add_input(channel.name, channel.call_input())
-                    .add_input(commit_sha.name, commit_sha.call_input())
-                    .secrets([
-                        (
-                            "DOCS_AMPLITUDE_API_KEY".to_owned(),
-                            WorkflowCallSecret {
-                                description: "DOCS_AMPLITUDE_API_KEY".to_owned(),
-                                required: true,
-                            },
-                        ),
-                        (
-                            "CLOUDFLARE_API_TOKEN".to_owned(),
-                            WorkflowCallSecret {
-                                description: "CLOUDFLARE_API_TOKEN".to_owned(),
-                                required: true,
-                            },
-                        ),
-                        (
-                            "CLOUDFLARE_ACCOUNT_ID".to_owned(),
-                            WorkflowCallSecret {
-                                description: "CLOUDFLARE_ACCOUNT_ID".to_owned(),
-                                required: true,
-                            },
-                        ),
-                    ]),
-            ),
-        )
+        .on(Event::default().workflow_dispatch(
+            WorkflowDispatch::default()
+                .add_input(channel.name, channel.input())
+                .add_input(commit_sha.name, commit_sha.input()),
+        ))
         .add_job(deploy_docs.name, deploy_docs.job)
 }
