@@ -7363,6 +7363,10 @@ mod tests {
             panel.on_amend(&Amend, window, cx);
         });
 
+        // Since the actual commit logic is run in a background task, we need to
+        // await its completion to actually ensure that the commit message
+        // editor's contents are set to the original message and haven't been
+        // cleared.
         cx.run_until_parked();
 
         panel.update_in(cx, |panel, _window, cx| {
