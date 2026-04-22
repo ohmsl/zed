@@ -115,7 +115,7 @@ fn docs_deploy_steps(job: Job, project_name: &StepOutput) -> Job {
         .add_with((
             "command",
             format!(
-                "pages deploy {BUILD_OUTPUT_DIR} --project-name=${{{{ {} }}}}",
+                "pages deploy {BUILD_OUTPUT_DIR} --project-name=${{{{ {} }}}} --branch main",
                 project_name.expr()
             ),
         ))
