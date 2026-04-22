@@ -84,21 +84,23 @@ fn docs_build_steps(
     let docs_channel = docs_channel.into();
     let site_url = site_url.into();
 
-    job.add_env(("DOCS_AMPLITUDE_API_KEY", vars::DOCS_AMPLITUDE_API_KEY))
-        .add_step(
-            steps::checkout_repo().when_some(checkout_ref, |step, checkout_ref| {
-                step.with_ref(checkout_ref)
-            }),
-        )
-        .runs_on(runners::LINUX_XL)
-        .add_step(steps::setup_cargo_config(runners::Platform::Linux))
-        .add_step(steps::cache_rust_dependencies_namespace())
-        .map(steps::install_linux_dependencies)
-        .add_step(steps::script("./script/generate-action-metadata"))
-        .add_step(lychee_link_check("./docs/src/**/*"))
-        .add_step(install_mdbook())
-        .add_step(build_docs_book(docs_channel, site_url))
-        .add_step(lychee_link_check(&format!("{BUILD_OUTPUT_DIR}/docs")))
+    steps::use_clang(
+        job.add_env(("DOCS_AMPLITUDE_API_KEY", vars::DOCS_AMPLITUDE_API_KEY))
+            .add_step(
+                steps::checkout_repo().when_some(checkout_ref, |step, checkout_ref| {
+                    step.with_ref(checkout_ref)
+                }),
+            )
+            .runs_on(runners::LINUX_XL)
+            .add_step(steps::setup_cargo_config(runners::Platform::Linux))
+            .add_step(steps::cache_rust_dependencies_namespace())
+            .map(steps::install_linux_dependencies)
+            .add_step(steps::script("./script/generate-action-metadata"))
+            .add_step(lychee_link_check("./docs/src/**/*"))
+            .add_step(install_mdbook())
+            .add_step(build_docs_book(docs_channel, site_url))
+            .add_step(lychee_link_check(&format!("{BUILD_OUTPUT_DIR}/docs"))),
+    )
 }
 
 fn docs_deploy_steps(job: Job, project_name: &StepOutput) -> Job {

@@ -39,6 +39,8 @@ jobs:
     runs-on: namespace-profile-16x32-ubuntu-2204
     env:
       DOCS_AMPLITUDE_API_KEY: ${{ secrets.DOCS_AMPLITUDE_API_KEY }}
+      CC: clang
+      CXX: clang++
     steps:
     - id: resolve-channel
       name: deploy_docs::resolve_channel_step
