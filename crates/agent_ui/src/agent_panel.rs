@@ -698,6 +698,7 @@ pub struct AgentPanel {
     agent_panel_menu_handle: PopoverMenuHandle<ContextMenu>,
     _extension_subscription: Option<Subscription>,
     _project_subscription: Subscription,
+    _thread_metadata_store_subscription: Option<Subscription>,
     zoomed: bool,
     pending_serialization: Option<Task<Result<()>>>,
     new_user_onboarding: Entity<AgentPanelOnboarding>,
@@ -1022,6 +1023,17 @@ impl AgentPanel {
                 }
                 _ => {}
             });
+        // Archive events aren't emitted directly, but the metadata store
+        // notifies observers on every change. Re-running cleanup on each
+        // notification is cheap and ensures archived threads promptly get
+        // evicted from `retained_threads`, which in turn releases the
+        // underlying `ConversationView` so `close_session` can be dispatched.
+        let _thread_metadata_store_subscription =
+            ThreadMetadataStore::try_global(cx).map(|store| {
+                cx.observe(&store, |this, _store, cx| {
+                    this.cleanup_retained_threads(cx);
+                })
+            });
         let mut panel = Self {
             workspace_id,
             base_view,
@@ -1044,6 +1056,7 @@ impl AgentPanel {
 
             _extension_subscription: extension_subscription,
             _project_subscription,
+            _thread_metadata_store_subscription,
             zoomed: false,
             pending_serialization: None,
             new_user_onboarding: onboarding,
@@ -2066,27 +2079,42 @@ impl AgentPanel {
     }
 
     fn cleanup_retained_threads(&mut self, cx: &App) {
-        let mut potential_removals = self
-            .retained_threads
-            .iter()
-            .filter(|(_id, view)| {
-                let Some(thread_view) = view.read(cx).root_thread_view() else {
-                    return true;
-                };
-                let thread = thread_view.read(cx).thread.read(cx);
-                thread.connection().supports_load_session() && thread.status() == ThreadStatus::Idle
-            })
-            .collect::<Vec<_>>();
+        let metadata_store = ThreadMetadataStore::try_global(cx);
+        let is_archived = |id: &ThreadId| -> bool {
+            metadata_store
+                .as_ref()
+                .and_then(|store| store.read(cx).entry(*id))
+                .is_some_and(|entry| entry.archived)
+        };
+
+        // Archived idle threads are always evicted. Archiving is an explicit
+        // "I'm done with this" signal from the user; we let the session close
+        // even if the connection doesn't support reloading it later.
+        let mut to_remove = Vec::new();
+        let mut capped_candidates = Vec::new();
+        for (id, view) in &self.retained_threads {
+            let Some(thread_view) = view.read(cx).root_thread_view() else {
+                to_remove.push(*id);
+                continue;
+            };
+            let thread = thread_view.read(cx).thread.read(cx);
+            if thread.status() != ThreadStatus::Idle {
+                continue;
+            }
+            if is_archived(id) {
+                to_remove.push(*id);
+                continue;
+            }
+            if thread.connection().supports_load_session() {
+                capped_candidates.push((id, view));
+            }
+        }
 
         let max_idle = MaxIdleRetainedThreads::global(cx);
+        capped_candidates.sort_unstable_by_key(|(_, view)| view.read(cx).updated_at(cx));
+        let n = capped_candidates.len().saturating_sub(max_idle);
+        to_remove.extend(capped_candidates.into_iter().map(|(id, _)| *id).take(n));
 
-        potential_removals.sort_unstable_by_key(|(_, view)| view.read(cx).updated_at(cx));
-        let n = potential_removals.len().saturating_sub(max_idle);
-        let to_remove = potential_removals
-            .into_iter()
-            .map(|(id, _)| *id)
-            .take(n)
-            .collect::<Vec<_>>();
         for id in to_remove {
             self.retained_threads.remove(&id);
         }
