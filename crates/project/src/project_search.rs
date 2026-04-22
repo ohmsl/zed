@@ -1,5 +1,6 @@
 use std::{
     cell::LazyCell,
+    cmp::Ordering,
     collections::BTreeSet,
     io::{BufRead, BufReader},
     ops::Range,
@@ -418,9 +419,13 @@ impl Search {
                 let gitignored_tracker = PathInclusionMatcher::new(query.clone());
                 let include_ignored = query.include_ignored();
                 for worktree in worktrees {
-                    let (mut snapshot, worktree_settings) = worktree
+                    let (mut snapshot, worktree_settings, snapshot_scan_incomplete) = worktree
                         .read_with(cx, |this, _| {
-                            Some((this.snapshot(), this.as_local()?.settings()))
+                            Some((
+                                this.snapshot(),
+                                this.as_local()?.settings(),
+                                this.completed_scan_id() < this.scan_id(),
+                            ))
                         })
                         .context("The worktree is not local")?;
                     if query.include_ignored() {
@@ -449,35 +454,109 @@ impl Search {
                         }
                         snapshot = worktree.read_with(cx, |this, _| this.snapshot());
                     }
-                    let tx = tx.clone();
-                    let results = results.clone();
 
-                    cx.background_executor()
-                        .spawn(async move {
-                            for entry in snapshot.files(include_ignored, 0) {
-                                let (should_scan_tx, should_scan_rx) = oneshot::channel();
+                    for entry in snapshot.files(include_ignored, 0) {
+                        Self::queue_file_for_search(
+                            entry.clone(),
+                            snapshot.clone(),
+                            tx.clone(),
+                            results.clone(),
+                        )
+                        .await?;
+                    }
 
-                                let Ok(_) = tx
-                                    .send(InputPath {
-                                        entry: entry.clone(),
-                                        snapshot: snapshot.clone(),
-                                        should_scan_tx,
-                                    })
-                                    .await
-                                else {
-                                    return;
-                                };
-                                if results.send(should_scan_rx).await.is_err() {
-                                    return;
-                                };
-                            }
-                        })
-                        .await;
+                    if snapshot_scan_incomplete {
+                        let updated_snapshot = Self::wait_for_stable_snapshot(worktree.clone(), cx)
+                            .await
+                            .context("waiting for worktree scan to complete")?;
+                        Self::queue_newly_discovered_files(
+                            snapshot,
+                            updated_snapshot,
+                            include_ignored,
+                            tx.clone(),
+                            results.clone(),
+                        )
+                        .await?;
+                    }
                 }
                 anyhow::Ok(())
             })
             .await;
         }
+    }
+
+    async fn wait_for_stable_snapshot(
+        worktree: Entity<Worktree>,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<Snapshot> {
+        loop {
+            let maybe_wait_for_snapshot = worktree.update(cx, |this, _| {
+                let scan_id = this.scan_id();
+                (this.completed_scan_id() < scan_id).then(|| this.wait_for_snapshot(scan_id))
+            });
+            let Some(wait_for_snapshot) = maybe_wait_for_snapshot else {
+                return Ok(worktree.read_with(cx, |this, _| this.snapshot()));
+            };
+            wait_for_snapshot.await?;
+        }
+    }
+
+    async fn queue_newly_discovered_files(
+        previous_snapshot: Snapshot,
+        updated_snapshot: Snapshot,
+        include_ignored: bool,
+        tx: Sender<InputPath>,
+        results: Sender<oneshot::Receiver<ProjectPath>>,
+    ) -> anyhow::Result<()> {
+        let mut previous_files = previous_snapshot.files(include_ignored, 0).peekable();
+        for entry in updated_snapshot.files(include_ignored, 0) {
+            while let Some(previous_entry) = previous_files.peek() {
+                match previous_entry.path.cmp(&entry.path) {
+                    Ordering::Less => {
+                        previous_files.next();
+                    }
+                    Ordering::Equal => break,
+                    Ordering::Greater => break,
+                }
+            }
+
+            if previous_files
+                .peek()
+                .is_some_and(|previous_entry| previous_entry.path == entry.path)
+            {
+                continue;
+            }
+
+            Self::queue_file_for_search(
+                entry.clone(),
+                updated_snapshot.clone(),
+                tx.clone(),
+                results.clone(),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn queue_file_for_search(
+        entry: Entry,
+        snapshot: Snapshot,
+        tx: Sender<InputPath>,
+        results: Sender<oneshot::Receiver<ProjectPath>>,
+    ) -> anyhow::Result<()> {
+        let (should_scan_tx, should_scan_rx) = oneshot::channel();
+        tx.send(InputPath {
+            entry,
+            snapshot,
+            should_scan_tx,
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("search input channel closed"))?;
+        results
+            .send(should_scan_rx)
+            .await
+            .map_err(|_| anyhow::anyhow!("search results channel closed"))?;
+        Ok(())
     }
 
     async fn maintain_sorted_search_results(

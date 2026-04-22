@@ -27,7 +27,7 @@ use gpui::{
 use itertools::Itertools;
 use language::{Buffer, Language};
 use menu::Confirm;
-use multi_buffer;
+use multi_buffer::AnchorRangeExt;
 use project::{
     Project, ProjectPath, SearchResults,
     search::{SearchInputKind, SearchQuery},
@@ -372,6 +372,26 @@ impl ProjectSearch {
         cx.notify();
     }
 
+    fn insert_match_ranges(&mut self, mut new_ranges: Vec<Range<Anchor>>, cx: &App) {
+        // Most of the time, new_ranges can simply be appended. But if the
+        // search started before the worktree scan finished, we can get late
+        // results which may be out of order, so we sort the ranges to maintain
+        // multibuffer order.
+        let snapshot = self.excerpts.read(cx).snapshot(cx);
+        let need_to_sort = self
+            .match_ranges
+            .last()
+            .zip(new_ranges.first())
+            .is_some_and(|(last, first)| last.cmp(first, &snapshot).is_gt());
+
+        self.match_ranges.append(&mut new_ranges);
+
+        if need_to_sort {
+            self.match_ranges
+                .sort_by(|left, right| left.cmp(right, &snapshot));
+        }
+    }
+
     fn cursor(&self, kind: SearchInputKind) -> &SearchHistoryCursor {
         match kind {
             SearchInputKind::Query => &self.search_history_cursor,
@@ -470,7 +490,7 @@ impl ProjectSearch {
                     smol::future::yield_now().await;
                     project_search
                         .update(cx, |project_search, cx| {
-                            project_search.match_ranges.extend(new_ranges);
+                            project_search.insert_match_ranges(new_ranges, cx);
                             cx.notify();
                         })
                         .ok()?;
