@@ -7,14 +7,15 @@ use crate::tasks::workflows::{
     vars::{self, StepOutput, WorkflowInput},
 };
 
-const TAG_NAME: &str = "${{ github.event.release.tag_name || inputs.tag_name }}";
-const IS_PRERELEASE: &str =
-    "${{ endsWith(github.event.release.tag_name || inputs.tag_name, '-pre') }}";
+const TAG_NAME_ENV: &str = "${{ github.event.release.tag_name || inputs.tag_name }}";
+const IS_PRERELEASE_ENV: &str = "${{ github.event.release.prerelease || inputs.prerelease }}";
+const TAG_NAME: &str = "${{ env.TAG_NAME }}";
 const RELEASE_BODY: &str = "${{ github.event.release.body || inputs.body }}";
-const DOCS_CHANNEL: &str = "${{ endsWith(github.event.release.tag_name || inputs.tag_name, '-pre') && 'preview' || 'stable' }}";
+const DOCS_CHANNEL: &str = "${{ env.IS_PRERELEASE == 'true' && 'preview' || 'stable' }}";
 
 pub fn after_release() -> Workflow {
     let tag_name = WorkflowInput::string("tag_name", None);
+    let prerelease = WorkflowInput::bool("prerelease", None);
     let body = WorkflowInput::string("body", Some(String::new()));
 
     let refresh_zed_dev = rebuild_releases_page();
@@ -36,11 +37,14 @@ pub fn after_release() -> Workflow {
     };
 
     named::workflow()
+        .add_env(("TAG_NAME", TAG_NAME_ENV))
+        .add_env(("IS_PRERELEASE", IS_PRERELEASE_ENV))
         .on(Event::default()
             .release(Release::default().types(vec![ReleaseType::Published]))
             .workflow_dispatch(
                 WorkflowDispatch::default()
                     .add_input(tag_name.name, tag_name.input())
+                    .add_input(prerelease.name, prerelease.input())
                     .add_input(body.name, body.input()),
             ))
         .add_job(refresh_zed_dev.name, refresh_zed_dev.job)
@@ -91,9 +95,7 @@ fn deploy_docs() -> NamedJob<UsesJob> {
 
 fn rebuild_releases_page() -> NamedJob {
     fn refresh_cloud_releases() -> Step<Run> {
-        named::bash(format!(
-            "curl -fX POST https://cloud.zed.dev/releases/refresh?expect_tag={TAG_NAME}"
-        ))
+        named::bash("curl -fX POST https://cloud.zed.dev/releases/refresh?expect_tag=$TAG_NAME")
     }
 
     fn redeploy_zed_dev() -> Step<Run> {
@@ -112,16 +114,16 @@ fn rebuild_releases_page() -> NamedJob {
 
 fn post_to_discord(deps: &[&NamedJob]) -> NamedJob {
     fn get_release_url() -> Step<Run> {
-        named::bash(format!(
-            r#"if [ "{IS_PRERELEASE}" == "true" ]; then
+        named::bash(
+            r#"if [ "$IS_PRERELEASE" == "true" ]; then
     URL="https://zed.dev/releases/preview"
 else
     URL="https://zed.dev/releases/stable"
 fi
 
 echo "URL=$URL" >> "$GITHUB_OUTPUT"
-"#
-        ))
+"#,
+        )
         .id("get-release-url")
     }
 
@@ -182,17 +184,15 @@ fn publish_winget() -> NamedJob {
     }
 
     fn set_package_name() -> (Step<Run>, StepOutput) {
-        let script = format!(
-            r#"if ("{IS_PRERELEASE}" -eq "true") {{
+        let script = r#"if ($env:IS_PRERELEASE -eq "true") {
     $PACKAGE_NAME = "ZedIndustries.Zed.Preview"
-}} else {{
+} else {
     $PACKAGE_NAME = "ZedIndustries.Zed"
-}}
+}
 
 echo "PACKAGE_NAME=$PACKAGE_NAME" >> $env:GITHUB_OUTPUT
-"#
-        );
-        let step = named::pwsh(&script).id("set-package-name");
+"#;
+        let step = named::pwsh(script).id("set-package-name");
 
         let output = StepOutput::new(&step, "PACKAGE_NAME");
         (step, output)
