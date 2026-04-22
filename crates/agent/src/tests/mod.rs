@@ -1453,6 +1453,7 @@ async fn test_mcp_tools(cx: &mut TestAppContext) {
         "test_server",
         vec![context_server::types::Tool {
             name: "echo".into(),
+            title: None,
             description: None,
             input_schema: serde_json::to_value(EchoTool::input_schema(
                 LanguageModelToolSchemaFormat::JsonSchema,
@@ -1618,6 +1619,7 @@ async fn test_mcp_tool_result_displayed_when_server_disconnected(cx: &mut TestAp
         "github_server",
         vec![context_server::types::Tool {
             name: "issue_read".into(),
+            title: None,
             description: Some("Read a GitHub issue".into()),
             input_schema: json!({
                 "type": "object",
@@ -1812,6 +1814,7 @@ async fn test_mcp_tool_truncation(cx: &mut TestAppContext) {
         vec![
             context_server::types::Tool {
                 name: "echo".into(), // Conflicts with native EchoTool
+                title: None,
                 description: None,
                 input_schema: serde_json::to_value(EchoTool::input_schema(
                     LanguageModelToolSchemaFormat::JsonSchema,
@@ -1822,6 +1825,7 @@ async fn test_mcp_tool_truncation(cx: &mut TestAppContext) {
             },
             context_server::types::Tool {
                 name: "unique_tool_1".into(),
+                title: None,
                 description: None,
                 input_schema: json!({"type": "object", "properties": {}}),
                 output_schema: None,
@@ -1837,6 +1841,7 @@ async fn test_mcp_tool_truncation(cx: &mut TestAppContext) {
         vec![
             context_server::types::Tool {
                 name: "echo".into(), // Also conflicts with native EchoTool
+                title: None,
                 description: None,
                 input_schema: serde_json::to_value(EchoTool::input_schema(
                     LanguageModelToolSchemaFormat::JsonSchema,
@@ -1847,6 +1852,7 @@ async fn test_mcp_tool_truncation(cx: &mut TestAppContext) {
             },
             context_server::types::Tool {
                 name: "unique_tool_2".into(),
+                title: None,
                 description: None,
                 input_schema: json!({"type": "object", "properties": {}}),
                 output_schema: None,
@@ -1854,6 +1860,7 @@ async fn test_mcp_tool_truncation(cx: &mut TestAppContext) {
             },
             context_server::types::Tool {
                 name: "a".repeat(MAX_TOOL_NAME_LENGTH - 2),
+                title: None,
                 description: None,
                 input_schema: json!({"type": "object", "properties": {}}),
                 output_schema: None,
@@ -1861,6 +1868,7 @@ async fn test_mcp_tool_truncation(cx: &mut TestAppContext) {
             },
             context_server::types::Tool {
                 name: "b".repeat(MAX_TOOL_NAME_LENGTH - 1),
+                title: None,
                 description: None,
                 input_schema: json!({"type": "object", "properties": {}}),
                 output_schema: None,
@@ -1875,6 +1883,7 @@ async fn test_mcp_tool_truncation(cx: &mut TestAppContext) {
         vec![
             context_server::types::Tool {
                 name: "a".repeat(MAX_TOOL_NAME_LENGTH - 2),
+                title: None,
                 description: None,
                 input_schema: json!({"type": "object", "properties": {}}),
                 output_schema: None,
@@ -1882,6 +1891,7 @@ async fn test_mcp_tool_truncation(cx: &mut TestAppContext) {
             },
             context_server::types::Tool {
                 name: "b".repeat(MAX_TOOL_NAME_LENGTH - 1),
+                title: None,
                 description: None,
                 input_schema: json!({"type": "object", "properties": {}}),
                 output_schema: None,
@@ -1889,6 +1899,7 @@ async fn test_mcp_tool_truncation(cx: &mut TestAppContext) {
             },
             context_server::types::Tool {
                 name: "c".repeat(MAX_TOOL_NAME_LENGTH + 1),
+                title: None,
                 description: None,
                 input_schema: json!({"type": "object", "properties": {}}),
                 output_schema: None,
@@ -1904,6 +1915,7 @@ async fn test_mcp_tool_truncation(cx: &mut TestAppContext) {
         "Azure DevOps",
         vec![context_server::types::Tool {
             name: "echo".into(), // Also conflicts - will be disambiguated as azure_dev_ops_echo
+            title: None,
             description: None,
             input_schema: serde_json::to_value(EchoTool::input_schema(
                 LanguageModelToolSchemaFormat::JsonSchema,
@@ -4291,7 +4303,9 @@ fn setup_context_server(
                 ),
                 server_info: context_server::types::Implementation {
                     name: name.into(),
+                    title: None,
                     version: "1.0.0".to_string(),
+                    description: None,
                 },
                 capabilities: context_server::types::ServerCapabilities {
                     tools: Some(context_server::types::ToolsCapabilities {

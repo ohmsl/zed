@@ -404,6 +404,9 @@ impl AnyAgentTool for ContextServerTool {
                     context_server::types::ToolResponseContent::Resource { .. } => {
                         log::warn!("Ignoring resource content from tool response");
                     }
+                    context_server::types::ToolResponseContent::ResourceLink { .. } => {
+                        log::warn!("Ignoring resource link content from tool response");
+                    }
                 }
             }
             Ok(AgentToolOutput {
