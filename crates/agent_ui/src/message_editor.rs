@@ -254,6 +254,11 @@ enum ResolvedPastedContextItem {
     ProjectPath(ProjectPath),
 }
 
+enum PendingMention {
+    Ready(Mention),
+    ResolveFromUri,
+}
+
 async fn resolve_pasted_context_items(
     project: Entity<Project>,
     project_is_local: bool,
@@ -686,6 +691,11 @@ impl MessageEditor {
     #[cfg(test)]
     pub fn mention_set(&self) -> &Entity<MentionSet> {
         &self.mention_set
+    }
+
+    #[cfg(test)]
+    pub(crate) fn workspace(&self) -> &WeakEntity<Workspace> {
+        &self.workspace
     }
 
     fn validate_slash_commands(
@@ -1622,13 +1632,27 @@ impl MessageEditor {
         };
 
         let path_style = workspace.read(cx).project().read(cx).path_style(cx);
+        let supports_images = self.session_capabilities.read().supports_images();
+        let http_client = workspace.read(cx).client().http_client();
         let mut text = String::new();
         let mut mentions = Vec::new();
 
         for chunk in message {
             match chunk {
                 acp::ContentBlock::Text(text_content) => {
+                    let base = text.len();
                     text.push_str(&text_content.text);
+                    if text_content.text.contains("[@") {
+                        for (range, mention_uri) in
+                            parse_mention_links(&text_content.text, path_style)
+                        {
+                            mentions.push((
+                                (base + range.start)..(base + range.end),
+                                mention_uri,
+                                PendingMention::ResolveFromUri,
+                            ));
+                        }
+                    }
                 }
                 acp::ContentBlock::Resource(acp::EmbeddedResource {
                     resource: acp::EmbeddedResourceResource::TextResourceContents(resource),
@@ -1644,10 +1668,10 @@ impl MessageEditor {
                     mentions.push((
                         start..end,
                         mention_uri,
-                        Mention::Text {
+                        PendingMention::Ready(Mention::Text {
                             content: resource.text,
                             tracked_buffers: Vec::new(),
-                        },
+                        }),
                     ));
                 }
                 acp::ContentBlock::ResourceLink(resource) => {
@@ -1657,7 +1681,11 @@ impl MessageEditor {
                         let start = text.len();
                         write!(&mut text, "{}", mention_uri.as_link()).ok();
                         let end = text.len();
-                        mentions.push((start..end, mention_uri, Mention::Link));
+                        mentions.push((
+                            start..end,
+                            mention_uri,
+                            PendingMention::Ready(Mention::Link),
+                        ));
                     }
                 }
                 acp::ContentBlock::Image(acp::ImageContent {
@@ -1686,10 +1714,10 @@ impl MessageEditor {
                     mentions.push((
                         start..end,
                         mention_uri,
-                        Mention::Image(MentionImage {
+                        PendingMention::Ready(Mention::Image(MentionImage {
                             data: data.into(),
                             format,
-                        }),
+                        })),
                     ));
                 }
                 _ => {}
@@ -1718,11 +1746,14 @@ impl MessageEditor {
             })
         };
 
-        for (range, mention_uri, mention) in mentions {
+        for (range, mention_uri, pending) in mentions {
             let adjusted_start = insertion_start + range.start;
             let anchor = snapshot.anchor_before(MultiBufferOffset(adjusted_start));
+            let Some(buffer_anchor) = snapshot.anchor_to_buffer_anchor(anchor) else {
+                continue;
+            };
             let Some((crease_id, tx)) = insert_crease_for_mention(
-                snapshot.anchor_to_buffer_anchor(anchor).unwrap().0,
+                buffer_anchor.0,
                 range.end - range.start,
                 mention_uri.name().into(),
                 mention_uri.icon_path(cx),
@@ -1738,12 +1769,24 @@ impl MessageEditor {
             };
             drop(tx);
 
+            let task = match pending {
+                PendingMention::Ready(mention) => Task::ready(Ok(mention)).shared(),
+                PendingMention::ResolveFromUri => {
+                    let task = self.mention_set.update(cx, |mention_set, cx| {
+                        mention_set.confirm_mention_for_uri(
+                            mention_uri.clone(),
+                            supports_images,
+                            http_client.clone(),
+                            cx,
+                        )
+                    });
+                    cx.spawn(async move |_, _| task.await.map_err(|e| e.to_string()))
+                        .shared()
+                }
+            };
+
             self.mention_set.update(cx, |mention_set, _cx| {
-                mention_set.insert_mention(
-                    crease_id,
-                    mention_uri.clone(),
-                    Task::ready(Ok(mention)).shared(),
-                )
+                mention_set.insert_mention(crease_id, mention_uri.clone(), task)
             });
         }
 
@@ -1847,6 +1890,19 @@ impl MessageEditor {
 
         let text = self.serialize_ranges_with_mentions(&ranges, &display_snapshot, cx)?;
         Some((text, ranges))
+    }
+
+    pub fn serialized_text(&self, cx: &mut App) -> String {
+        let display_snapshot = self
+            .editor
+            .update(cx, |editor, cx| editor.display_snapshot(cx));
+        let buffer_end = self.editor.read(cx).buffer().read(cx).snapshot(cx).len();
+        self.serialize_ranges_with_mentions(
+            &[MultiBufferOffset(0)..buffer_end],
+            &display_snapshot,
+            cx,
+        )
+        .unwrap_or_else(|| self.editor.read(cx).text(cx))
     }
 
     fn serialize_ranges_with_mentions(
@@ -4426,6 +4482,88 @@ mod tests {
             result.is_none(),
             "serialized_cut_text should return None so the default editor cut runs"
         );
+    }
+
+    #[gpui::test]
+    async fn test_serialized_text_whole_buffer_emits_mention_links(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (fixture, mut cx) = setup_selection_mention_fixture(cx).await;
+
+        let serialized = fixture
+            .message_editor
+            .update(&mut cx, |message_editor, cx| {
+                message_editor.serialized_text(cx)
+            });
+
+        let expected = format!(
+            "{} needs work\n{} looks fine",
+            fixture.first_uri.as_link(),
+            fixture.second_uri.as_link()
+        );
+        assert_eq!(serialized, expected);
+    }
+
+    #[gpui::test]
+    async fn test_serialized_text_falls_back_to_plain_text_without_mentions(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let (message_editor, _editor, mut cx) =
+            setup_paste_test_message_editor(json!({"file.txt": "content"}), cx).await;
+
+        message_editor.update_in(&mut cx, |message_editor, window, cx| {
+            message_editor.set_text("plain text without mentions", window, cx);
+        });
+
+        let serialized = message_editor.update(&mut cx, |message_editor, cx| {
+            message_editor.serialized_text(cx)
+        });
+
+        assert_eq!(serialized, "plain text without mentions");
+    }
+
+    #[gpui::test]
+    async fn test_insert_message_blocks_parses_mention_links_in_text(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (message_editor, editor, mut cx) =
+            setup_paste_test_message_editor(json!({"file.txt": "content"}), cx).await;
+
+        let expected_uri = MentionUri::File {
+            abs_path: path!("/project/file.txt").into(),
+        };
+        let link = expected_uri.as_link().to_string();
+        let raw_text = format!("before {link} after");
+
+        message_editor.update_in(&mut cx, |message_editor, window, cx| {
+            message_editor.set_message(
+                vec![acp::ContentBlock::Text(acp::TextContent::new(
+                    raw_text.clone(),
+                ))],
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        editor.update(&mut cx, |editor, cx| {
+            assert_eq!(editor.text(cx), raw_text);
+        });
+
+        let mention_uris = message_editor.update(&mut cx, |message_editor, cx| {
+            message_editor.mention_set.read(cx).mentions()
+        });
+        assert_eq!(mention_uris.len(), 1);
+        assert!(mention_uris.contains(&expected_uri));
+
+        let contents = mention_contents(&message_editor, &mut cx).await;
+        let [(uri, Mention::Text { content, .. })] = contents.as_slice() else {
+            panic!("expected a single text mention, got: {contents:?}");
+        };
+        assert_eq!(uri, &expected_uri);
+        assert_eq!(content, "content");
     }
 
     #[gpui::test]

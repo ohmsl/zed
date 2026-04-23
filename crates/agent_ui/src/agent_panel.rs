@@ -2679,48 +2679,51 @@ impl AgentPanel {
         }
     }
 
-    fn active_initial_content(&self, cx: &App) -> Option<AgentInitialContent> {
-        self.active_thread_view(cx).and_then(|thread_view| {
-            thread_view
-                .read(cx)
-                .thread
-                .read(cx)
-                .draft_prompt()
-                .map(|draft| AgentInitialContent::ContentBlock {
-                    blocks: draft.to_vec(),
-                    auto_submit: false,
-                })
-                .filter(|initial_content| match initial_content {
-                    AgentInitialContent::ContentBlock { blocks, .. } => !blocks.is_empty(),
-                    _ => true,
-                })
-                .or_else(|| {
-                    let text = thread_view.read(cx).message_editor.read(cx).text(cx);
-                    if text.trim().is_empty() {
-                        None
-                    } else {
-                        Some(AgentInitialContent::ContentBlock {
-                            blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(text))],
-                            auto_submit: false,
-                        })
-                    }
-                })
-        })
+    fn active_initial_content(&self, cx: &mut App) -> Option<AgentInitialContent> {
+        let thread_view = self.active_thread_view(cx)?;
+        let draft_prompt = thread_view
+            .read(cx)
+            .thread
+            .read(cx)
+            .draft_prompt()
+            .map(|draft| AgentInitialContent::ContentBlock {
+                blocks: draft.to_vec(),
+                auto_submit: false,
+            })
+            .filter(|initial_content| match initial_content {
+                AgentInitialContent::ContentBlock { blocks, .. } => !blocks.is_empty(),
+                _ => true,
+            });
+        if let Some(initial_content) = draft_prompt {
+            return Some(initial_content);
+        }
+        let message_editor = thread_view.read(cx).message_editor.clone();
+        let text = message_editor.update(cx, |editor, cx| editor.serialized_text(cx));
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some(AgentInitialContent::ContentBlock {
+                blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(text))],
+                auto_submit: false,
+            })
+        }
     }
 
     fn source_panel_initialization(
         source_workspace: &WeakEntity<Workspace>,
-        cx: &App,
+        cx: &mut App,
     ) -> Option<(Agent, AgentInitialContent)> {
         let source_workspace = source_workspace.upgrade()?;
         let source_panel = source_workspace.read(cx).panel::<AgentPanel>(cx)?;
-        let source_panel = source_panel.read(cx);
-        let initial_content = source_panel.active_initial_content(cx)?;
-        let agent = if source_panel.project.read(cx).is_via_collab() {
-            Agent::NativeAgent
-        } else {
-            source_panel.selected_agent.clone()
-        };
+        let (initial_content, agent) = source_panel.update(cx, |source_panel, cx| {
+            let initial_content = source_panel.active_initial_content(cx)?;
+            let agent = if source_panel.project.read(cx).is_via_collab() {
+                Agent::NativeAgent
+            } else {
+                source_panel.selected_agent.clone()
+            };
+            Some((initial_content, agent))
+        })?;
         Some((agent, initial_content))
     }
 
@@ -3877,13 +3880,14 @@ mod tests {
     use anyhow::{Result, anyhow};
     use feature_flags::FeatureFlagAppExt;
     use fs::FakeFs;
+    use futures::FutureExt as _;
     use gpui::{App, TestAppContext, VisualTestContext};
     use parking_lot::Mutex;
     use project::Project;
     use std::any::Any;
 
     use serde_json::json;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::Instant;
     use workspace::MultiWorkspace;
@@ -7122,5 +7126,150 @@ mod tests {
                 "destination panel's content should be preserved"
             );
         });
+    }
+
+    #[gpui::test]
+    async fn test_new_thread_preserves_selection_mentions(cx: &mut TestAppContext) {
+        use crate::mention_set::{Mention, insert_crease_for_mention};
+        use editor::MultiBufferOffset;
+
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+            <dyn fs::Fs>::set_global(fs.clone(), cx);
+        });
+
+        fs.insert_tree(
+            "/project",
+            json!({ "file.rs": "line 1\nline 2\nline 3\nline 4\n" }),
+        )
+        .await;
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+
+        workspace.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+        });
+
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, None, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.selected_agent = Agent::Stub;
+            panel.activate_draft(true, "agent_panel", window, cx);
+        });
+        cx.run_until_parked();
+
+        let selection_uri = MentionUri::Selection {
+            abs_path: Some(PathBuf::from("/project/file.rs")),
+            line_range: 0..=1,
+        };
+        let source_text = "selection needs work";
+        let selection_range = 0..9;
+
+        let message_editor = panel.update(cx, |panel, cx| {
+            let thread_view = panel
+                .active_thread_view(cx)
+                .expect("draft should have a thread view");
+            thread_view.read(cx).message_editor.clone()
+        });
+
+        message_editor.update_in(cx, |editor, window, cx| {
+            editor.set_text(source_text, window, cx);
+
+            let snapshot = editor.editor().read(cx).buffer().read(cx).snapshot(cx);
+            let Some(buffer_anchor) = snapshot.anchor_to_buffer_anchor(
+                snapshot.anchor_before(MultiBufferOffset(selection_range.start)),
+            ) else {
+                panic!("selection-mention anchor should map to a buffer");
+            };
+            let Some((crease_id, tx)) = insert_crease_for_mention(
+                buffer_anchor.0,
+                selection_range.len(),
+                selection_uri.name().into(),
+                selection_uri.icon_path(cx),
+                selection_uri.tooltip_text(),
+                Some(selection_uri.clone()),
+                Some(editor.workspace().clone()),
+                None,
+                editor.editor().clone(),
+                window,
+                cx,
+            ) else {
+                panic!("expected mention crease insertion");
+            };
+            drop(tx);
+
+            editor.mention_set().update(cx, |mention_set, _cx| {
+                mention_set.insert_mention(
+                    crease_id,
+                    selection_uri.clone(),
+                    Task::ready(Ok(Mention::Text {
+                        content: "line 1\nline 2\n".to_string(),
+                        tracked_buffers: Vec::new(),
+                    }))
+                    .shared(),
+                )
+            });
+        });
+
+        // Simulate the race that motivated the fix: the observer hasn't yet
+        // populated `draft_prompt` when the user clicks "+".
+        panel.update(cx, |panel, cx| {
+            let thread = panel
+                .active_agent_thread(cx)
+                .expect("draft should expose an AcpThread");
+            thread.update(cx, |thread, cx| thread.set_draft_prompt(None, cx));
+            panel.draft_thread = None;
+        });
+
+        // Click "+": this routes through new_thread -> activate_draft ->
+        // ensure_draft -> active_initial_content, which must not fall back to
+        // the fold-placeholder text ("selection").
+        panel.update_in(cx, |panel, window, cx| {
+            panel.new_thread(&NewThread, window, cx);
+        });
+        cx.run_until_parked();
+
+        let new_thread_view = panel.read_with(cx, |panel, cx| {
+            panel
+                .active_thread_view(cx)
+                .expect("new thread should be active")
+        });
+        let new_message_editor =
+            new_thread_view.read_with(cx, |view, _cx| view.message_editor.clone());
+
+        let new_editor_text =
+            new_message_editor.read_with(cx, |editor, cx| editor.editor().read(cx).text(cx));
+        assert!(
+            new_editor_text.contains(&selection_uri.as_link().to_string()),
+            "expected new draft editor text to contain the mention link, got: {new_editor_text:?}"
+        );
+        assert!(
+            !new_editor_text.split('\n').any(|line| line == "selection"),
+            "new draft editor must not contain a bare 'selection' placeholder, got: {new_editor_text:?}"
+        );
+
+        let registered =
+            new_message_editor.read_with(cx, |editor, cx| editor.mention_set().read(cx).mentions());
+        assert!(
+            registered.contains(&selection_uri),
+            "expected selection mention URI to be re-registered on the new draft: {registered:?}"
+        );
     }
 }
