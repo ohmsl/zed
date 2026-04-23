@@ -11400,17 +11400,14 @@ impl Editor {
                         &language,
                     ) + 1
                 });
-                if let Some((marker_start_col, marker_end_col, marker_text)) =
-                    ordered_list_indent_renumber(
-                        row,
-                        &current_indent,
-                        snapshot,
-                        &language,
-                        renumber_to,
-                    )
+
+                if let Some(marker) =
+                    ordered_list_marker(row, current_indent.len, snapshot, &language)
                 {
+                    let marker_text = marker.format.replace("{1}", &renumber_to.to_string());
+
                     edits.push((
-                        Point::new(row, marker_start_col)..Point::new(row, marker_end_col),
+                        Point::new(row, marker.start_col)..Point::new(row, marker.end_col),
                         marker_text,
                     ));
                     if has_multiple_rows {
@@ -26751,20 +26748,6 @@ fn list_delimiter_for_newline(
     }
 
     None
-}
-
-/// Returns `(marker_start_col, marker_end_col, marker_text)` for an ordered list item
-/// on `row`, allowing the caller to replace the marker while indenting.
-fn ordered_list_indent_renumber(
-    row: u32,
-    current_indent: &IndentSize,
-    snapshot: &MultiBufferSnapshot,
-    language: &LanguageScope,
-    renumber_to: u32,
-) -> Option<(u32, u32, String)> {
-    let marker = ordered_list_marker(row, current_indent.len, snapshot, language)?;
-    let marker_text = marker.format.replace("{1}", &renumber_to.to_string());
-    Some((marker.start_col, marker.end_col, marker_text))
 }
 
 #[derive(Clone)]
