@@ -16,7 +16,7 @@ use anyhow::{Result, anyhow};
 use editor::{
     Addon, AnchorRangeExt, ContextMenuOptions, Editor, EditorElement, EditorEvent, EditorMode,
     EditorStyle, Inlay, MultiBuffer, MultiBufferOffset, MultiBufferSnapshot, ToOffset,
-    actions::{Copy, Paste},
+    actions::{Copy, Cut, Paste},
     code_context_menus::CodeContextMenu,
     scroll::Autoscroll,
 };
@@ -1201,6 +1201,18 @@ impl MessageEditor {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
+    fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = self.serialized_copy_text(cx) else {
+            cx.propagate();
+            return;
+        };
+
+        cx.stop_propagation();
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.editor
+            .update(cx, |editor, cx| editor.insert("", window, cx));
+    }
+
     fn paste_raw(&mut self, _: &PasteRaw, window: &mut Window, cx: &mut Context<Self>) {
         let editor = self.editor.clone();
         window.defer(cx, move |window, cx| {
@@ -1867,6 +1879,7 @@ impl Render for MessageEditor {
             .on_action(cx.listener(Self::chat_with_follow))
             .on_action(cx.listener(Self::cancel))
             .capture_action(cx.listener(Self::copy))
+            .capture_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste_raw))
             .capture_action(cx.listener(Self::paste))
             .flex_1()
@@ -1997,7 +2010,7 @@ mod tests {
     use base64::Engine as _;
     use editor::{
         AnchorRangeExt as _, Editor, EditorMode, MultiBufferOffset, SelectionEffects,
-        actions::Paste,
+        actions::{Cut, Paste},
     };
 
     use fs::FakeFs;
@@ -4109,7 +4122,9 @@ mod tests {
         message_editor: Entity<MessageEditor>,
         first_uri: MentionUri,
         first_range: Range<usize>,
+        second_uri: MentionUri,
         second_range: Range<usize>,
+        buffer_len: MultiBufferOffset,
     }
 
     async fn setup_selection_mention_fixture(
@@ -4134,7 +4149,7 @@ mod tests {
             line_range: 2..=3,
         };
 
-        message_editor.update_in(&mut cx, |message_editor, window, cx| {
+        let buffer_len = message_editor.update_in(&mut cx, |message_editor, window, cx| {
             message_editor.set_text(source_text, window, cx);
 
             let snapshot = message_editor
@@ -4189,6 +4204,8 @@ mod tests {
                     );
                 });
             }
+
+            snapshot.len()
         });
 
         (
@@ -4196,7 +4213,9 @@ mod tests {
                 message_editor,
                 first_uri,
                 first_range,
+                second_uri,
                 second_range,
+                buffer_len,
             },
             cx,
         )
@@ -4260,6 +4279,45 @@ mod tests {
             });
 
         assert_eq!(copied, None);
+    }
+
+    #[gpui::test]
+    async fn test_cut_with_selection_mentions_serializes_and_removes(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (fixture, mut cx) = setup_selection_mention_fixture(cx).await;
+
+        let buffer_len = fixture.buffer_len;
+        fixture
+            .message_editor
+            .update_in(&mut cx, |message_editor, window, cx| {
+                message_editor.editor.update(cx, |editor, cx| {
+                    editor.change_selections(Default::default(), window, cx, |selections| {
+                        selections.select_ranges([MultiBufferOffset(0)..buffer_len]);
+                    });
+                });
+                message_editor.cut(&Cut, window, cx);
+            });
+
+        let expected_text = format!(
+            "{} needs work\n{} looks fine",
+            fixture.first_uri.as_link(),
+            fixture.second_uri.as_link()
+        );
+
+        let clipboard_text = cx
+            .read_from_clipboard()
+            .and_then(|item| match item.entries().first().cloned() {
+                Some(ClipboardEntry::String(entry)) => Some(entry.text().to_string()),
+                _ => None,
+            })
+            .expect("cut should write serialized text to clipboard");
+        assert_eq!(clipboard_text, expected_text);
+
+        let remaining_text = fixture.message_editor.read_with(&cx, |message_editor, cx| {
+            message_editor.editor.read(cx).text(cx)
+        });
+        assert_eq!(remaining_text, "");
     }
 
     #[gpui::test]
