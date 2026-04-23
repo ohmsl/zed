@@ -10956,7 +10956,7 @@ impl Editor {
 
         self.hide_mouse_cursor(HideMouseCursorOrigin::TypingAction, cx);
 
-        if self.should_use_markdown_ordered_list_indent(cx) {
+        if self.any_selection_contains_ordered_list(cx) {
             return self.apply_markdown_ordered_list_indent(window, cx);
         }
 
@@ -11093,7 +11093,7 @@ impl Editor {
 
         self.hide_mouse_cursor(HideMouseCursorOrigin::TypingAction, cx);
 
-        if self.should_use_markdown_ordered_list_indent(cx) {
+        if self.any_selection_contains_ordered_list(cx) {
             return self.apply_markdown_ordered_list_indent(window, cx);
         }
 
@@ -11206,7 +11206,7 @@ impl Editor {
 
         self.hide_mouse_cursor(HideMouseCursorOrigin::TypingAction, cx);
 
-        if self.should_use_markdown_ordered_list_outdent(cx) {
+        if self.any_selection_contains_ordered_list(cx) {
             return self.apply_markdown_ordered_list_outdent(window, cx);
         }
 
@@ -11279,48 +11279,24 @@ impl Editor {
         });
     }
 
-    fn should_use_markdown_ordered_list_indent(&self, cx: &mut App) -> bool {
+    /// Checks whether any of the rows spanned by the current selections starts
+    /// with content that match the buffer's language's ordered list regex
+    /// pattern.
+    ///
+    /// In a language like Markdown, this would mean a line starting with `1.`,
+    /// for example.
+    fn any_selection_contains_ordered_list(&self, cx: &mut App) -> bool {
         let display_map = self.display_snapshot(cx);
         let selections = self.selections.all::<Point>(&display_map);
         let buffer = self.buffer.read(cx);
         let snapshot = buffer.snapshot(cx);
 
         for selection in &selections {
-            let start_row = selection.start.row;
-            let mut end_row = selection.end.row + 1;
-            if selection.end.column == 0 && selection.end.row > selection.start.row {
-                end_row -= 1;
-            }
+            for row in selection.spanned_rows(false, &display_map).iter_rows() {
+                let indent_len = snapshot.indent_size_for_line(row).len;
 
-            for row in start_row..end_row {
-                let indent_len = snapshot.indent_size_for_line(MultiBufferRow(row)).len;
-                if let Some(language) = snapshot.language_scope_at(Point::new(row, indent_len))
-                    && ordered_list_marker(row, indent_len, &snapshot, &language).is_some()
-                {
-                    return true;
-                }
-            }
-        }
-
-        false
-    }
-
-    fn should_use_markdown_ordered_list_outdent(&self, cx: &mut App) -> bool {
-        let display_map = self.display_map.update(cx, |map, cx| map.snapshot(cx));
-        let selections = self.selections.all::<Point>(&display_map);
-        let buffer = self.buffer.read(cx);
-        let snapshot = buffer.snapshot(cx);
-
-        for selection in &selections {
-            let rows = selection.spanned_rows(false, &display_map);
-            for row in rows.iter_rows() {
-                let indent_size = snapshot.indent_size_for_line(row);
-                if indent_size.len == 0 {
-                    continue;
-                }
-                if let Some(language) =
-                    snapshot.language_scope_at(Point::new(row.0, indent_size.len))
-                    && ordered_list_marker(row.0, indent_size.len, &snapshot, &language).is_some()
+                if let Some(language) = snapshot.language_scope_at(Point::new(row.0, indent_len))
+                    && ordered_list_marker(row.0, indent_len, &snapshot, &language).is_some()
                 {
                     return true;
                 }
@@ -26799,6 +26775,9 @@ struct OrderedListMarker {
     format: String,
 }
 
+/// Checks whether the content starting at the provided `indent_len` in the
+/// provided `row` matches the language's ordered list regex pattern, returning
+/// `None` if it does not.
 fn ordered_list_marker(
     row: u32,
     indent_len: u32,
@@ -26815,14 +26794,12 @@ fn ordered_list_marker(
         .collect();
 
     for ordered_config in language.ordered_list() {
-        let regex = match Regex::new(&ordered_config.pattern) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-
-        if let Some(captures) = regex.captures(&candidate) {
-            let full_match = captures.get(0)?;
-            let number = captures.get(1)?.as_str().parse().ok()?;
+        if let Ok(regex) = Regex::new(&ordered_config.pattern)
+            && let Some(captures) = regex.captures(&candidate)
+            && let Some(full_match) = captures.get(0)
+            && let Some(number_match) = captures.get(1)
+            && let Ok(number) = number_match.as_str().parse()
+        {
             return Some(OrderedListMarker {
                 start_col: indent_len as u32,
                 end_col: (indent_len + full_match.len()) as u32,
