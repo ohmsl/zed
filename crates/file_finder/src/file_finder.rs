@@ -1774,14 +1774,16 @@ impl PickerDelegate for FileFinderDelegate {
             .flex_none()
             .h_9()
             .px_2p5()
-            .justify_between()
+            .gap_1()
             .border_b_1()
             .border_color(cx.theme().colors().border_variant)
-            .child(editor.render(window, cx))
+            .child(div().flex_1().min_w_0().child(editor.render(window, cx)))
             .when(is_project_scan_running && has_search_query, |this| {
                 this.child(
                     h_flex()
                         .id("project-scan-indicator")
+                        .flex_none()
+                        .items_center()
                         .tooltip(Tooltip::text("Project Scan in Progress…"))
                         .child(
                             Icon::new(IconName::LoadCircle)
