@@ -1,6 +1,7 @@
 use gh_workflow::*;
 
 use crate::tasks::workflows::{
+    deploy_docs::deploy_docs_workflow_call,
     release::{self, notify_on_failure},
     runners,
     steps::{CommonJobConditions, NamedJob, checkout_repo, dependant_job, named},
@@ -20,7 +21,7 @@ pub fn after_release() -> Workflow {
     let body = WorkflowInput::string("body", Some(String::new()));
 
     let refresh_zed_dev = rebuild_releases_page();
-    let deploy_docs = deploy_docs();
+    let deploy_docs = deploy_docs_workflow_call(DOCS_CHANNEL, TAG_NAME_ENV);
     let post_to_discord = post_to_discord(&[&refresh_zed_dev]);
     let publish_winget = publish_winget();
     let create_sentry_release = create_sentry_release();
@@ -54,44 +55,6 @@ pub fn after_release() -> Workflow {
         .add_job(publish_winget.name, publish_winget.job)
         .add_job(create_sentry_release.name, create_sentry_release.job)
         .add_job(notify_on_failure.name, notify_on_failure.job)
-}
-
-fn deploy_docs() -> NamedJob<UsesJob> {
-    let job = Job::default()
-        .cond(Expression::new(
-            "github.repository_owner == 'zed-industries'",
-        ))
-        .permissions(Permissions::default().contents(Level::Read))
-        .uses(
-            "zed-industries",
-            "zed",
-            ".github/workflows/deploy_docs.yml",
-            "main",
-        )
-        .with(
-            Input::default()
-                .add("channel", DOCS_CHANNEL)
-                .add("checkout_ref", TAG_NAME_ENV),
-        )
-        .secrets(indexmap::IndexMap::from([
-            (
-                "DOCS_AMPLITUDE_API_KEY".to_owned(),
-                vars::DOCS_AMPLITUDE_API_KEY.to_owned(),
-            ),
-            (
-                "CLOUDFLARE_API_TOKEN".to_owned(),
-                vars::CLOUDFLARE_API_TOKEN.to_owned(),
-            ),
-            (
-                "CLOUDFLARE_ACCOUNT_ID".to_owned(),
-                vars::CLOUDFLARE_ACCOUNT_ID.to_owned(),
-            ),
-        ]));
-
-    NamedJob {
-        name: "deploy_docs".to_owned(),
-        job,
-    }
 }
 
 fn rebuild_releases_page() -> NamedJob {

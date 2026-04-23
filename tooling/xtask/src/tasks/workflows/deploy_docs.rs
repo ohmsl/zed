@@ -1,6 +1,6 @@
 use gh_workflow::{
-    Event, Expression, Job, Run, Step, Use, Workflow, WorkflowCall, WorkflowCallSecret,
-    WorkflowDispatch,
+    Event, Expression, Input, Job, Level, Permissions, Run, Step, Use, UsesJob, Workflow,
+    WorkflowCall, WorkflowCallSecret, WorkflowDispatch,
 };
 
 use crate::tasks::workflows::{
@@ -235,10 +235,10 @@ fn docs_job(channel_expr: impl Into<String>, checkout_ref: Option<String>) -> Na
         job: docs_deploy_steps(
             docs_build_steps(
                 release_job(&[])
-                    .name("Build and Deploy Docs")
                     .cond(Expression::new(
                         "github.repository_owner == 'zed-industries'",
                     ))
+                    .name("Build and Deploy Docs")
                     .add_step(resolve_step),
                 checkout_ref,
                 channel.to_string(),
@@ -246,6 +246,47 @@ fn docs_job(channel_expr: impl Into<String>, checkout_ref: Option<String>) -> Na
             ),
             &project_name,
         ),
+    }
+}
+
+pub(crate) fn deploy_docs_workflow_call(
+    channel: impl Into<String>,
+    checkout_ref: impl Into<String>,
+) -> NamedJob<UsesJob> {
+    let job = Job::default()
+        .cond(Expression::new(
+            "github.repository_owner == 'zed-industries'",
+        ))
+        .permissions(Permissions::default().contents(Level::Read))
+        .uses(
+            "zed-industries",
+            "zed",
+            ".github/workflows/deploy_docs.yml",
+            "main",
+        )
+        .with(
+            Input::default()
+                .add("channel", channel.into())
+                .add("checkout_ref", checkout_ref.into()),
+        )
+        .secrets(indexmap::IndexMap::from([
+            (
+                "DOCS_AMPLITUDE_API_KEY".to_owned(),
+                vars::DOCS_AMPLITUDE_API_KEY.to_owned(),
+            ),
+            (
+                "CLOUDFLARE_API_TOKEN".to_owned(),
+                vars::CLOUDFLARE_API_TOKEN.to_owned(),
+            ),
+            (
+                "CLOUDFLARE_ACCOUNT_ID".to_owned(),
+                vars::CLOUDFLARE_ACCOUNT_ID.to_owned(),
+            ),
+        ]));
+
+    NamedJob {
+        name: "deploy_docs".to_owned(),
+        job,
     }
 }
 
