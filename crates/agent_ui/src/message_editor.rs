@@ -1,6 +1,5 @@
 use crate::DEFAULT_THREAD_TITLE;
 use crate::SendImmediately;
-use crate::ThreadHistory;
 use crate::{
     ChatWithFollow,
     completion_provider::{
@@ -11,7 +10,7 @@ use crate::{
 };
 use acp_thread::MentionUri;
 use agent::ThreadStore;
-use agent_client_protocol as acp;
+use agent_client_protocol::schema as acp;
 use anyhow::{Result, anyhow};
 use editor::{
     Addon, AnchorRangeExt, ContextMenuOptions, Editor, EditorElement, EditorEvent, EditorMode,
@@ -396,7 +395,6 @@ impl MessageEditor {
         workspace: WeakEntity<Workspace>,
         project: WeakEntity<Project>,
         thread_store: Option<Entity<ThreadStore>>,
-        history: Option<WeakEntity<ThreadHistory>>,
         prompt_store: Option<Entity<PromptStore>>,
         session_capabilities: SharedSessionCapabilities,
         agent_id: AgentId,
@@ -460,7 +458,6 @@ impl MessageEditor {
             },
             editor.downgrade(),
             mention_set.clone(),
-            history,
             prompt_store.clone(),
             workspace.clone(),
         ));
@@ -2006,7 +2003,7 @@ mod tests {
 
     use acp_thread::MentionUri;
     use agent::{ThreadStore, outline};
-    use agent_client_protocol as acp;
+    use agent_client_protocol::schema as acp;
     use base64::Engine as _;
     use editor::{
         AnchorRangeExt as _, Editor, EditorMode, MultiBufferOffset, SelectionEffects,
@@ -2150,7 +2147,6 @@ mod tests {
                     project.downgrade(),
                     thread_store.clone(),
                     None,
-                    None,
                     Default::default(),
                     "Test Agent".into(),
                     "Test",
@@ -2251,7 +2247,6 @@ mod tests {
                     workspace_handle.clone(),
                     project.downgrade(),
                     thread_store.clone(),
-                    None,
                     None,
                     session_capabilities.clone(),
                     "Claude Agent".into(),
@@ -2418,7 +2413,6 @@ mod tests {
                     workspace_handle,
                     project.downgrade(),
                     thread_store.clone(),
-                    None,
                     None,
                     session_capabilities.clone(),
                     "Test Agent".into(),
@@ -2645,7 +2639,6 @@ mod tests {
                     workspace_handle,
                     project.downgrade(),
                     Some(thread_store),
-                    None,
                     None,
                     session_capabilities.clone(),
                     "Test Agent".into(),
@@ -3139,7 +3132,6 @@ mod tests {
                     project.downgrade(),
                     thread_store.clone(),
                     None,
-                    None,
                     Default::default(),
                     "Test Agent".into(),
                     "Test",
@@ -3241,7 +3233,6 @@ mod tests {
                     project.downgrade(),
                     thread_store.clone(),
                     None,
-                    None,
                     Default::default(),
                     "Test Agent".into(),
                     "Test",
@@ -3311,7 +3302,6 @@ mod tests {
                     project.downgrade(),
                     thread_store.clone(),
                     None,
-                    None,
                     Default::default(),
                     "Test Agent".into(),
                     "Test",
@@ -3364,7 +3354,6 @@ mod tests {
                     workspace.downgrade(),
                     project.downgrade(),
                     thread_store.clone(),
-                    None,
                     None,
                     Default::default(),
                     "Test Agent".into(),
@@ -3423,7 +3412,6 @@ mod tests {
                     project.downgrade(),
                     thread_store.clone(),
                     None,
-                    None,
                     Default::default(),
                     "Test Agent".into(),
                     "Test",
@@ -3481,7 +3469,6 @@ mod tests {
                     workspace.downgrade(),
                     project.downgrade(),
                     thread_store.clone(),
-                    None,
                     None,
                     Default::default(),
                     "Test Agent".into(),
@@ -3544,7 +3531,6 @@ mod tests {
                     workspace_handle,
                     project.downgrade(),
                     thread_store.clone(),
-                    None,
                     None,
                     Default::default(),
                     "Test Agent".into(),
@@ -3706,7 +3692,6 @@ mod tests {
                     project.downgrade(),
                     thread_store.clone(),
                     None,
-                    None,
                     Default::default(),
                     "Test Agent".into(),
                     "Test",
@@ -3821,7 +3806,6 @@ mod tests {
                     project.downgrade(),
                     Some(thread_store.clone()),
                     None,
-                    None,
                     Default::default(),
                     "Test Agent".into(),
                     "Test",
@@ -3900,7 +3884,6 @@ mod tests {
                     workspace_handle,
                     project.downgrade(),
                     Some(thread_store),
-                    None,
                     None,
                     Default::default(),
                     "Test Agent".into(),
@@ -4358,7 +4341,6 @@ mod tests {
                     project.downgrade(),
                     Some(thread_store),
                     None,
-                    None,
                     Default::default(),
                     "Test Agent".into(),
                     "Test",
@@ -4614,7 +4596,6 @@ mod tests {
                     project.downgrade(),
                     Some(thread_store),
                     None,
-                    None,
                     Default::default(),
                     "Test Agent".into(),
                     "Test",
@@ -4706,7 +4687,6 @@ mod tests {
                 MessageEditor::new(
                     workspace.downgrade(),
                     project.downgrade(),
-                    None,
                     None,
                     None,
                     Default::default(),
@@ -4856,7 +4836,6 @@ mod tests {
                 MessageEditor::new(
                     workspace.downgrade(),
                     project.downgrade(),
-                    None,
                     None,
                     None,
                     Default::default(),
