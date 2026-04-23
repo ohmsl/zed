@@ -103,11 +103,6 @@ const TOKEN_THRESHOLD: u64 = 250;
 mod thread_view;
 pub use thread_view::*;
 
-pub struct QueuedMessage {
-    pub content: Vec<acp::ContentBlock>,
-    pub tracked_buffers: Vec<Entity<Buffer>>,
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum ThreadFeedback {
     Positive,
@@ -1310,41 +1305,6 @@ impl ConversationView {
         matches!(self.server_state, ServerState::Loading { .. })
     }
 
-    fn send_queued_message_at_index(
-        &mut self,
-        index: usize,
-        is_send_now: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(active) = self.root_thread_view() {
-            active.update(cx, |active, cx| {
-                active.send_queued_message_at_index(index, is_send_now, window, cx);
-            });
-        }
-    }
-
-    fn move_queued_message_to_main_editor(
-        &mut self,
-        index: usize,
-        inserted_text: Option<&str>,
-        cursor_offset: Option<usize>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(active) = self.root_thread_view() {
-            active.update(cx, |active, cx| {
-                active.move_queued_message_to_main_editor(
-                    index,
-                    inserted_text,
-                    cursor_offset,
-                    window,
-                    cx,
-                );
-            });
-        }
-    }
-
     fn handle_thread_event(
         &mut self,
         thread: &Entity<AcpThread>,
@@ -1458,31 +1418,19 @@ impl ConversationView {
                     cx,
                 );
 
-                let should_send_queued = if let Some(active) = self.root_thread_view() {
+                if let Some(active) = self.root_thread_view() {
                     active.update(cx, |active, cx| {
-                        if active.skip_queue_processing_count > 0 {
-                            active.skip_queue_processing_count -= 1;
-                            false
-                        } else if active.user_interrupted_generation {
-                            // Manual interruption: don't auto-process queue.
-                            // Reset the flag so future completions can process normally.
-                            active.user_interrupted_generation = false;
-                            false
-                        } else {
-                            let has_queued = !active.local_queued_messages.is_empty();
-                            // Don't auto-send if the first message editor is currently focused
-                            let is_first_editor_focused = active
-                                .queued_message_editors
-                                .first()
-                                .is_some_and(|editor| editor.focus_handle(cx).is_focused(window));
-                            has_queued && !is_first_editor_focused
+                        let is_first_editor_focused = active
+                            .message_queue
+                            .first()
+                            .is_some_and(|entry| entry.editor.focus_handle(cx).is_focused(window));
+                        if let Some(entry) = active
+                            .message_queue
+                            .on_generation_stopped(is_first_editor_focused)
+                        {
+                            active.send_queued_message(entry, window, cx);
                         }
-                    })
-                } else {
-                    false
-                };
-                if should_send_queued {
-                    self.send_queued_message_at_index(0, false, window, cx);
+                    });
                 }
             }
             AcpThreadEvent::Refusal => {
@@ -2180,184 +2128,6 @@ impl ConversationView {
             .thread(self.root_session_id.as_ref()?, cx)
     }
 
-    fn queued_messages_len(&self, cx: &App) -> usize {
-        self.root_thread_view()
-            .map(|thread| thread.read(cx).local_queued_messages.len())
-            .unwrap_or_default()
-    }
-
-    fn update_queued_message(
-        &mut self,
-        index: usize,
-        content: Vec<acp::ContentBlock>,
-        tracked_buffers: Vec<Entity<Buffer>>,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        match self.root_thread_view() {
-            Some(thread) => thread.update(cx, |thread, _cx| {
-                if index < thread.local_queued_messages.len() {
-                    thread.local_queued_messages[index] = QueuedMessage {
-                        content,
-                        tracked_buffers,
-                    };
-                    true
-                } else {
-                    false
-                }
-            }),
-            None => false,
-        }
-    }
-
-    fn queued_message_contents(&self, cx: &App) -> Vec<Vec<acp::ContentBlock>> {
-        match self.root_thread_view() {
-            None => Vec::new(),
-            Some(thread) => thread
-                .read(cx)
-                .local_queued_messages
-                .iter()
-                .map(|q| q.content.clone())
-                .collect(),
-        }
-    }
-
-    fn save_queued_message_at_index(&mut self, index: usize, cx: &mut Context<Self>) {
-        let editor = match self.root_thread_view() {
-            Some(thread) => thread.read(cx).queued_message_editors.get(index).cloned(),
-            None => None,
-        };
-        let Some(editor) = editor else {
-            return;
-        };
-
-        let contents_task = editor.update(cx, |editor, cx| editor.contents(false, cx));
-
-        cx.spawn(async move |this, cx| {
-            let Ok((content, tracked_buffers)) = contents_task.await else {
-                return Ok::<(), anyhow::Error>(());
-            };
-
-            this.update(cx, |this, cx| {
-                this.update_queued_message(index, content, tracked_buffers, cx);
-                cx.notify();
-            })?;
-
-            Ok(())
-        })
-        .detach_and_log_err(cx);
-    }
-
-    fn sync_queued_message_editors(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let needed_count = self.queued_messages_len(cx);
-        let queued_messages = self.queued_message_contents(cx);
-
-        let agent_name = self.agent.agent_id();
-        let workspace = self.workspace.clone();
-        let project = self.project.downgrade();
-        let Some(connected) = self.as_connected() else {
-            return;
-        };
-        let Some(thread) = connected.active_view() else {
-            return;
-        };
-        let session_capabilities = thread.read(cx).session_capabilities.clone();
-
-        let current_count = thread.read(cx).queued_message_editors.len();
-        let last_synced = thread.read(cx).last_synced_queue_length;
-
-        if current_count == needed_count && needed_count == last_synced {
-            return;
-        }
-
-        if current_count > needed_count {
-            thread.update(cx, |thread, _cx| {
-                thread.queued_message_editors.truncate(needed_count);
-                thread
-                    .queued_message_editor_subscriptions
-                    .truncate(needed_count);
-            });
-
-            let editors = thread.read(cx).queued_message_editors.clone();
-            for (index, editor) in editors.into_iter().enumerate() {
-                if let Some(content) = queued_messages.get(index) {
-                    editor.update(cx, |editor, cx| {
-                        editor.set_read_only(true, cx);
-                        editor.set_message(content.clone(), window, cx);
-                    });
-                }
-            }
-        }
-
-        while thread.read(cx).queued_message_editors.len() < needed_count {
-            let index = thread.read(cx).queued_message_editors.len();
-            let content = queued_messages.get(index).cloned().unwrap_or_default();
-
-            let editor = cx.new(|cx| {
-                let mut editor = MessageEditor::new(
-                    workspace.clone(),
-                    project.clone(),
-                    None,
-                    None,
-                    session_capabilities.clone(),
-                    agent_name.clone(),
-                    "",
-                    EditorMode::AutoHeight {
-                        min_lines: 1,
-                        max_lines: Some(10),
-                    },
-                    window,
-                    cx,
-                );
-                editor.set_read_only(true, cx);
-                editor.set_message(content, window, cx);
-                editor
-            });
-
-            let subscription = cx.subscribe_in(
-                &editor,
-                window,
-                move |this, _editor, event, window, cx| match event {
-                    MessageEditorEvent::InputAttempted {
-                        text,
-                        cursor_offset,
-                    } => this.move_queued_message_to_main_editor(
-                        index,
-                        Some(text.as_ref()),
-                        Some(*cursor_offset),
-                        window,
-                        cx,
-                    ),
-                    MessageEditorEvent::LostFocus => {
-                        this.save_queued_message_at_index(index, cx);
-                    }
-                    MessageEditorEvent::Cancel => {
-                        window.focus(&this.focus_handle(cx), cx);
-                    }
-                    MessageEditorEvent::Send => {
-                        window.focus(&this.focus_handle(cx), cx);
-                    }
-                    MessageEditorEvent::SendImmediately => {
-                        this.send_queued_message_at_index(index, true, window, cx);
-                    }
-                    _ => {}
-                },
-            );
-
-            thread.update(cx, |thread, _cx| {
-                thread.queued_message_editors.push(editor);
-                thread
-                    .queued_message_editor_subscriptions
-                    .push(subscription);
-            });
-        }
-
-        if let Some(active) = self.root_thread_view() {
-            active.update(cx, |active, _cx| {
-                active.last_synced_queue_length = needed_count;
-            });
-        }
-    }
-
     fn render_markdown(&self, markdown: Entity<Markdown>, style: MarkdownStyle) -> MarkdownElement {
         let workspace = self.workspace.clone();
         MarkdownElement::new(markdown, style).on_url_click(move |text, window, cx| {
@@ -2759,8 +2529,6 @@ impl ConversationView {
 
 impl Render for ConversationView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_queued_message_editors(window, cx);
-
         v_flex()
             .track_focus(&self.focus_handle)
             .size_full()
@@ -7008,19 +6776,21 @@ pub(crate) mod tests {
                     "queued message".to_string(),
                 ))],
                 vec![],
+                window,
                 cx,
             );
             // Main editor must be empty for this path — it is by default, but
             // assert to make the precondition explicit.
             assert!(thread.message_editor.read(cx).is_empty(cx));
-            thread.move_queued_message_to_main_editor(0, None, None, window, cx);
+            let id = thread.message_queue.first_id().unwrap();
+            thread.move_queued_message_to_main_editor(id, None, None, window, cx);
         });
 
         cx.run_until_parked();
 
         // Queue should now be empty.
         let queue_len = active_thread(&conversation_view, cx)
-            .read_with(cx, |thread, _cx| thread.local_queued_messages.len());
+            .read_with(cx, |thread, _cx| thread.message_queue.len());
         assert_eq!(queue_len, 0, "Queue should be empty after move");
 
         // Main editor should contain the queued message text.
@@ -7056,16 +6826,18 @@ pub(crate) mod tests {
                     "queued message".to_string(),
                 ))],
                 vec![],
+                window,
                 cx,
             );
-            thread.move_queued_message_to_main_editor(0, None, None, window, cx);
+            let id = thread.message_queue.first_id().unwrap();
+            thread.move_queued_message_to_main_editor(id, None, None, window, cx);
         });
 
         cx.run_until_parked();
 
         // Queue should now be empty.
         let queue_len = active_thread(&conversation_view, cx)
-            .read_with(cx, |thread, _cx| thread.local_queued_messages.len());
+            .read_with(cx, |thread, _cx| thread.message_queue.len());
         assert_eq!(queue_len, 0, "Queue should be empty after move");
 
         // Main editor should contain existing content + separator + queued content.
