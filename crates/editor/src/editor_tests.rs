@@ -72,10 +72,6 @@ use workspace::{
     item::{FollowEvent, FollowableItem, Item, ItemHandle, SaveOptions},
     register_project_item,
 };
-use zed_actions::markdown::{
-    Indent as MarkdownIndent, IndentBehavior as MarkdownIndentBehavior,
-    Outdent as MarkdownOutdent, OutdentBehavior as MarkdownOutdentBehavior,
-};
 
 fn display_ranges(editor: &Editor, cx: &mut Context<'_, Editor>) -> Vec<Range<DisplayPoint>> {
     editor
@@ -32907,15 +32903,7 @@ async fn test_tab_ordered_list_single_line_renumbering(cx: &mut TestAppContext) 
     cx.set_state(indoc! {"
         2. ˇsub item
     "});
-    cx.update_editor(|e, window, cx| {
-        e.markdown_indent(
-            &MarkdownIndent {
-                behavior: MarkdownIndentBehavior::Tab,
-            },
-            window,
-            cx,
-        )
-    });
+    cx.update_editor(|e, window, cx| e.tab(&Tab, window, cx));
     cx.wait_for_autoindent_applied().await;
     let expected = indoc! {"
         $$1. ˇsub item
@@ -32926,15 +32914,7 @@ async fn test_tab_ordered_list_single_line_renumbering(cx: &mut TestAppContext) 
     cx.set_state(indoc! {"
         2. ˇ
     "});
-    cx.update_editor(|e, window, cx| {
-        e.markdown_indent(
-            &MarkdownIndent {
-                behavior: MarkdownIndentBehavior::Tab,
-            },
-            window,
-            cx,
-        )
-    });
+    cx.update_editor(|e, window, cx| e.tab(&Tab, window, cx));
     cx.wait_for_autoindent_applied().await;
     let expected = indoc! {"
         $$1. ˇ
@@ -32947,15 +32927,7 @@ async fn test_tab_ordered_list_single_line_renumbering(cx: &mut TestAppContext) 
         «2. child a
         3. child bˇ»
     "});
-    cx.update_editor(|e, window, cx| {
-        e.markdown_indent(
-            &MarkdownIndent {
-                behavior: MarkdownIndentBehavior::Tab,
-            },
-            window,
-            cx,
-        )
-    });
+    cx.update_editor(|e, window, cx| e.tab(&Tab, window, cx));
     cx.wait_for_autoindent_applied().await;
     let expected = indoc! {"
         1. parent
@@ -32973,15 +32945,7 @@ async fn test_tab_ordered_list_single_line_renumbering(cx: &mut TestAppContext) 
         «5. list
         6. listˇ»
     "});
-    cx.update_editor(|e, window, cx| {
-        e.markdown_indent(
-            &MarkdownIndent {
-                behavior: MarkdownIndentBehavior::Tab,
-            },
-            window,
-            cx,
-        )
-    });
+    cx.update_editor(|e, window, cx| e.tab(&Tab, window, cx));
     cx.wait_for_autoindent_applied().await;
     let expected = indoc! {"
         1. list
@@ -33001,15 +32965,7 @@ async fn test_tab_ordered_list_single_line_renumbering(cx: &mut TestAppContext) 
         3. moved bˇ»
         4. trailing
     "});
-    cx.update_editor(|e, window, cx| {
-        e.markdown_indent(
-            &MarkdownIndent {
-                behavior: MarkdownIndentBehavior::Tab,
-            },
-            window,
-            cx,
-        )
-    });
+    cx.update_editor(|e, window, cx| e.tab(&Tab, window, cx));
     cx.wait_for_autoindent_applied().await;
     let expected = indoc! {"
         1. top
@@ -33029,15 +32985,7 @@ async fn test_tab_ordered_list_single_line_renumbering(cx: &mut TestAppContext) 
         3. moved bˇ»
         4. trailing
     "});
-    cx.update_editor(|e, window, cx| {
-        e.markdown_indent(
-            &MarkdownIndent {
-                behavior: MarkdownIndentBehavior::Tab,
-            },
-            window,
-            cx,
-        )
-    });
+    cx.update_editor(|e, window, cx| e.tab(&Tab, window, cx));
     cx.wait_for_autoindent_applied().await;
     let expected = indoc! {"
         1. top
@@ -33057,15 +33005,7 @@ async fn test_tab_ordered_list_single_line_renumbering(cx: &mut TestAppContext) 
         3. moved bˇ»
         4. trailing
     "});
-    cx.update_editor(|e, window, cx| {
-        e.markdown_indent(
-            &MarkdownIndent {
-                behavior: MarkdownIndentBehavior::Tab,
-            },
-            window,
-            cx,
-        )
-    });
+    cx.update_editor(|e, window, cx| e.tab(&Tab, window, cx));
     cx.wait_for_autoindent_applied().await;
     let expected = indoc! {"
         1. top
@@ -33092,15 +33032,7 @@ async fn test_tab_list_outdent(cx: &mut TestAppContext) {
           2. ˇchild
     "};
     cx.set_state(initial);
-    cx.update_editor(|e, window, cx| {
-        e.markdown_outdent(
-            &MarkdownOutdent {
-                behavior: MarkdownOutdentBehavior::Outdent,
-            },
-            window,
-            cx,
-        )
-    });
+    cx.update_editor(|e, window, cx| e.outdent(&Outdent, window, cx));
     let expected = indoc! {"
         1. parent
         2. ˇchild
@@ -33114,15 +33046,7 @@ async fn test_tab_list_outdent(cx: &mut TestAppContext) {
           1. ˇchild
     "};
     cx.set_state(initial);
-    cx.update_editor(|e, window, cx| {
-        e.markdown_outdent(
-            &MarkdownOutdent {
-                behavior: MarkdownOutdentBehavior::Outdent,
-            },
-            window,
-            cx,
-        )
-    });
+    cx.update_editor(|e, window, cx| e.outdent(&Outdent, window, cx));
     let expected = indoc! {"
         1. first
         2. second
@@ -33136,15 +33060,7 @@ async fn test_tab_list_outdent(cx: &mut TestAppContext) {
           1. ˇorphan
     "};
     cx.set_state(initial);
-    cx.update_editor(|e, window, cx| {
-        e.markdown_outdent(
-            &MarkdownOutdent {
-                behavior: MarkdownOutdentBehavior::Outdent,
-            },
-            window,
-            cx,
-        )
-    });
+    cx.update_editor(|e, window, cx| e.outdent(&Outdent, window, cx));
     let expected = indoc! {"
         1. ˇorphan
     "};
@@ -33155,15 +33071,7 @@ async fn test_tab_list_outdent(cx: &mut TestAppContext) {
     cx.set_state(indoc! {"
         3. ˇitem
     "});
-    cx.update_editor(|e, window, cx| {
-        e.markdown_outdent(
-            &MarkdownOutdent {
-                behavior: MarkdownOutdentBehavior::Outdent,
-            },
-            window,
-            cx,
-        )
-    });
+    cx.update_editor(|e, window, cx| e.outdent(&Outdent, window, cx));
     cx.assert_editor_state(indoc! {"
         3. ˇitem
     "});
@@ -33175,15 +33083,7 @@ async fn test_tab_list_outdent(cx: &mut TestAppContext) {
           3. ˇ
     "};
     cx.set_state(initial);
-    cx.update_editor(|e, window, cx| {
-        e.markdown_outdent(
-            &MarkdownOutdent {
-                behavior: MarkdownOutdentBehavior::Outdent,
-            },
-            window,
-            cx,
-        )
-    });
+    cx.update_editor(|e, window, cx| e.outdent(&Outdent, window, cx));
     let expected = indoc! {"
         1. parent
         2. ˇ
@@ -33199,80 +33099,13 @@ async fn test_tab_list_outdent(cx: &mut TestAppContext) {
           2. child bˇ»
     "};
     cx.set_state(initial);
-    cx.update_editor(|e, window, cx| {
-        e.markdown_outdent(
-            &MarkdownOutdent {
-                behavior: MarkdownOutdentBehavior::Outdent,
-            },
-            window,
-            cx,
-        )
-    });
+    cx.update_editor(|e, window, cx| e.outdent(&Outdent, window, cx));
     let expected = indoc! {"
         1. parent
         2. «child a
         3. child bˇ»
     "};
     cx.assert_editor_state(expected);
-}
-
-#[gpui::test]
-async fn test_markdown_indent_outdent_fallback_behavior(cx: &mut TestAppContext) {
-    init_test(cx, |settings| {
-        settings.defaults.tab_size = Some(2.try_into().unwrap());
-    });
-
-    let markdown_language = languages::language("markdown", tree_sitter_md::LANGUAGE.into());
-    let mut cx = EditorTestContext::new(cx).await;
-    cx.update_buffer(|buffer, cx| buffer.set_language(Some(markdown_language), cx));
-
-    // `behavior = tab` falls back to `editor::Tab` for non-list content.
-    cx.set_state(indoc! {"
-        abcˇ
-    "});
-    cx.update_editor(|e, window, cx| {
-        e.markdown_indent(
-            &MarkdownIndent {
-                behavior: MarkdownIndentBehavior::Tab,
-            },
-            window,
-            cx,
-        )
-    });
-    cx.assert_editor_state(indoc! {"
-        abc  ˇ
-    "});
-
-    // `behavior = indent` falls back to `editor::Indent` for non-list content.
-    cx.set_state(indoc! {"
-        abcˇ
-    "});
-    cx.update_editor(|e, window, cx| {
-        e.markdown_indent(
-            &MarkdownIndent {
-                behavior: MarkdownIndentBehavior::Indent,
-            },
-            window,
-            cx,
-        )
-    });
-    cx.assert_editor_state(indoc! {"
-          abcˇ
-    "});
-
-    // `behavior = outdent` falls back to `editor::Outdent` for non-list content.
-    cx.update_editor(|e, window, cx| {
-        e.markdown_outdent(
-            &MarkdownOutdent {
-                behavior: MarkdownOutdentBehavior::Outdent,
-            },
-            window,
-            cx,
-        )
-    });
-    cx.assert_editor_state(indoc! {"
-        abcˇ
-    "});
 }
 
 #[gpui::test]

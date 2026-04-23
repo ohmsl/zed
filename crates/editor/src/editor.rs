@@ -223,10 +223,6 @@ use workspace::{
 };
 pub use zed_actions::editor::RevealInFileManager;
 use zed_actions::editor::{MoveDown, MoveUp};
-use zed_actions::markdown::{
-    Indent as MarkdownIndent, IndentBehavior as MarkdownIndentBehavior,
-    Outdent as MarkdownOutdent, OutdentBehavior as MarkdownOutdentBehavior,
-};
 
 use crate::{
     code_context_menus::CompletionsMenuSource,
@@ -10957,7 +10953,13 @@ impl Editor {
         if self.read_only(cx) {
             return;
         }
+
         self.hide_mouse_cursor(HideMouseCursorOrigin::TypingAction, cx);
+
+        if self.should_use_markdown_ordered_list_indent(cx) {
+            return self.apply_markdown_ordered_list_indent(window, cx);
+        }
+
         let mut selections = self.selections.all_adjusted(&self.display_snapshot(cx));
         let buffer = self.buffer.read(cx);
         let snapshot = buffer.snapshot(cx);
@@ -11090,6 +11092,11 @@ impl Editor {
         }
 
         self.hide_mouse_cursor(HideMouseCursorOrigin::TypingAction, cx);
+
+        if self.should_use_markdown_ordered_list_indent(cx) {
+            return self.apply_markdown_ordered_list_indent(window, cx);
+        }
+
         let mut selections = self.selections.all::<Point>(&self.display_snapshot(cx));
         let mut prev_edited_row = 0;
         let mut row_delta = 0;
@@ -11198,6 +11205,11 @@ impl Editor {
         }
 
         self.hide_mouse_cursor(HideMouseCursorOrigin::TypingAction, cx);
+
+        if self.should_use_markdown_ordered_list_outdent(cx) {
+            return self.apply_markdown_ordered_list_outdent(window, cx);
+        }
+
         let display_map = self.display_map.update(cx, |map, cx| map.snapshot(cx));
         let selections = self.selections.all::<Point>(&display_map);
         let mut deletion_ranges = Vec::new();
@@ -11267,69 +11279,6 @@ impl Editor {
         });
     }
 
-    pub fn markdown_indent(
-        &mut self,
-        action: &MarkdownIndent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.mode.is_single_line() {
-            cx.propagate();
-            return;
-        }
-
-        if action.behavior == MarkdownIndentBehavior::Tab
-            && self.move_to_next_snippet_tabstop(window, cx)
-        {
-            self.hide_mouse_cursor(HideMouseCursorOrigin::TypingAction, cx);
-            return;
-        }
-
-        if self.read_only(cx) {
-            return;
-        }
-
-        if !self.should_use_markdown_ordered_list_indent(cx) {
-            match action.behavior {
-                MarkdownIndentBehavior::Tab => self.tab(&Tab, window, cx),
-                MarkdownIndentBehavior::Indent => self.indent(&Indent, window, cx),
-            }
-            return;
-        }
-
-        self.apply_markdown_ordered_list_indent(window, cx);
-    }
-
-    pub fn markdown_outdent(
-        &mut self,
-        action: &MarkdownOutdent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.mode.is_single_line() {
-            cx.propagate();
-            return;
-        }
-
-        if action.behavior == MarkdownOutdentBehavior::Backtab {
-            self.hide_mouse_cursor(HideMouseCursorOrigin::TypingAction, cx);
-            if self.move_to_prev_snippet_tabstop(window, cx) {
-                return;
-            }
-        }
-
-        if self.read_only(cx) {
-            return;
-        }
-
-        if !self.should_use_markdown_ordered_list_outdent(cx) {
-            self.outdent(&Outdent, window, cx);
-            return;
-        }
-
-        self.apply_markdown_ordered_list_outdent(window, cx);
-    }
-
     fn should_use_markdown_ordered_list_indent(&self, cx: &mut App) -> bool {
         let display_map = self.display_snapshot(cx);
         let selections = self.selections.all::<Point>(&display_map);
@@ -11396,12 +11345,7 @@ impl Editor {
             prev_edited_row = selection.end.row;
 
             row_delta = Self::markdown_indent_selection(
-                buffer,
-                &snapshot,
-                selection,
-                &mut edits,
-                row_delta,
-                cx,
+                buffer, &snapshot, selection, &mut edits, row_delta, cx,
             );
         }
 
@@ -11541,11 +11485,7 @@ impl Editor {
         }
     }
 
-    fn apply_markdown_ordered_list_outdent(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn apply_markdown_ordered_list_outdent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.hide_mouse_cursor(HideMouseCursorOrigin::TypingAction, cx);
         let display_map = self.display_map.update(cx, |map, cx| map.snapshot(cx));
         let selections = self.selections.all::<Point>(&display_map);

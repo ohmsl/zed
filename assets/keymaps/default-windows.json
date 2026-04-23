@@ -571,10 +571,6 @@
     "context": "Editor && extension == md",
     "use_key_equivalents": true,
     "bindings": {
-      "tab": ["markdown::Indent", { "behavior": "tab" }],
-      "shift-tab": ["markdown::Outdent", { "behavior": "backtab" }],
-      "ctrl-]": "markdown::Indent",
-      "ctrl-[": "markdown::Outdent",
       "ctrl-k v": "markdown::OpenPreviewToTheSide",
       "ctrl-shift-v": "markdown::OpenPreview",
     },
@@ -724,8 +720,8 @@
     "context": "ThreadSwitcher",
     "bindings": {
       "ctrl-tab": "agents_sidebar::ToggleThreadSwitcher",
-      "ctrl-shift-tab": ["agents_sidebar::ToggleThreadSwitcher", { "select_last": true }]
-    }
+      "ctrl-shift-tab": ["agents_sidebar::ToggleThreadSwitcher", { "select_last": true }],
+    },
   },
   {
     "context": "ApplicationMenu",
