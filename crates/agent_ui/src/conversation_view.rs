@@ -5716,8 +5716,9 @@ pub(crate) mod tests {
                 Some(0)
             );
             let workspace = view.workspace.upgrade().unwrap();
-            let (editor_selections, terminal_selections) =
-                crate::completion_provider::gather_focused_content(None, &workspace, cx);
+            let (editor_selections, terminal_selections) = workspace.update(cx, |workspace, cx| {
+                crate::completion_provider::gather_active_content(workspace, cx)
+            });
             view.insert_selections(editor_selections, terminal_selections, window, cx);
         });
 
@@ -5782,8 +5783,9 @@ pub(crate) mod tests {
                 None
             );
             let workspace = view.workspace.upgrade().unwrap();
-            let (editor_selections, terminal_selections) =
-                crate::completion_provider::gather_focused_content(None, &workspace, cx);
+            let (editor_selections, terminal_selections) = workspace.update(cx, |workspace, cx| {
+                crate::completion_provider::gather_active_content(workspace, cx)
+            });
             view.insert_selections(editor_selections, terminal_selections, window, cx);
         });
 
