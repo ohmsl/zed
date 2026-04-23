@@ -1781,9 +1781,11 @@ impl MessageEditor {
         });
     }
 
-    fn serialized_copy_text(&self, cx: &App) -> Option<String> {
+    fn serialized_copy_text(&self, cx: &mut App) -> Option<String> {
+        let display_snapshot = self
+            .editor
+            .update(cx, |editor, cx| editor.display_snapshot(cx));
         let editor = self.editor.read(cx);
-        let display_snapshot = editor.display_snapshot(cx);
         if !editor.has_non_empty_selection(&display_snapshot) {
             return None;
         }
@@ -1813,45 +1815,36 @@ impl MessageEditor {
             .selections
             .all::<MultiBufferOffset>(&display_snapshot)
         {
-            let mut overlapping_mentions = mention_ranges
-                .iter()
-                .filter(|(start, end, _)| *start < selection.end && selection.start < *end)
-                .collect::<Vec<_>>();
-
             if is_first {
                 is_first = false;
             } else {
                 text.push('\n');
             }
 
-            if overlapping_mentions.is_empty() {
-                text.push_str(
-                    &snapshot
-                        .text_for_range(selection.start..selection.end)
-                        .collect::<String>(),
-                );
+            let mut overlapping_mentions = mention_ranges
+                .iter()
+                .filter(|(start, end, _)| *start < selection.end && selection.start < *end)
+                .peekable();
+
+            if overlapping_mentions.peek().is_none() {
+                text.extend(snapshot.text_for_range(selection.start..selection.end));
                 continue;
             }
 
             has_mentions = true;
-            overlapping_mentions.sort_by_key(|(start, _, _)| *start);
 
             let mut cursor = selection.start;
             for (start, end, uri) in overlapping_mentions {
                 if cursor < *start {
-                    text.push_str(&snapshot.text_for_range(cursor..*start).collect::<String>());
+                    text.extend(snapshot.text_for_range(cursor..*start));
                 }
 
-                text.push_str(&uri.as_link().to_string());
-                cursor = cursor.max(*end);
+                write!(text, "{}", uri.as_link()).unwrap();
+                cursor = *end;
             }
 
             if cursor < selection.end {
-                text.push_str(
-                    &snapshot
-                        .text_for_range(cursor..selection.end)
-                        .collect::<String>(),
-                );
+                text.extend(snapshot.text_for_range(cursor..selection.end));
             }
         }
 
@@ -2027,6 +2020,7 @@ mod tests {
     use crate::completion_provider::PromptContextType;
     use crate::{
         conversation_view::tests::init_test,
+        mention_set::insert_crease_for_mention,
         message_editor::{Mention, MessageEditor, SessionCapabilities, parse_mention_links},
     };
 
@@ -3983,66 +3977,69 @@ mod tests {
             line_range: 2..=3,
         };
 
-        source_message_editor
-            .update_in(&mut cx, |message_editor, window, cx| {
-                message_editor.set_text(source_text, window, cx);
+        source_message_editor.update_in(&mut cx, |message_editor, window, cx| {
+            message_editor.set_text(source_text, window, cx);
 
-                let snapshot = message_editor
-                    .editor
-                    .read(cx)
-                    .buffer()
-                    .read(cx)
-                    .snapshot(cx);
-                for (range, uri, content) in [
-                    (
-                        first_range.clone(),
-                        first_uri.clone(),
-                        "line 1\nline 2\n".to_string(),
-                    ),
-                    (
-                        second_range.clone(),
-                        second_uri.clone(),
-                        "line 3\nline 4\n".to_string(),
-                    ),
-                ] {
-                    let Some((crease_id, tx)) = insert_crease_for_mention(
-                        snapshot.anchor_before(MultiBufferOffset(range.start)),
-                        range.len(),
-                        uri.name().into(),
-                        uri.icon_path(cx),
-                        uri.tooltip_text(),
-                        Some(uri.clone()),
-                        Some(message_editor.workspace.clone()),
-                        None,
-                        message_editor.editor.clone(),
-                        window,
-                        cx,
-                    ) else {
-                        panic!("expected mention crease insertion");
-                    };
-                    drop(tx);
+            let snapshot = message_editor
+                .editor
+                .read(cx)
+                .buffer()
+                .read(cx)
+                .snapshot(cx);
+            for (range, uri, content) in [
+                (
+                    first_range.clone(),
+                    first_uri.clone(),
+                    "line 1\nline 2\n".to_string(),
+                ),
+                (
+                    second_range.clone(),
+                    second_uri.clone(),
+                    "line 3\nline 4\n".to_string(),
+                ),
+            ] {
+                let Some((crease_id, tx)) = insert_crease_for_mention(
+                    snapshot
+                        .anchor_to_buffer_anchor(
+                            snapshot.anchor_before(MultiBufferOffset(range.start)),
+                        )
+                        .expect("selection mention anchor should map to a buffer")
+                        .0,
+                    range.len(),
+                    uri.name().into(),
+                    uri.icon_path(cx),
+                    uri.tooltip_text(),
+                    Some(uri.clone()),
+                    Some(message_editor.workspace.clone()),
+                    None,
+                    message_editor.editor.clone(),
+                    window,
+                    cx,
+                ) else {
+                    panic!("expected mention crease insertion");
+                };
+                drop(tx);
 
-                    message_editor.mention_set.update(cx, |mention_set, _cx| {
-                        mention_set.insert_mention(
-                            crease_id,
-                            uri,
-                            Task::ready(Ok(Mention::Text {
-                                content,
-                                tracked_buffers: Vec::new(),
-                            }))
-                            .shared(),
-                        );
-                    });
-                }
-
-                let buffer_len = snapshot.len();
-                message_editor.editor.update(cx, |editor, cx| {
-                    editor.change_selections(Default::default(), window, cx, |selections| {
-                        selections.select_ranges([MultiBufferOffset(0)..buffer_len]);
-                    });
+                message_editor.mention_set.update(cx, |mention_set, _cx| {
+                    mention_set.insert_mention(
+                        crease_id,
+                        uri,
+                        Task::ready(Ok(Mention::Text {
+                            content,
+                            tracked_buffers: Vec::new(),
+                        }))
+                        .shared(),
+                    );
                 });
-            })
-            .unwrap();
+            }
+
+            let buffer_len = snapshot.len();
+            message_editor.editor.update(cx, |editor, cx| {
+                editor.change_selections(Default::default(), window, cx, |selections| {
+                    selections.select_ranges([MultiBufferOffset(0)..buffer_len]);
+                });
+            });
+        });
 
         let copied_text = source_message_editor.update(&mut cx, |message_editor, cx| {
             message_editor
@@ -4056,49 +4053,45 @@ mod tests {
         );
         assert_eq!(copied_text, expected_text);
 
-        let target_message_editor = workspace
-            .update_in(&mut cx, |workspace, window, cx| {
-                let workspace_handle = cx.weak_entity();
-                let thread_store = cx.new(|cx| ThreadStore::new(cx));
-                let message_editor = cx.new(|cx| {
-                    MessageEditor::new(
-                        workspace_handle,
-                        project.downgrade(),
-                        Some(thread_store),
-                        None,
-                        None,
-                        Default::default(),
-                        "Test Agent".into(),
-                        "Test",
-                        EditorMode::AutoHeight {
-                            max_lines: None,
-                            min_lines: 1,
-                        },
-                        window,
-                        cx,
-                    )
-                });
-                workspace.active_pane().update(cx, |pane, cx| {
-                    pane.add_item(
-                        Box::new(cx.new(|_| MessageEditorItem(message_editor.clone()))),
-                        true,
-                        true,
-                        None,
-                        window,
-                        cx,
-                    );
-                });
-                message_editor.read(cx).focus_handle(cx).focus(window, cx);
-                message_editor
-            })
-            .unwrap();
+        let target_message_editor = workspace.update_in(&mut cx, |workspace, window, cx| {
+            let workspace_handle = cx.weak_entity();
+            let thread_store = cx.new(|cx| ThreadStore::new(cx));
+            let message_editor = cx.new(|cx| {
+                MessageEditor::new(
+                    workspace_handle,
+                    project.downgrade(),
+                    Some(thread_store),
+                    None,
+                    None,
+                    Default::default(),
+                    "Test Agent".into(),
+                    "Test",
+                    EditorMode::AutoHeight {
+                        max_lines: None,
+                        min_lines: 1,
+                    },
+                    window,
+                    cx,
+                )
+            });
+            workspace.active_pane().update(cx, |pane, cx| {
+                pane.add_item(
+                    Box::new(cx.new(|_| MessageEditorItem(message_editor.clone()))),
+                    true,
+                    true,
+                    None,
+                    window,
+                    cx,
+                );
+            });
+            message_editor.read(cx).focus_handle(cx).focus(window, cx);
+            message_editor
+        });
 
         cx.write_to_clipboard(ClipboardItem::new_string(copied_text));
-        target_message_editor
-            .update_in(&mut cx, |message_editor, window, cx| {
-                message_editor.paste(&Paste, window, cx);
-            })
-            .unwrap();
+        target_message_editor.update_in(&mut cx, |message_editor, window, cx| {
+            message_editor.paste(&Paste, window, cx);
+        });
         cx.run_until_parked();
 
         let target_text = target_message_editor.read_with(&cx, |message_editor, cx| {
@@ -4110,6 +4103,163 @@ mod tests {
         assert_eq!(contents.len(), 2);
         assert!(contents.iter().any(|(uri, _)| uri == &first_uri));
         assert!(contents.iter().any(|(uri, _)| uri == &second_uri));
+    }
+
+    struct SelectionMentionFixture {
+        message_editor: Entity<MessageEditor>,
+        first_uri: MentionUri,
+        first_range: Range<usize>,
+        second_range: Range<usize>,
+    }
+
+    async fn setup_selection_mention_fixture(
+        cx: &mut TestAppContext,
+    ) -> (SelectionMentionFixture, VisualTestContext) {
+        let (message_editor, _source_editor, mut cx) = setup_paste_test_message_editor(
+            json!({"file.rs": "line 1\nline 2\nline 3\nline 4\n"}),
+            cx,
+        )
+        .await;
+
+        let source_text = "selection needs work\nselection looks fine";
+        let first_range = 0..9;
+        let second_start = "selection needs work\n".len();
+        let second_range = second_start..(second_start + "selection".len());
+        let first_uri = MentionUri::Selection {
+            abs_path: Some(path!("/project/file.rs").into()),
+            line_range: 0..=1,
+        };
+        let second_uri = MentionUri::Selection {
+            abs_path: Some(path!("/project/file.rs").into()),
+            line_range: 2..=3,
+        };
+
+        message_editor.update_in(&mut cx, |message_editor, window, cx| {
+            message_editor.set_text(source_text, window, cx);
+
+            let snapshot = message_editor
+                .editor
+                .read(cx)
+                .buffer()
+                .read(cx)
+                .snapshot(cx);
+            for (range, uri, content) in [
+                (
+                    first_range.clone(),
+                    first_uri.clone(),
+                    "line 1\nline 2\n".to_string(),
+                ),
+                (
+                    second_range.clone(),
+                    second_uri.clone(),
+                    "line 3\nline 4\n".to_string(),
+                ),
+            ] {
+                let Some((crease_id, tx)) = insert_crease_for_mention(
+                    snapshot
+                        .anchor_to_buffer_anchor(
+                            snapshot.anchor_before(MultiBufferOffset(range.start)),
+                        )
+                        .expect("selection mention anchor should map to a buffer")
+                        .0,
+                    range.len(),
+                    uri.name().into(),
+                    uri.icon_path(cx),
+                    uri.tooltip_text(),
+                    Some(uri.clone()),
+                    Some(message_editor.workspace.clone()),
+                    None,
+                    message_editor.editor.clone(),
+                    window,
+                    cx,
+                ) else {
+                    panic!("expected mention crease insertion");
+                };
+                drop(tx);
+
+                message_editor.mention_set.update(cx, |mention_set, _cx| {
+                    mention_set.insert_mention(
+                        crease_id,
+                        uri,
+                        Task::ready(Ok(Mention::Text {
+                            content,
+                            tracked_buffers: Vec::new(),
+                        }))
+                        .shared(),
+                    );
+                });
+            }
+        });
+
+        (
+            SelectionMentionFixture {
+                message_editor,
+                first_uri,
+                first_range,
+                second_range,
+            },
+            cx,
+        )
+    }
+
+    #[gpui::test]
+    async fn test_serialized_copy_text_selection_covers_only_mention(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (fixture, mut cx) = setup_selection_mention_fixture(cx).await;
+
+        fixture
+            .message_editor
+            .update_in(&mut cx, |message_editor, window, cx| {
+                let range = fixture.first_range.clone();
+                message_editor.editor.update(cx, |editor, cx| {
+                    editor.change_selections(Default::default(), window, cx, |selections| {
+                        selections.select_ranges([
+                            MultiBufferOffset(range.start)..MultiBufferOffset(range.end)
+                        ]);
+                    });
+                });
+            });
+
+        let copied = fixture
+            .message_editor
+            .update(&mut cx, |message_editor, cx| {
+                message_editor.serialized_copy_text(cx)
+            });
+
+        assert_eq!(copied, Some(fixture.first_uri.as_link().to_string()));
+    }
+
+    #[gpui::test]
+    async fn test_serialized_copy_text_returns_none_when_mentions_outside_selection(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let (fixture, mut cx) = setup_selection_mention_fixture(cx).await;
+
+        let between_start = fixture.first_range.end;
+        let between_end = fixture.second_range.start - 1;
+
+        fixture
+            .message_editor
+            .update_in(&mut cx, |message_editor, window, cx| {
+                message_editor.editor.update(cx, |editor, cx| {
+                    editor.change_selections(Default::default(), window, cx, |selections| {
+                        selections.select_ranges([
+                            MultiBufferOffset(between_start)..MultiBufferOffset(between_end)
+                        ]);
+                    });
+                });
+            });
+
+        let copied = fixture
+            .message_editor
+            .update(&mut cx, |message_editor, cx| {
+                message_editor.serialized_copy_text(cx)
+            });
+
+        assert_eq!(copied, None);
     }
 
     #[gpui::test]
