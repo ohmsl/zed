@@ -1417,8 +1417,7 @@ pub struct FollowerState {
 }
 
 pub struct AutoWatchScreensState {
-    current_peer: Option<PeerId>,
-    sharing_peers: Vec<PeerId>,
+    spotlighted_peer: Option<PeerId>,
 }
 
 struct FollowerView {
@@ -4804,18 +4803,13 @@ impl Workspace {
         let active_pane = self.active_pane.clone();
         self.unfollow_in_pane(&active_pane, window, cx);
 
-        let sharing_peers = self
+        let spotlighted_peer = self
             .active_call()
-            .map_or(Vec::new(), |call| call.peer_ids_with_video_tracks(cx));
+            .and_then(|call| call.peer_ids_with_video_tracks(cx).first().copied());
 
-        let current_peer = sharing_peers.first().copied();
+        self.auto_watch_screens = Some(AutoWatchScreensState { spotlighted_peer });
 
-        self.auto_watch_screens = Some(AutoWatchScreensState {
-            current_peer,
-            sharing_peers,
-        });
-
-        if let Some(peer_id) = current_peer {
+        if let Some(peer_id) = spotlighted_peer {
             self.open_shared_screen(peer_id, window, cx);
         }
 
@@ -4831,43 +4825,29 @@ impl Workspace {
         let Some(auto_watch) = self.auto_watch_screens.as_ref() else {
             return;
         };
-
-        let current_peer = auto_watch.current_peer;
-        let was_already_sharing = auto_watch.sharing_peers.contains(&participant_id);
+        let spotlighted_peer = auto_watch.spotlighted_peer;
 
         let participant_is_sharing = self.active_call().map_or(false, |call| {
             call.peer_ids_with_video_tracks(cx)
                 .contains(&participant_id)
         });
 
-        if participant_is_sharing && !was_already_sharing {
+        if participant_is_sharing && spotlighted_peer.is_none() {
             if let Some(auto_watch) = self.auto_watch_screens.as_mut() {
-                auto_watch.sharing_peers.push(participant_id);
-
-                if current_peer.is_none() {
-                    auto_watch.current_peer = Some(participant_id);
-                    self.open_shared_screen(participant_id, window, cx);
-                }
+                auto_watch.spotlighted_peer = Some(participant_id);
+                self.open_shared_screen(participant_id, window, cx);
             }
-        } else if !participant_is_sharing && was_already_sharing {
-            let was_viewing_current = current_peer == Some(participant_id)
-                && self.is_active_item_shared_screen_for_peer(participant_id, cx);
+        } else if !participant_is_sharing && spotlighted_peer == Some(participant_id) {
+            let was_viewing_spotlighted =
+                self.is_active_item_shared_screen_for_peer(participant_id, cx);
 
-            let next_peer = if let Some(auto_watch) = self.auto_watch_screens.as_mut() {
-                auto_watch
-                    .sharing_peers
-                    .retain(|&peer| peer != participant_id);
+            let next_peer = self
+                .active_call()
+                .and_then(|call| call.peer_ids_with_video_tracks(cx).first().copied());
 
-                if current_peer == Some(participant_id) {
-                    let next_peer = auto_watch.sharing_peers.first().copied();
-                    auto_watch.current_peer = next_peer;
-                    next_peer
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+            if let Some(auto_watch) = self.auto_watch_screens.as_mut() {
+                auto_watch.spotlighted_peer = next_peer;
+            }
 
             if let Some(next_peer) = next_peer {
                 if let Some(shared_screen) =
@@ -4877,8 +4857,8 @@ impl Workspace {
                         pane.add_item_inner(
                             Box::new(shared_screen),
                             false,
-                            was_viewing_current,
-                            was_viewing_current,
+                            was_viewing_spotlighted,
+                            was_viewing_spotlighted,
                             None,
                             window,
                             cx,
