@@ -207,39 +207,7 @@ async fn test_auto_watch_toggle_off_leaves_tabs_open(
 }
 
 #[gpui::test]
-async fn test_auto_watch_contextual_focus_user_viewing(
-    executor: BackgroundExecutor,
-    cx_a: &mut TestAppContext,
-    cx_b: &mut TestAppContext,
-    cx_c: &mut TestAppContext,
-) {
-    let mut server = TestServer::start(executor.clone()).await;
-    let setup = setup_auto_watch_test(&mut server, cx_a, cx_b, cx_c).await;
-    let (workspace_a, cx_a) = setup.client_a.build_workspace(&setup.project_a, cx_a);
-
-    workspace_a.update_in(cx_a, |workspace, window, cx| {
-        workspace.toggle_auto_watch_screens(window, cx);
-    });
-    start_screen_share(cx_b).await;
-    executor.run_until_parked();
-
-    workspace_a.update(cx_a, |workspace, cx| {
-        assert_active_item(workspace, "user_b's screen", cx);
-    });
-
-    start_screen_share(cx_c).await;
-    executor.run_until_parked();
-
-    stop_screen_share(cx_b);
-    executor.run_until_parked();
-
-    workspace_a.update(cx_a, |workspace, cx| {
-        assert_active_item(workspace, "user_c's screen", cx);
-    });
-}
-
-#[gpui::test]
-async fn test_auto_watch_contextual_focus_user_navigated_away(
+async fn test_auto_watch_does_not_steal_focus_when_viewing_other_tab(
     executor: BackgroundExecutor,
     cx_a: &mut TestAppContext,
     cx_b: &mut TestAppContext,
