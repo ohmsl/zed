@@ -24,8 +24,9 @@ use language_model::{
     LanguageModelCompletionEvent, LanguageModelCostInfo, LanguageModelEffortLevel, LanguageModelId,
     LanguageModelName, LanguageModelProvider, LanguageModelProviderId, LanguageModelProviderName,
     LanguageModelProviderState, LanguageModelRequest, LanguageModelRequestMessage,
-    LanguageModelToolChoice, LanguageModelToolResultContent, LanguageModelToolSchemaFormat,
-    LanguageModelToolUse, MessageContent, RateLimiter, Role, StopReason, TokenUsage,
+    LanguageModelRequestTool, LanguageModelToolChoice, LanguageModelToolResultContent,
+    LanguageModelToolSchemaFormat, LanguageModelToolUse, MessageContent, RateLimiter, Role,
+    StopReason, TokenUsage,
 };
 use settings::SettingsStore;
 use ui::prelude::*;
@@ -1630,5 +1631,324 @@ mod tests {
             Some("Let me check the directory".to_string()),
             "Should capture reasoning_text"
         );
+    }
+
+    fn make_test_model_json(id: &str, vendor: &str, endpoints: &[&str]) -> String {
+        let endpoints_json: Vec<String> = endpoints.iter().map(|e| format!("\"{}\"", e)).collect();
+        format!(
+            r#"{{
+                "billing": {{ "is_premium": false, "multiplier": 1.0 }},
+                "capabilities": {{
+                    "family": "test",
+                    "limits": {{ "max_context_window_tokens": 128000, "max_output_tokens": 4096 }},
+                    "supports": {{ "streaming": true, "tool_calls": true, "vision": true }},
+                    "type": "chat"
+                }},
+                "id": "{}",
+                "name": "{}",
+                "vendor": "{}",
+                "is_chat_default": false,
+                "is_chat_fallback": false,
+                "model_picker_enabled": true,
+                "supported_endpoints": [{}]
+            }}"#,
+            id,
+            id,
+            vendor,
+            endpoints_json.join(", ")
+        )
+    }
+
+    fn make_test_model(id: &str, vendor: &str, endpoints: &[&str]) -> CopilotChatModel {
+        serde_json::from_str(&make_test_model_json(id, vendor, endpoints)).unwrap()
+    }
+
+    #[test]
+    fn test_into_copilot_chat_basic_conversion() {
+        let request = LanguageModelRequest {
+            messages: vec![
+                LanguageModelRequestMessage {
+                    role: Role::System,
+                    content: vec![MessageContent::Text("You are a helpful assistant.".into())],
+                    cache: false,
+                    reasoning_details: None,
+                },
+                LanguageModelRequestMessage {
+                    role: Role::User,
+                    content: vec![MessageContent::Text("Hello".into())],
+                    cache: false,
+                    reasoning_details: None,
+                },
+            ],
+            temperature: Some(0.7),
+            tools: vec![],
+            tool_choice: None,
+            thread_id: None,
+            prompt_id: None,
+            intent: None,
+            stop: vec![],
+            thinking_allowed: false,
+            thinking_effort: None,
+            speed: Default::default(),
+        };
+
+        let model = make_test_model("gpt-4o", "OpenAI", &["/chat/completions"]);
+        let result = into_copilot_chat(&model, request).unwrap();
+
+        assert_eq!(result.model, "gpt-4o");
+        assert!((result.temperature - 0.7).abs() < 0.001);
+        assert!(result.stream);
+        assert_eq!(result.messages.len(), 2);
+        assert!(result.thinking_budget.is_none());
+    }
+
+    #[test]
+    fn test_into_copilot_chat_merges_consecutive_same_role() {
+        let request = LanguageModelRequest {
+            messages: vec![
+                LanguageModelRequestMessage {
+                    role: Role::User,
+                    content: vec![MessageContent::Text("First".into())],
+                    cache: false,
+                    reasoning_details: None,
+                },
+                LanguageModelRequestMessage {
+                    role: Role::User,
+                    content: vec![MessageContent::Text(" Second".into())],
+                    cache: false,
+                    reasoning_details: None,
+                },
+            ],
+            temperature: None,
+            tools: vec![],
+            tool_choice: None,
+            thread_id: None,
+            prompt_id: None,
+            intent: None,
+            stop: vec![],
+            thinking_allowed: false,
+            thinking_effort: None,
+            speed: Default::default(),
+        };
+
+        let model = make_test_model("gpt-4o", "OpenAI", &["/chat/completions"]);
+        let result = into_copilot_chat(&model, request).unwrap();
+
+        assert_eq!(result.messages.len(), 1);
+    }
+
+    #[test]
+    fn test_into_copilot_chat_with_tools() {
+        let request = LanguageModelRequest {
+            messages: vec![LanguageModelRequestMessage {
+                role: Role::User,
+                content: vec![MessageContent::Text("List files".into())],
+                cache: false,
+                reasoning_details: None,
+            }],
+            temperature: None,
+            tools: vec![LanguageModelRequestTool {
+                name: "list_directory".into(),
+                description: "Lists files in a directory".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" }
+                    }
+                }),
+                use_input_streaming: false,
+            }],
+            tool_choice: Some(LanguageModelToolChoice::Auto),
+            thread_id: None,
+            prompt_id: None,
+            intent: None,
+            stop: vec![],
+            thinking_allowed: false,
+            thinking_effort: None,
+            speed: Default::default(),
+        };
+
+        let model = make_test_model("gpt-4o", "OpenAI", &["/chat/completions"]);
+        let result = into_copilot_chat(&model, request).unwrap();
+
+        assert_eq!(result.tools.len(), 1);
+        assert!(matches!(result.tool_choice, Some(ToolChoice::Auto)));
+    }
+
+    #[test]
+    fn test_into_copilot_chat_tool_choice_any_maps_to_required() {
+        let request = LanguageModelRequest {
+            messages: vec![LanguageModelRequestMessage {
+                role: Role::User,
+                content: vec![MessageContent::Text("Use a tool".into())],
+                cache: false,
+                reasoning_details: None,
+            }],
+            temperature: None,
+            tools: vec![LanguageModelRequestTool {
+                name: "test_tool".into(),
+                description: "Test".into(),
+                input_schema: serde_json::json!({}),
+                use_input_streaming: false,
+            }],
+            tool_choice: Some(LanguageModelToolChoice::Any),
+            thread_id: None,
+            prompt_id: None,
+            intent: None,
+            stop: vec![],
+            thinking_allowed: false,
+            thinking_effort: None,
+            speed: Default::default(),
+        };
+
+        let model = make_test_model("gpt-4o", "OpenAI", &["/chat/completions"]);
+        let result = into_copilot_chat(&model, request).unwrap();
+
+        assert!(matches!(result.tool_choice, Some(ToolChoice::Required)));
+    }
+
+    #[test]
+    fn test_into_copilot_responses_basic_conversion() {
+        let request = LanguageModelRequest {
+            messages: vec![
+                LanguageModelRequestMessage {
+                    role: Role::System,
+                    content: vec![MessageContent::Text("You are helpful.".into())],
+                    cache: false,
+                    reasoning_details: None,
+                },
+                LanguageModelRequestMessage {
+                    role: Role::User,
+                    content: vec![MessageContent::Text("Hello".into())],
+                    cache: false,
+                    reasoning_details: None,
+                },
+            ],
+            temperature: Some(0.5),
+            tools: vec![],
+            tool_choice: None,
+            thread_id: None,
+            prompt_id: None,
+            intent: None,
+            stop: vec![],
+            thinking_allowed: false,
+            thinking_effort: None,
+            speed: Default::default(),
+        };
+
+        let model = make_test_model("o3", "OpenAI", &["/responses"]);
+        let result = into_copilot_responses(&model, request);
+
+        assert_eq!(result.model, "o3");
+        assert_eq!(result.temperature, Some(0.5));
+        assert!(result.stream);
+        assert_eq!(result.input.len(), 2);
+        assert!(result.reasoning.is_none());
+    }
+
+    #[test]
+    fn test_into_copilot_responses_with_thinking() {
+        let request = LanguageModelRequest {
+            messages: vec![LanguageModelRequestMessage {
+                role: Role::User,
+                content: vec![MessageContent::Text("Think about this".into())],
+                cache: false,
+                reasoning_details: None,
+            }],
+            temperature: None,
+            tools: vec![],
+            tool_choice: None,
+            thread_id: None,
+            prompt_id: None,
+            intent: None,
+            stop: vec![],
+            thinking_allowed: true,
+            thinking_effort: Some("high".into()),
+            speed: Default::default(),
+        };
+
+        let model = make_test_model("o3", "OpenAI", &["/responses"]);
+        let result = into_copilot_responses(&model, request);
+
+        assert!(result.reasoning.is_some());
+        let reasoning = result.reasoning.unwrap();
+        assert!(matches!(
+            reasoning.effort,
+            copilot_responses::ReasoningEffort::High
+        ));
+    }
+
+    #[test]
+    fn test_into_copilot_responses_with_tools() {
+        let request = LanguageModelRequest {
+            messages: vec![LanguageModelRequestMessage {
+                role: Role::User,
+                content: vec![MessageContent::Text("List files".into())],
+                cache: false,
+                reasoning_details: None,
+            }],
+            temperature: None,
+            tools: vec![LanguageModelRequestTool {
+                name: "list_directory".into(),
+                description: "Lists files".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } }
+                }),
+                use_input_streaming: false,
+            }],
+            tool_choice: Some(LanguageModelToolChoice::Auto),
+            thread_id: None,
+            prompt_id: None,
+            intent: None,
+            stop: vec![],
+            thinking_allowed: false,
+            thinking_effort: None,
+            speed: Default::default(),
+        };
+
+        let model = make_test_model("o3", "OpenAI", &["/responses"]);
+        let result = into_copilot_responses(&model, request);
+
+        assert_eq!(result.tools.len(), 1);
+        assert!(matches!(
+            result.tool_choice,
+            Some(copilot_responses::ToolChoice::Auto)
+        ));
+    }
+
+    #[test]
+    fn test_into_copilot_responses_tool_choice_any_maps_to_required() {
+        let request = LanguageModelRequest {
+            messages: vec![LanguageModelRequestMessage {
+                role: Role::User,
+                content: vec![MessageContent::Text("Use tool".into())],
+                cache: false,
+                reasoning_details: None,
+            }],
+            temperature: None,
+            tools: vec![LanguageModelRequestTool {
+                name: "tool".into(),
+                description: "Test".into(),
+                input_schema: serde_json::json!({}),
+                use_input_streaming: false,
+            }],
+            tool_choice: Some(LanguageModelToolChoice::Any),
+            thread_id: None,
+            prompt_id: None,
+            intent: None,
+            stop: vec![],
+            thinking_allowed: false,
+            thinking_effort: None,
+            speed: Default::default(),
+        };
+
+        let model = make_test_model("o3", "OpenAI", &["/responses"]);
+        let result = into_copilot_responses(&model, request);
+
+        assert!(matches!(
+            result.tool_choice,
+            Some(copilot_responses::ToolChoice::Required)
+        ));
     }
 }
