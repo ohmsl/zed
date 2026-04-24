@@ -67,6 +67,10 @@ impl AgentTool for MovePathTool {
         acp::ToolKind::Move
     }
 
+    fn may_modify_project_state() -> bool {
+        true
+    }
+
     fn initial_title(
         &self,
         input: Result<Self::Input, serde_json::Value>,

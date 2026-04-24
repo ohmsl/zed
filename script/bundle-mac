@@ -236,13 +236,13 @@ function sign_app_binaries() {
         open "$app_path"
     fi
 
-    if [[ "$target_dir" = "debug" ]]; then
-        echo "Debug build detected - skipping DMG creation and signing"
-        if [ "$local_install" = false ]; then
-            echo "Created application bundle:"
-            echo "$app_path"
-        fi
-    else
+    # if [[ "$target_dir" = "debug" ]]; then
+    #     echo "Debug build detected - skipping DMG creation and signing"
+    #     if [ "$local_install" = false ]; then
+    #         echo "Created application bundle:"
+    #         echo "$app_path"
+    #     fi
+    # else
         dmg_target_directory="target/${target_triple}/${target_dir}"
         dmg_source_directory="${dmg_target_directory}/dmg"
         dmg_file_path="${dmg_target_directory}/Zed-${arch_suffix}.dmg"
@@ -280,7 +280,7 @@ function sign_app_binaries() {
         if [ "$open_result" = true ]; then
             open $dmg_target_directory
         fi
-    fi
+    # fi
 }
 
 function sign_binary() {

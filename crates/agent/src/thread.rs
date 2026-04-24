@@ -1226,6 +1226,7 @@ impl Thread {
             &tool_use.name,
             title,
             kind,
+            tool.may_modify_project_state(),
             tool_use.input.clone(),
         );
 
@@ -2322,12 +2323,20 @@ impl Thread {
         let tool = self.tool(tool_use.name.as_ref());
         let mut title = SharedString::from(&tool_use.name);
         let mut kind = acp::ToolKind::Other;
+        let mut may_modify_project_state = false;
         if let Some(tool) = tool.as_ref() {
             title = tool.initial_title(tool_use.input.clone(), cx);
             kind = tool.kind();
+            may_modify_project_state = tool.may_modify_project_state();
         }
 
-        self.send_or_update_tool_use(&tool_use, title, kind, event_stream);
+        self.send_or_update_tool_use(
+            &tool_use,
+            title,
+            kind,
+            may_modify_project_state,
+            event_stream,
+        );
 
         let Some(tool) = tool else {
             let content = format!("No tool named {} exists", tool_use.name);
@@ -2464,6 +2473,7 @@ impl Thread {
             &tool_use,
             SharedString::from(&tool_use.name),
             acp::ToolKind::Other,
+            false,
             event_stream,
         );
 
@@ -2511,6 +2521,7 @@ impl Thread {
         tool_use: &LanguageModelToolUse,
         title: SharedString,
         kind: acp::ToolKind,
+        may_modify_project_state: bool,
         event_stream: &ThreadEventStream,
     ) {
         // Ensure the last message ends in the current tool use
@@ -2532,6 +2543,7 @@ impl Thread {
                 &tool_use.name,
                 title,
                 kind,
+                may_modify_project_state,
                 tool_use.input.clone(),
             );
             last_message
@@ -3336,6 +3348,11 @@ where
 
     fn kind() -> acp::ToolKind;
 
+    /// Returns whether the tool may modify project state.
+    fn may_modify_project_state() -> bool {
+        false
+    }
+
     /// The initial tool title to display. Can be updated during the tool run.
     fn initial_title(
         &self,
@@ -3411,6 +3428,9 @@ pub trait AnyAgentTool {
     fn name(&self) -> SharedString;
     fn description(&self) -> SharedString;
     fn kind(&self) -> acp::ToolKind;
+    fn may_modify_project_state(&self) -> bool {
+        false
+    }
     fn initial_title(&self, input: serde_json::Value, _cx: &mut App) -> SharedString;
     fn input_schema(&self, format: LanguageModelToolSchemaFormat) -> Result<serde_json::Value>;
     fn supports_input_streaming(&self) -> bool {
@@ -3449,6 +3469,10 @@ where
 
     fn kind(&self) -> acp::ToolKind {
         T::kind()
+    }
+
+    fn may_modify_project_state(&self) -> bool {
+        T::may_modify_project_state()
     }
 
     fn supports_input_streaming(&self) -> bool {
@@ -3542,6 +3566,7 @@ impl ThreadEventStream {
         tool_name: &str,
         title: SharedString,
         kind: acp::ToolKind,
+        may_modify_project_state: bool,
         input: serde_json::Value,
     ) {
         self.0
@@ -3550,6 +3575,7 @@ impl ThreadEventStream {
                 tool_name,
                 title.to_string(),
                 kind,
+                may_modify_project_state,
                 input,
             ))))
             .ok();
@@ -3560,12 +3586,16 @@ impl ThreadEventStream {
         tool_name: &str,
         title: String,
         kind: acp::ToolKind,
+        may_modify_project_state: bool,
         input: serde_json::Value,
     ) -> acp::ToolCall {
         acp::ToolCall::new(id.to_string(), title)
             .kind(kind)
             .raw_input(input)
-            .meta(acp_thread::meta_with_tool_name(tool_name))
+            .meta(acp_thread::meta_with_tool_info(
+                tool_name,
+                may_modify_project_state,
+            ))
     }
 
     fn update_tool_call_fields(

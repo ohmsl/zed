@@ -3470,7 +3470,10 @@ async fn test_tool_updates_to_completion(cx: &mut TestAppContext) {
         tool_call,
         acp::ToolCall::new("1", "Echo")
             .raw_input(json!({}))
-            .meta(acp::Meta::from_iter([("tool_name".into(), "echo".into())]))
+            .meta(acp::Meta::from_iter([
+                ("tool_name".into(), "echo".into()),
+                ("may_modify_project_state".into(), false.into()),
+            ]))
     );
     let update = expect_tool_call_update_fields(&mut events).await;
     assert_eq!(
@@ -3566,10 +3569,10 @@ async fn test_update_plan_tool_updates_thread_events(cx: &mut TestAppContext) {
                     }
                 ]
             }))
-            .meta(acp::Meta::from_iter([(
-                "tool_name".into(),
-                "update_plan".into()
-            )]))
+            .meta(acp::Meta::from_iter([
+                ("tool_name".into(), "update_plan".into()),
+                ("may_modify_project_state".into(), false.into()),
+            ]))
     );
 
     let update = expect_tool_call_update_fields(&mut events).await;

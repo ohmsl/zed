@@ -4534,13 +4534,25 @@ impl ThreadView {
                 let editor_focus = editor.focus_handle(cx).is_focused(window);
                 let focus_border = cx.theme().colors().border_focused;
 
-                let has_checkpoint_button = message
+                let thread = self.thread.read(cx);
+                let has_final_checkpoint_button = message
                     .checkpoint
                     .as_ref()
                     .is_some_and(|checkpoint| checkpoint.show);
+                let has_pending_checkpoint_button = message
+                    .checkpoint
+                    .as_ref()
+                    .is_some_and(|checkpoint| checkpoint.show_pending);
+                let is_last_user_message = !thread
+                    .entries()
+                    .iter()
+                    .skip(entry_ix + 1)
+                    .any(|entry| matches!(entry, AgentThreadEntry::UserMessage(_)));
+                let has_checkpoint_button = has_final_checkpoint_button
+                    || (is_last_user_message && has_pending_checkpoint_button);
 
                 let is_subagent = self.is_subagent();
-                let can_rewind = self.thread.read(cx).supports_truncate(cx);
+                let can_rewind = thread.supports_truncate(cx);
                 let is_editable = can_rewind && message.id.is_some() && !is_subagent;
                 let agent_name = if is_subagent {
                     "subagents".into()

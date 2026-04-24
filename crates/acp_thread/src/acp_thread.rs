@@ -52,6 +52,8 @@ impl std::error::Error for MaxOutputTokensError {}
 /// Key used in ACP ToolCall meta to store the tool's programmatic name.
 /// This is a workaround since ACP's ToolCall doesn't have a dedicated name field.
 pub const TOOL_NAME_META_KEY: &str = "tool_name";
+/// Key used in ACP ToolCall meta to indicate whether the tool may modify project state.
+pub const MAY_MODIFY_PROJECT_STATE_META_KEY: &str = "may_modify_project_state";
 
 /// Helper to extract tool name from ACP meta
 pub fn tool_name_from_meta(meta: &Option<acp::Meta>) -> Option<SharedString> {
@@ -61,9 +63,23 @@ pub fn tool_name_from_meta(meta: &Option<acp::Meta>) -> Option<SharedString> {
         .map(|s| SharedString::from(s.to_owned()))
 }
 
-/// Helper to create meta with tool name
-pub fn meta_with_tool_name(tool_name: &str) -> acp::Meta {
-    acp::Meta::from_iter([(TOOL_NAME_META_KEY.into(), tool_name.into())])
+/// Helper to extract whether a tool may modify project state from ACP meta.
+pub fn may_modify_project_state_from_meta(meta: &Option<acp::Meta>) -> bool {
+    meta.as_ref()
+        .and_then(|m| m.get(MAY_MODIFY_PROJECT_STATE_META_KEY))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Helper to create meta with tool information.
+pub fn meta_with_tool_info(tool_name: &str, may_modify_project_state: bool) -> acp::Meta {
+    acp::Meta::from_iter([
+        (TOOL_NAME_META_KEY.into(), tool_name.into()),
+        (
+            MAY_MODIFY_PROJECT_STATE_META_KEY.into(),
+            may_modify_project_state.into(),
+        ),
+    ])
 }
 
 /// Key used in ACP ToolCall meta to store the session id and message indexes
@@ -100,6 +116,7 @@ pub struct UserMessage {
 pub struct Checkpoint {
     git_checkpoint: GitStoreCheckpoint,
     pub show: bool,
+    pub show_pending: bool,
 }
 
 impl UserMessage {
@@ -256,6 +273,7 @@ pub struct ToolCall {
     pub raw_input_markdown: Option<Entity<Markdown>>,
     pub raw_output: Option<serde_json::Value>,
     pub tool_name: Option<SharedString>,
+    pub may_modify_project_state: bool,
     pub subagent_session_info: Option<SubagentSessionInfo>,
 }
 
@@ -296,6 +314,7 @@ impl ToolCall {
             .and_then(|input| markdown_for_raw_output(input, &language_registry, cx));
 
         let tool_name = tool_name_from_meta(&tool_call.meta);
+        let may_modify_project_state = may_modify_project_state_from_meta(&tool_call.meta);
 
         let subagent_session_info = subagent_session_info_from_meta(&tool_call.meta);
 
@@ -312,6 +331,7 @@ impl ToolCall {
             raw_input_markdown,
             raw_output: tool_call.raw_output,
             tool_name,
+            may_modify_project_state,
             subagent_session_info,
         };
         Ok(result)
@@ -343,6 +363,14 @@ impl ToolCall {
 
         if let Some(status) = status {
             self.status = status.into();
+        }
+
+        if let Some(tool_name) = tool_name_from_meta(&meta) {
+            self.tool_name = Some(tool_name);
+        }
+
+        if may_modify_project_state_from_meta(&meta) {
+            self.may_modify_project_state = true;
         }
 
         if let Some(subagent_session_info) = subagent_session_info_from_meta(&meta) {
@@ -1392,6 +1420,24 @@ impl AcpThread {
         false
     }
 
+    pub fn has_project_mutating_tool_calls_since_last_user_message(&self) -> bool {
+        for entry in self.entries.iter().rev() {
+            match entry {
+                AgentThreadEntry::UserMessage(_) => return false,
+                AgentThreadEntry::ToolCall(call)
+                    if call.may_modify_project_state || call.diffs().next().is_some() =>
+                {
+                    return true;
+                }
+                AgentThreadEntry::ToolCall(_)
+                | AgentThreadEntry::AssistantMessage(_)
+                | AgentThreadEntry::CompletedPlan(_) => {}
+            }
+        }
+
+        false
+    }
+
     pub fn has_in_progress_tool_calls(&self) -> bool {
         for entry in self.entries.iter().rev() {
             match entry {
@@ -1835,40 +1881,53 @@ impl AcpThread {
                     raw_input_markdown: None,
                     raw_output: None,
                     tool_name: None,
+                    may_modify_project_state: false,
                     subagent_session_info: None,
                 };
                 self.push_entry(AgentThreadEntry::ToolCall(failed_tool_call), cx);
                 return Ok(());
             }
         };
-        let AgentThreadEntry::ToolCall(call) = &mut self.entries[ix] else {
-            unreachable!()
-        };
+        let mut location_update_tool_call_id = None;
+        let show_checkpoint_pending = {
+            let AgentThreadEntry::ToolCall(call) = &mut self.entries[ix] else {
+                unreachable!()
+            };
 
-        match update {
-            ToolCallUpdate::UpdateFields(update) => {
-                let location_updated = update.fields.locations.is_some();
-                call.update_fields(
-                    update.fields,
-                    update.meta,
-                    languages,
-                    path_style,
-                    &self.terminals,
-                    cx,
-                )?;
-                if location_updated {
-                    self.resolve_locations(update.tool_call_id, cx);
+            match update {
+                ToolCallUpdate::UpdateFields(update) => {
+                    if update.fields.locations.is_some() {
+                        location_update_tool_call_id = Some(update.tool_call_id.clone());
+                    }
+                    call.update_fields(
+                        update.fields,
+                        update.meta,
+                        languages,
+                        path_style,
+                        &self.terminals,
+                        cx,
+                    )?;
+                }
+                ToolCallUpdate::UpdateDiff(update) => {
+                    call.content.clear();
+                    call.content.push(ToolCallContent::Diff(update.diff));
+                }
+                ToolCallUpdate::UpdateTerminal(update) => {
+                    call.content.clear();
+                    call.content
+                        .push(ToolCallContent::Terminal(update.terminal));
                 }
             }
-            ToolCallUpdate::UpdateDiff(update) => {
-                call.content.clear();
-                call.content.push(ToolCallContent::Diff(update.diff));
-            }
-            ToolCallUpdate::UpdateTerminal(update) => {
-                call.content.clear();
-                call.content
-                    .push(ToolCallContent::Terminal(update.terminal));
-            }
+
+            call.may_modify_project_state || call.diffs().next().is_some()
+        };
+
+        if let Some(tool_call_id) = location_update_tool_call_id {
+            self.resolve_locations(tool_call_id, cx);
+        }
+
+        if show_checkpoint_pending {
+            self.show_last_checkpoint_pending(cx);
         }
 
         cx.emit(AcpThreadEvent::EntryUpdated(ix));
@@ -1916,19 +1975,27 @@ impl AcpThread {
         }
 
         if let Some(ix) = self.index_for_tool_call(&id) {
-            let AgentThreadEntry::ToolCall(call) = &mut self.entries[ix] else {
-                unreachable!()
+            let show_checkpoint_pending = {
+                let AgentThreadEntry::ToolCall(call) = &mut self.entries[ix] else {
+                    unreachable!()
+                };
+
+                call.update_fields(
+                    update.fields,
+                    update.meta,
+                    language_registry,
+                    path_style,
+                    &self.terminals,
+                    cx,
+                )?;
+                call.status = status;
+
+                call.may_modify_project_state || call.diffs().next().is_some()
             };
 
-            call.update_fields(
-                update.fields,
-                update.meta,
-                language_registry,
-                path_style,
-                &self.terminals,
-                cx,
-            )?;
-            call.status = status;
+            if show_checkpoint_pending {
+                self.show_last_checkpoint_pending(cx);
+            }
 
             cx.emit(AcpThreadEvent::EntryUpdated(ix));
         } else {
@@ -1940,7 +2007,12 @@ impl AcpThread {
                 &self.terminals,
                 cx,
             )?;
+            let show_checkpoint_pending =
+                call.may_modify_project_state || call.diffs().next().is_some();
             self.push_entry(AgentThreadEntry::ToolCall(call), cx);
+            if show_checkpoint_pending {
+                self.show_last_checkpoint_pending(cx);
+            }
         };
 
         self.resolve_locations(id, cx);
@@ -2229,6 +2301,7 @@ impl AcpThread {
                     message.checkpoint = old_checkpoint.map(|git_checkpoint| Checkpoint {
                         git_checkpoint,
                         show: false,
+                        show_pending: false,
                     });
                 }
                 this.connection.prompt(message_id, request, cx)
@@ -2543,6 +2616,7 @@ impl AcpThread {
                 if let Some((ix, message)) = this.user_message_mut(&user_message_id) {
                     if let Some(checkpoint) = message.checkpoint.as_mut() {
                         checkpoint.show = !equal;
+                        checkpoint.show_pending = false;
                         cx.emit(AcpThreadEvent::EntryUpdated(ix));
                     }
                 }
@@ -2550,6 +2624,16 @@ impl AcpThread {
 
             Ok(())
         })
+    }
+
+    fn show_last_checkpoint_pending(&mut self, cx: &mut Context<Self>) {
+        if let Some((ix, message)) = self.last_user_message()
+            && let Some(checkpoint) = message.checkpoint.as_mut()
+            && !checkpoint.show_pending
+        {
+            checkpoint.show_pending = true;
+            cx.emit(AcpThreadEvent::EntryUpdated(ix));
+        }
     }
 
     fn last_user_message(&mut self) -> Option<(usize, &mut UserMessage)> {
@@ -3955,6 +4039,60 @@ mod tests {
             .unwrap();
 
         assert!(cx.read(|cx| !thread.read(cx).has_pending_edit_tool_calls()));
+        assert!(cx.read(|cx| {
+            thread
+                .read(cx)
+                .has_project_mutating_tool_calls_since_last_user_message()
+        }));
+    }
+
+    #[gpui::test]
+    async fn test_mutating_tool_calls_since_last_user_message_uses_metadata(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(path!("/test"), json!({})).await;
+        let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
+
+        let connection = Rc::new(FakeAgentConnection::new().on_user_message({
+            move |_, thread, mut cx| {
+                async move {
+                    thread
+                        .update(&mut cx, |thread, cx| {
+                            thread.handle_session_update(
+                                acp::SessionUpdate::ToolCall(
+                                    acp::ToolCall::new("test", "Create directory")
+                                        .kind(acp::ToolKind::Read)
+                                        .meta(meta_with_tool_info("create_directory", true)),
+                                ),
+                                cx,
+                            )
+                        })
+                        .unwrap()
+                        .unwrap();
+                    Ok(acp::PromptResponse::new(acp::StopReason::EndTurn))
+                }
+                .boxed_local()
+            }
+        }));
+
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+
+        cx.update(|cx| thread.update(cx, |thread, cx| thread.send(vec!["Hi".into()], cx)))
+            .await
+            .unwrap();
+
+        assert!(cx.read(|cx| {
+            thread
+                .read(cx)
+                .has_project_mutating_tool_calls_since_last_user_message()
+        }));
     }
 
     #[gpui::test(iterations = 10)]
