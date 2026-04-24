@@ -208,23 +208,6 @@ pub struct CopilotChatLanguageModel {
     request_limiter: RateLimiter,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CopilotChatEndpoint {
-    Messages,
-    Responses,
-    ChatCompletions,
-}
-
-fn endpoint_for_model(model: &CopilotChatModel) -> CopilotChatEndpoint {
-    if model.supports_messages() {
-        CopilotChatEndpoint::Messages
-    } else if model.supports_response() {
-        CopilotChatEndpoint::Responses
-    } else {
-        CopilotChatEndpoint::ChatCompletions
-    }
-}
-
 impl LanguageModel for CopilotChatLanguageModel {
     fn id(&self) -> LanguageModelId {
         LanguageModelId::from(self.model.id().to_string())
@@ -341,7 +324,7 @@ impl LanguageModel for CopilotChatLanguageModel {
             | CompletionIntent::EditFile => false,
         });
 
-        if endpoint_for_model(&self.model) == CopilotChatEndpoint::Messages {
+        if self.model.supports_messages() {
             let location = intent_to_chat_location(request.intent);
             let model = self.model.clone();
             let request_limiter = self.request_limiter.clone();
@@ -424,7 +407,7 @@ impl LanguageModel for CopilotChatLanguageModel {
             return async move { Ok(future.await?.boxed()) }.boxed();
         }
 
-        if endpoint_for_model(&self.model) == CopilotChatEndpoint::Responses {
+        if self.model.supports_response() {
             let location = intent_to_chat_location(request.intent);
             let responses_request = into_copilot_responses(&self.model, request);
             let request_limiter = self.request_limiter.clone();
@@ -1746,41 +1729,6 @@ mod tests {
                 assert_eq!(text, expected_text);
             }
             other => panic!("expected text content, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn endpoint_selection_uses_supported_endpoint_precedence() {
-        let cases = [
-            (
-                "claude-sonnet-4",
-                "Anthropic",
-                &["/v1/messages"][..],
-                CopilotChatEndpoint::Messages,
-            ),
-            (
-                "o3",
-                "OpenAI",
-                &["/responses"][..],
-                CopilotChatEndpoint::Responses,
-            ),
-            (
-                "gpt-4o",
-                "OpenAI",
-                &["/chat/completions"][..],
-                CopilotChatEndpoint::ChatCompletions,
-            ),
-            (
-                "multi-endpoint-model",
-                "Anthropic",
-                &["/responses", "/v1/messages"][..],
-                CopilotChatEndpoint::Messages,
-            ),
-        ];
-
-        for (id, vendor, endpoints, expected_endpoint) in cases {
-            let model = make_test_model(id, vendor, endpoints);
-            assert_eq!(endpoint_for_model(&model), expected_endpoint);
         }
     }
 
