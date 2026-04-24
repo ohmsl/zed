@@ -1418,7 +1418,7 @@ pub struct FollowerState {
 
 pub struct AutoWatchScreensState {
     current_peer: Option<PeerId>,
-    share_order: Vec<PeerId>,
+    sharing_peers: Vec<PeerId>,
 }
 
 struct FollowerView {
@@ -4812,7 +4812,7 @@ impl Workspace {
 
         self.auto_watch_screens = Some(AutoWatchScreensState {
             current_peer,
-            share_order: sharing_peers,
+            sharing_peers,
         });
 
         if let Some(peer_id) = current_peer {
@@ -4833,33 +4833,33 @@ impl Workspace {
         };
 
         let current_peer = auto_watch.current_peer;
-        let was_in_share_order = auto_watch.share_order.contains(&participant_id);
+        let was_already_sharing = auto_watch.sharing_peers.contains(&participant_id);
 
         let participant_is_sharing = self.active_call().map_or(false, |call| {
             call.peer_ids_with_video_tracks(cx)
                 .contains(&participant_id)
         });
 
-        if participant_is_sharing && !was_in_share_order {
+        if participant_is_sharing && !was_already_sharing {
             if let Some(auto_watch) = self.auto_watch_screens.as_mut() {
-                auto_watch.share_order.push(participant_id);
+                auto_watch.sharing_peers.push(participant_id);
 
                 if current_peer.is_none() {
                     auto_watch.current_peer = Some(participant_id);
                     self.open_shared_screen(participant_id, window, cx);
                 }
             }
-        } else if !participant_is_sharing && was_in_share_order {
+        } else if !participant_is_sharing && was_already_sharing {
             let was_viewing_current = current_peer == Some(participant_id)
                 && self.is_active_item_shared_screen_for_peer(participant_id, cx);
 
             let next_peer = if let Some(auto_watch) = self.auto_watch_screens.as_mut() {
                 auto_watch
-                    .share_order
+                    .sharing_peers
                     .retain(|&peer| peer != participant_id);
 
                 if current_peer == Some(participant_id) {
-                    let next_peer = auto_watch.share_order.first().copied();
+                    let next_peer = auto_watch.sharing_peers.first().copied();
                     auto_watch.current_peer = next_peer;
                     next_peer
                 } else {
