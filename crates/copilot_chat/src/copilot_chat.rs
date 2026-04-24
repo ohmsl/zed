@@ -1750,4 +1750,503 @@ mod tests {
             "\"none\""
         );
     }
+
+    // --- Response parsing tests (Phase 3: Error handling) ---
+
+    #[test]
+    fn test_response_event_parsing_with_text_delta() {
+        let json = r#"{
+            "id": "chatcmpl-123",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "content": "Hello, world!",
+                    "role": "assistant"
+                },
+                "finish_reason": null
+            }],
+            "usage": null
+        }"#;
+
+        let event: ResponseEvent = serde_json::from_str(json).unwrap();
+
+        assert_eq!(event.id, "chatcmpl-123");
+        assert_eq!(event.choices.len(), 1);
+        let delta = event.choices[0].delta.as_ref().unwrap();
+        assert_eq!(delta.content, Some("Hello, world!".to_string()));
+        assert_eq!(delta.role, Some(Role::Assistant));
+    }
+
+    #[test]
+    fn test_response_event_parsing_with_tool_calls() {
+        let json = r#"{
+            "id": "chatcmpl-456",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_abc123",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": "{\"city\": \"NYC\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 50,
+                "completion_tokens": 20,
+                "total_tokens": 70
+            }
+        }"#;
+
+        let event: ResponseEvent = serde_json::from_str(json).unwrap();
+
+        assert_eq!(event.choices[0].finish_reason, Some("tool_calls".to_string()));
+        let delta = event.choices[0].delta.as_ref().unwrap();
+        assert_eq!(delta.tool_calls.len(), 1);
+        assert_eq!(delta.tool_calls[0].id, Some("call_abc123".to_string()));
+        let func = delta.tool_calls[0].function.as_ref().unwrap();
+        assert_eq!(func.name, Some("get_weather".to_string()));
+
+        let usage = event.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 50);
+        assert_eq!(usage.completion_tokens, 20);
+    }
+
+    #[test]
+    fn test_response_event_parsing_with_reasoning_fields() {
+        let json = r#"{
+            "id": "chatcmpl-789",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "content": null,
+                    "reasoning_opaque": "encrypted_reasoning_data",
+                    "reasoning_text": "Let me think about this..."
+                },
+                "finish_reason": null
+            }],
+            "usage": null
+        }"#;
+
+        let event: ResponseEvent = serde_json::from_str(json).unwrap();
+
+        let delta = event.choices[0].delta.as_ref().unwrap();
+        assert_eq!(
+            delta.reasoning_opaque,
+            Some("encrypted_reasoning_data".to_string())
+        );
+        assert_eq!(
+            delta.reasoning_text,
+            Some("Let me think about this...".to_string())
+        );
+    }
+
+    #[test]
+    fn test_response_event_parsing_with_thought_signature() {
+        let json = r#"{
+            "id": "chatcmpl-sig",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_xyz",
+                        "function": {
+                            "name": "search",
+                            "arguments": "{}",
+                            "thought_signature": "sig_abc123"
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }],
+            "usage": null
+        }"#;
+
+        let event: ResponseEvent = serde_json::from_str(json).unwrap();
+
+        let delta = event.choices[0].delta.as_ref().unwrap();
+        let func = delta.tool_calls[0].function.as_ref().unwrap();
+        assert_eq!(func.thought_signature, Some("sig_abc123".to_string()));
+    }
+
+    #[test]
+    fn test_response_event_parsing_stop_finish_reason() {
+        let json = r#"{
+            "id": "chatcmpl-stop",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }],
+            "usage": null
+        }"#;
+
+        let event: ResponseEvent = serde_json::from_str(json).unwrap();
+
+        assert_eq!(event.choices[0].finish_reason, Some("stop".to_string()));
+    }
+
+    #[test]
+    fn test_response_event_parsing_empty_choices() {
+        let json = r#"{
+            "id": "chatcmpl-empty",
+            "choices": [],
+            "usage": null
+        }"#;
+
+        let event: ResponseEvent = serde_json::from_str(json).unwrap();
+        assert!(event.choices.is_empty());
+    }
+
+    #[test]
+    fn test_response_event_parsing_with_message_instead_of_delta() {
+        let json = r#"{
+            "id": "chatcmpl-msg",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "content": "This is the full message",
+                    "role": "assistant"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        }"#;
+
+        let event: ResponseEvent = serde_json::from_str(json).unwrap();
+
+        assert!(event.choices[0].delta.is_none());
+        let message = event.choices[0].message.as_ref().unwrap();
+        assert_eq!(message.content, Some("This is the full message".to_string()));
+    }
+
+    #[test]
+    fn test_response_event_malformed_json_returns_error() {
+        let json = r#"{"id": "chatcmpl-bad", "choices": [{not valid"#;
+
+        let result: Result<ResponseEvent, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_response_event_missing_required_field() {
+        let json = r#"{
+            "choices": [{
+                "index": 0,
+                "delta": {}
+            }]
+        }"#;
+
+        let result: Result<ResponseEvent, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "Missing 'id' field should fail");
+    }
+
+    #[test]
+    fn test_tool_call_chunk_parsing_incremental() {
+        let json = r#"{
+            "index": 0,
+            "function": {
+                "arguments": "{\"ci"
+            }
+        }"#;
+
+        let chunk: ToolCallChunk = serde_json::from_str(json).unwrap();
+
+        assert_eq!(chunk.index, Some(0));
+        assert!(chunk.id.is_none());
+        let func = chunk.function.unwrap();
+        assert!(func.name.is_none());
+        assert_eq!(func.arguments, Some("{\"ci".to_string()));
+    }
+
+    #[test]
+    fn test_usage_parsing() {
+        let json = r#"{
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "total_tokens": 150
+        }"#;
+
+        let usage: Usage = serde_json::from_str(json).unwrap();
+
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 50);
+        assert_eq!(usage.total_tokens, 150);
+    }
+
+    // --- Vendor routing tests (Phase 4) ---
+
+    fn make_test_model(
+        id: &str,
+        vendor: ModelVendor,
+        endpoints: Vec<ModelSupportedEndpoint>,
+    ) -> Model {
+        Model {
+            billing: ModelBilling {
+                is_premium: false,
+                multiplier: 1.0,
+                restricted_to: None,
+            },
+            capabilities: ModelCapabilities {
+                family: "test".to_string(),
+                limits: ModelLimits::default(),
+                supports: ModelSupportedFeatures {
+                    streaming: true,
+                    tool_calls: false,
+                    parallel_tool_calls: false,
+                    vision: false,
+                    thinking: false,
+                    adaptive_thinking: false,
+                    max_thinking_budget: None,
+                    min_thinking_budget: None,
+                    reasoning_effort: vec![],
+                },
+                model_type: "chat".to_string(),
+                tokenizer: None,
+            },
+            id: id.to_string(),
+            name: id.to_string(),
+            policy: None,
+            vendor,
+            is_chat_default: false,
+            is_chat_fallback: false,
+            model_picker_enabled: true,
+            supported_endpoints: endpoints,
+        }
+    }
+
+    #[test]
+    fn test_anthropic_model_routes_to_messages_endpoint() {
+        let model = make_test_model(
+            "claude-sonnet-4",
+            ModelVendor::Anthropic,
+            vec![ModelSupportedEndpoint::Messages],
+        );
+
+        assert!(model.supports_messages());
+        assert!(!model.supports_response());
+        assert_eq!(model.vendor(), ModelVendor::Anthropic);
+    }
+
+    #[test]
+    fn test_openai_model_routes_to_chat_completions() {
+        let model = make_test_model(
+            "gpt-4o",
+            ModelVendor::OpenAI,
+            vec![ModelSupportedEndpoint::ChatCompletions],
+        );
+
+        assert!(!model.supports_messages());
+        assert!(!model.supports_response());
+        assert_eq!(model.vendor(), ModelVendor::OpenAI);
+    }
+
+    #[test]
+    fn test_model_with_responses_endpoint() {
+        let model = make_test_model(
+            "o1-preview",
+            ModelVendor::OpenAI,
+            vec![
+                ModelSupportedEndpoint::ChatCompletions,
+                ModelSupportedEndpoint::Responses,
+            ],
+        );
+
+        assert!(model.supports_response());
+        assert!(!model.supports_messages());
+    }
+
+    #[test]
+    fn test_google_model_routing() {
+        let model = make_test_model(
+            "gemini-3-pro",
+            ModelVendor::Google,
+            vec![ModelSupportedEndpoint::ChatCompletions],
+        );
+
+        assert_eq!(model.vendor(), ModelVendor::Google);
+        assert!(!model.supports_messages());
+    }
+
+    #[test]
+    fn test_xai_model_routing() {
+        let model = make_test_model(
+            "grok-3",
+            ModelVendor::XAI,
+            vec![ModelSupportedEndpoint::ChatCompletions],
+        );
+
+        assert_eq!(model.vendor(), ModelVendor::XAI);
+    }
+
+    #[test]
+    fn test_unknown_vendor_routing() {
+        let model = make_test_model(
+            "future-model",
+            ModelVendor::Unknown,
+            vec![ModelSupportedEndpoint::ChatCompletions],
+        );
+
+        assert_eq!(model.vendor(), ModelVendor::Unknown);
+        assert!(!model.supports_messages());
+        assert!(!model.supports_response());
+    }
+
+    #[test]
+    fn test_model_with_all_endpoints() {
+        let model = make_test_model(
+            "multi-endpoint-model",
+            ModelVendor::OpenAI,
+            vec![
+                ModelSupportedEndpoint::ChatCompletions,
+                ModelSupportedEndpoint::Responses,
+                ModelSupportedEndpoint::Messages,
+            ],
+        );
+
+        assert!(model.supports_messages());
+        assert!(model.supports_response());
+    }
+
+    #[test]
+    fn test_model_with_unknown_endpoint_only() {
+        let model = make_test_model(
+            "weird-model",
+            ModelVendor::Unknown,
+            vec![ModelSupportedEndpoint::Unknown],
+        );
+
+        assert!(!model.supports_messages());
+        assert!(!model.supports_response());
+    }
+
+    #[test]
+    fn test_vendor_deserialization_all_known_vendors() {
+        let vendors = [
+            ("Azure OpenAI", ModelVendor::OpenAI),
+            ("Anthropic", ModelVendor::Anthropic),
+            ("Google", ModelVendor::Google),
+            ("xAI", ModelVendor::XAI),
+            ("FutureVendor", ModelVendor::Unknown),
+        ];
+
+        for (json_value, expected) in vendors {
+            let json = format!(r#""{json_value}""#);
+            let vendor: ModelVendor = serde_json::from_str(&json).unwrap();
+            assert_eq!(vendor, expected, "Vendor '{}' should map to {:?}", json_value, expected);
+        }
+    }
+
+    #[test]
+    fn test_model_thinking_support() {
+        let json = r#"{
+            "data": [{
+                "billing": { "is_premium": true, "multiplier": 1 },
+                "capabilities": {
+                    "family": "claude-sonnet-4",
+                    "limits": { "max_context_window_tokens": 200000, "max_output_tokens": 16384 },
+                    "supports": {
+                        "streaming": true,
+                        "tool_calls": true,
+                        "thinking": true,
+                        "max_thinking_budget": 32000,
+                        "min_thinking_budget": 1024
+                    },
+                    "type": "chat"
+                },
+                "id": "claude-sonnet-4",
+                "is_chat_default": false,
+                "is_chat_fallback": false,
+                "model_picker_enabled": true,
+                "name": "Claude Sonnet 4",
+                "vendor": "Anthropic",
+                "supported_endpoints": ["/v1/messages"]
+            }]
+        }"#;
+
+        let schema: ModelSchema = serde_json::from_str(json).unwrap();
+        let model = &schema.data[0];
+
+        assert!(model.supports_thinking());
+        assert!(model.can_think());
+        assert_eq!(model.max_thinking_budget(), Some(32000));
+        assert_eq!(model.min_thinking_budget(), Some(1024));
+    }
+
+    #[test]
+    fn test_model_adaptive_thinking_support() {
+        let json = r#"{
+            "data": [{
+                "billing": { "is_premium": true, "multiplier": 1 },
+                "capabilities": {
+                    "family": "claude-opus-4",
+                    "limits": { "max_context_window_tokens": 200000, "max_output_tokens": 32000 },
+                    "supports": {
+                        "streaming": true,
+                        "tool_calls": true,
+                        "adaptive_thinking": true
+                    },
+                    "type": "chat"
+                },
+                "id": "claude-opus-4",
+                "is_chat_default": false,
+                "is_chat_fallback": false,
+                "model_picker_enabled": true,
+                "name": "Claude Opus 4",
+                "vendor": "Anthropic",
+                "supported_endpoints": ["/v1/messages"]
+            }]
+        }"#;
+
+        let schema: ModelSchema = serde_json::from_str(json).unwrap();
+        let model = &schema.data[0];
+
+        assert!(model.supports_adaptive_thinking());
+        assert!(model.can_think());
+    }
+
+    #[test]
+    fn test_model_reasoning_effort_levels() {
+        let json = r#"{
+            "data": [{
+                "billing": { "is_premium": true, "multiplier": 1 },
+                "capabilities": {
+                    "family": "gemini-3",
+                    "limits": { "max_context_window_tokens": 128000, "max_output_tokens": 8192 },
+                    "supports": {
+                        "streaming": true,
+                        "tool_calls": true,
+                        "reasoning_effort": ["low", "medium", "high"]
+                    },
+                    "type": "chat"
+                },
+                "id": "gemini-3-pro",
+                "is_chat_default": false,
+                "is_chat_fallback": false,
+                "model_picker_enabled": true,
+                "name": "Gemini 3 Pro",
+                "vendor": "Google",
+                "supported_endpoints": ["/chat/completions"]
+            }]
+        }"#;
+
+        let schema: ModelSchema = serde_json::from_str(json).unwrap();
+        let model = &schema.data[0];
+
+        assert!(model.can_think());
+        let levels = model.reasoning_effort_levels();
+        assert_eq!(levels.len(), 3);
+        assert!(levels.contains(&"low".to_string()));
+        assert!(levels.contains(&"medium".to_string()));
+        assert!(levels.contains(&"high".to_string()));
+    }
 }

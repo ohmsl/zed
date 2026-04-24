@@ -147,13 +147,15 @@ pub enum ResponseInputItem {
     },
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum IncompleteReason {
     #[serde(rename = "max_output_tokens")]
     MaxOutputTokens,
     #[serde(rename = "content_filter")]
     ContentFilter,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -429,5 +431,264 @@ mod tests {
             serde_json::to_string(&ToolChoice::None).unwrap(),
             "\"none\""
         );
+    }
+
+    #[test]
+    fn test_reasoning_effort_all_variants() {
+        assert_eq!(
+            serde_json::to_string(&ReasoningEffort::Low).unwrap(),
+            "\"low\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ReasoningEffort::Medium).unwrap(),
+            "\"medium\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ReasoningEffort::High).unwrap(),
+            "\"high\""
+        );
+    }
+
+    #[test]
+    fn test_reasoning_summary_all_variants() {
+        assert_eq!(
+            serde_json::to_string(&ReasoningSummary::Auto).unwrap(),
+            "\"auto\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ReasoningSummary::Concise).unwrap(),
+            "\"concise\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ReasoningSummary::Detailed).unwrap(),
+            "\"detailed\""
+        );
+    }
+
+    #[test]
+    fn test_response_includable_serialization() {
+        let includables = vec![ResponseIncludable::ReasoningEncryptedContent];
+        let json = serde_json::to_value(&includables).unwrap();
+
+        assert_eq!(json[0], "reasoning.encrypted_content");
+    }
+
+    // --- Error handling tests (Phase 3) ---
+
+    #[test]
+    fn test_stream_event_generic_error_parsing() {
+        let json = r#"{
+            "type": "error",
+            "error": {
+                "code": "401",
+                "message": "Unauthorized: Invalid token"
+            }
+        }"#;
+
+        let event: StreamEvent = serde_json::from_str(json).unwrap();
+
+        match event {
+            StreamEvent::GenericError { error } => {
+                assert_eq!(error.code, "401");
+                assert_eq!(error.message, "Unauthorized: Invalid token");
+            }
+            _ => panic!("Expected GenericError, got {:?}", event),
+        }
+    }
+
+    #[test]
+    fn test_stream_event_failed_with_error_parsing() {
+        let json = r#"{
+            "type": "response.failed",
+            "response": {
+                "id": "resp_123",
+                "status": "failed",
+                "error": {
+                    "code": "429",
+                    "message": "Rate limit exceeded"
+                },
+                "output": []
+            }
+        }"#;
+
+        let event: StreamEvent = serde_json::from_str(json).unwrap();
+
+        match event {
+            StreamEvent::Failed { response } => {
+                assert_eq!(response.status, Some("failed".to_string()));
+                let error = response.error.unwrap();
+                assert_eq!(error.code, "429");
+                assert_eq!(error.message, "Rate limit exceeded");
+            }
+            _ => panic!("Expected Failed, got {:?}", event),
+        }
+    }
+
+    #[test]
+    fn test_stream_event_incomplete_max_tokens_parsing() {
+        let json = r#"{
+            "type": "response.incomplete",
+            "response": {
+                "id": "resp_456",
+                "status": "incomplete",
+                "incomplete_details": {
+                    "reason": "max_output_tokens"
+                },
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 4096,
+                    "total_tokens": 4196
+                },
+                "output": []
+            }
+        }"#;
+
+        let event: StreamEvent = serde_json::from_str(json).unwrap();
+
+        match event {
+            StreamEvent::Incomplete { response } => {
+                let details = response.incomplete_details.unwrap();
+                assert_eq!(details.reason, Some(IncompleteReason::MaxOutputTokens));
+                let usage = response.usage.unwrap();
+                assert_eq!(usage.output_tokens, Some(4096));
+            }
+            _ => panic!("Expected Incomplete, got {:?}", event),
+        }
+    }
+
+    #[test]
+    fn test_stream_event_incomplete_content_filter_parsing() {
+        let json = r#"{
+            "type": "response.incomplete",
+            "response": {
+                "incomplete_details": {
+                    "reason": "content_filter"
+                },
+                "output": []
+            }
+        }"#;
+
+        let event: StreamEvent = serde_json::from_str(json).unwrap();
+
+        match event {
+            StreamEvent::Incomplete { response } => {
+                let details = response.incomplete_details.unwrap();
+                assert_eq!(details.reason, Some(IncompleteReason::ContentFilter));
+            }
+            _ => panic!("Expected Incomplete, got {:?}", event),
+        }
+    }
+
+    #[test]
+    fn test_stream_event_unknown_type_falls_back() {
+        let json = r#"{
+            "type": "response.some_future_event",
+            "data": "whatever"
+        }"#;
+
+        let event: StreamEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(event, StreamEvent::Unknown));
+    }
+
+    #[test]
+    fn test_incomplete_reason_unknown_variant() {
+        let json = r#"{
+            "type": "response.incomplete",
+            "response": {
+                "incomplete_details": {
+                    "reason": "some_new_reason"
+                },
+                "output": []
+            }
+        }"#;
+
+        let event: StreamEvent = serde_json::from_str(json).unwrap();
+
+        match event {
+            StreamEvent::Incomplete { response } => {
+                let details = response.incomplete_details.unwrap();
+                assert_eq!(details.reason, Some(IncompleteReason::Unknown));
+            }
+            _ => panic!("Expected Incomplete"),
+        }
+    }
+
+    #[test]
+    fn test_response_error_parsing() {
+        let json = r#"{
+            "code": "400",
+            "message": "Invalid request: model not found"
+        }"#;
+
+        let error: ResponseError = serde_json::from_str(json).unwrap();
+
+        assert_eq!(error.code, "400");
+        assert_eq!(error.message, "Invalid request: model not found");
+    }
+
+    #[test]
+    fn test_malformed_json_returns_error() {
+        let json = r#"{"type": "response.completed", "response": {not valid json}"#;
+
+        let result: Result<StreamEvent, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_empty_json_object_returns_error() {
+        let json = r#"{}"#;
+
+        let result: Result<StreamEvent, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "Empty object should fail without 'type' field");
+    }
+
+    #[test]
+    fn test_stream_event_completed_with_usage() {
+        let json = r#"{
+            "type": "response.completed",
+            "response": {
+                "id": "resp_789",
+                "status": "completed",
+                "usage": {
+                    "input_tokens": 50,
+                    "output_tokens": 150,
+                    "total_tokens": 200
+                },
+                "output": []
+            }
+        }"#;
+
+        let event: StreamEvent = serde_json::from_str(json).unwrap();
+
+        match event {
+            StreamEvent::Completed { response } => {
+                let usage = response.usage.unwrap();
+                assert_eq!(usage.input_tokens, Some(50));
+                assert_eq!(usage.output_tokens, Some(150));
+            }
+            _ => panic!("Expected Completed"),
+        }
+    }
+
+    #[test]
+    fn test_stream_event_with_missing_optional_fields() {
+        let json = r#"{
+            "type": "response.completed",
+            "response": {
+                "output": []
+            }
+        }"#;
+
+        let event: StreamEvent = serde_json::from_str(json).unwrap();
+
+        match event {
+            StreamEvent::Completed { response } => {
+                assert!(response.id.is_none());
+                assert!(response.status.is_none());
+                assert!(response.usage.is_none());
+                assert!(response.error.is_none());
+            }
+            _ => panic!("Expected Completed"),
+        }
     }
 }
