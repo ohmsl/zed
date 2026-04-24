@@ -190,8 +190,9 @@ impl Render for TitleBar {
         let mut linked_worktree_name = None;
         if let Some(worktree) = self.effective_active_worktree(cx) {
             repository = self.get_repository_for_worktree(&worktree, cx);
-            let worktree = worktree.read(cx);
+            let worktree_abs_path = worktree.read(cx).abs_path();
             project_name = worktree
+                .read(cx)
                 .root_name()
                 .file_name()
                 .map(|name| SharedString::from(name.to_string()));
@@ -201,12 +202,26 @@ impl Render for TitleBar {
                     repo.original_repo_abs_path.as_ref(),
                     repo.work_directory_abs_path.as_ref(),
                 );
-                if let Some(name) = repo
+                if let Some(repo_name) = repo
                     .original_repo_abs_path
                     .file_name()
                     .and_then(|name| name.to_str())
                 {
-                    project_name = Some(SharedString::from(name.to_string()));
+                    // When the worktree is a subfolder of the repo, show
+                    // "repo_name/relative_path" so users can tell which
+                    // subfolder is open (e.g. "repository_name/subfolder_name").
+                    let display_name = if let Ok(relative) =
+                        worktree_abs_path.strip_prefix(&*repo.work_directory_abs_path)
+                    {
+                        if relative.as_os_str().is_empty() {
+                            repo_name.to_string()
+                        } else {
+                            format!("{}/{}", repo_name, relative.display())
+                        }
+                    } else {
+                        repo_name.to_string()
+                    };
+                    project_name = Some(SharedString::from(display_name));
                 }
             }
         }
