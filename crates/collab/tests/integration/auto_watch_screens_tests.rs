@@ -8,6 +8,16 @@ use workspace::{Item as _, SharedScreen};
 
 use super::TestClient;
 
+fn assert_active_item(workspace: &workspace::Workspace, expected_title: &str, cx: &gpui::App) {
+    let active_item = workspace.active_item(cx).expect("no active item");
+    assert_eq!(
+        active_item.tab_content_text(0, cx),
+        expected_title,
+        "expected active item to be '{}'",
+        expected_title
+    );
+}
+
 async fn start_screen_share(cx: &mut TestAppContext) {
     let display = TestScreenCaptureSource::new();
     cx.set_screen_capture_sources(vec![display]);
@@ -102,12 +112,7 @@ async fn test_auto_watch_opens_first_available_share(
     executor.run_until_parked();
 
     workspace_a.update(cx_a, |workspace, cx| {
-        let active_item = workspace.active_item(cx).expect("no active item");
-        assert_eq!(
-            active_item.tab_content_text(0, cx),
-            "user_b's screen",
-            "should be viewing user_b's screen"
-        );
+        assert_active_item(workspace, "user_b's screen", cx);
     });
 }
 
@@ -133,12 +138,7 @@ async fn test_auto_watch_opens_share_when_waiting(
     executor.run_until_parked();
 
     workspace_a.update(cx_a, |workspace, cx| {
-        let active_item = workspace.active_item(cx).expect("no active item");
-        assert_eq!(
-            active_item.tab_content_text(0, cx),
-            "user_b's screen",
-            "should be viewing user_b's screen"
-        );
+        assert_active_item(workspace, "user_b's screen", cx);
     });
 }
 
@@ -161,10 +161,7 @@ async fn test_auto_watch_switches_on_share_end(
     executor.run_until_parked();
 
     workspace_a.update(cx_a, |workspace, cx| {
-        assert_eq!(
-            workspace.active_item(cx).unwrap().tab_content_text(0, cx),
-            "user_b's screen"
-        );
+        assert_active_item(workspace, "user_b's screen", cx);
     });
 
     start_screen_share(cx_c).await;
@@ -174,11 +171,7 @@ async fn test_auto_watch_switches_on_share_end(
     executor.run_until_parked();
 
     workspace_a.update(cx_a, |workspace, cx| {
-        assert_eq!(
-            workspace.active_item(cx).unwrap().tab_content_text(0, cx),
-            "user_c's screen",
-            "should switch to user_c's screen after user_b stops sharing"
-        );
+        assert_active_item(workspace, "user_c's screen", cx);
     });
 }
 
@@ -200,10 +193,7 @@ async fn test_auto_watch_toggle_off_leaves_tabs_open(
     executor.run_until_parked();
 
     workspace_a.update(cx_a, |workspace, cx| {
-        assert_eq!(
-            workspace.active_item(cx).unwrap().tab_content_text(0, cx),
-            "user_b's screen"
-        );
+        assert_active_item(workspace, "user_b's screen", cx);
     });
 
     workspace_a.update_in(cx_a, |workspace, window, cx| {
@@ -212,11 +202,7 @@ async fn test_auto_watch_toggle_off_leaves_tabs_open(
 
     workspace_a.update(cx_a, |workspace, cx| {
         assert!(!workspace.is_auto_watching_screens());
-        assert_eq!(
-            workspace.active_item(cx).unwrap().tab_content_text(0, cx),
-            "user_b's screen",
-            "screen share tab should remain open after toggling off"
-        );
+        assert_active_item(workspace, "user_b's screen", cx);
     });
 }
 
@@ -238,10 +224,7 @@ async fn test_auto_watch_contextual_focus_user_viewing(
     executor.run_until_parked();
 
     workspace_a.update(cx_a, |workspace, cx| {
-        assert_eq!(
-            workspace.active_item(cx).unwrap().tab_content_text(0, cx),
-            "user_b's screen"
-        );
+        assert_active_item(workspace, "user_b's screen", cx);
     });
 
     start_screen_share(cx_c).await;
@@ -251,11 +234,7 @@ async fn test_auto_watch_contextual_focus_user_viewing(
     executor.run_until_parked();
 
     workspace_a.update(cx_a, |workspace, cx| {
-        assert_eq!(
-            workspace.active_item(cx).unwrap().tab_content_text(0, cx),
-            "user_c's screen",
-            "should switch focus to user_c's screen since user was viewing user_b's"
-        );
+        assert_active_item(workspace, "user_c's screen", cx);
     });
 }
 
@@ -308,10 +287,7 @@ async fn test_auto_watch_contextual_focus_user_navigated_away(
     executor.run_until_parked();
 
     workspace_a.update(cx_a, |workspace, cx| {
-        assert_eq!(
-            workspace.active_item(cx).unwrap().tab_content_text(0, cx),
-            "user_b's screen"
-        );
+        assert_active_item(workspace, "user_b's screen", cx);
     });
 
     workspace_a.update_in(cx_a, |workspace, window, cx| {
@@ -319,11 +295,7 @@ async fn test_auto_watch_contextual_focus_user_navigated_away(
     });
 
     workspace_a.update(cx_a, |workspace, cx| {
-        assert_eq!(
-            workspace.active_item(cx).unwrap().tab_content_text(0, cx),
-            "file.txt",
-            "user should be looking at their editor"
-        );
+        assert_active_item(workspace, "file.txt", cx);
     });
 
     start_screen_share(cx_c).await;
@@ -333,11 +305,7 @@ async fn test_auto_watch_contextual_focus_user_navigated_away(
     executor.run_until_parked();
 
     workspace_a.update(cx_a, |workspace, cx| {
-        assert_eq!(
-            workspace.active_item(cx).unwrap().tab_content_text(0, cx),
-            "file.txt",
-            "focus should stay on the editor, not switch to user_c's screen"
-        );
+        assert_active_item(workspace, "file.txt", cx);
 
         let pane = workspace.active_pane().read(cx);
         let screen_tabs: Vec<_> = pane
