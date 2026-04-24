@@ -173,7 +173,9 @@ impl TerminalAgentView {
             let result = async {
                 let command_task = command_task?;
                 let command = command_task.await?;
-                let spawn_task = build_spawn_in_terminal(&agent_id, &title, &work_dirs, &command);
+                let thread_id = this.read_with(cx, |this, _| this.thread_id)?;
+                let spawn_task =
+                    build_spawn_in_terminal(thread_id, &agent_id, &title, &work_dirs, &command);
                 let terminal_task = project_for_command.update(cx, |project, cx| {
                     project.create_terminal_task(spawn_task, cx)
                 });
@@ -263,13 +265,14 @@ impl TerminalAgentView {
 }
 
 fn build_spawn_in_terminal(
+    thread_id: ThreadId,
     agent_id: &AgentId,
     title: &SharedString,
     work_dirs: &PathList,
     command: &AgentServerCommand,
 ) -> SpawnInTerminal {
     SpawnInTerminal {
-        id: TaskId(format!("agent-terminal:{}:{}", agent_id, title)),
+        id: TaskId(format!("agent-terminal:{}:{}", agent_id, thread_id)),
         full_label: title.to_string(),
         label: title.to_string(),
         command_label: command.args.iter().fold(

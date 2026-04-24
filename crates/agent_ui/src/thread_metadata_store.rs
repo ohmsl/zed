@@ -39,6 +39,12 @@ impl ThreadId {
     }
 }
 
+impl std::fmt::Display for ThreadId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 impl Bind for ThreadId {
     fn bind(&self, statement: &Statement, start_index: i32) -> anyhow::Result<i32> {
         self.0.bind(statement, start_index)
