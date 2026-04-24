@@ -1363,6 +1363,7 @@ pub struct Workspace {
     project: Entity<Project>,
     follower_states: HashMap<CollaboratorId, FollowerState>,
     last_leaders_by_pane: HashMap<WeakEntity<Pane>, CollaboratorId>,
+    auto_watch_screens: Option<AutoWatchScreensState>,
     window_edited: bool,
     last_window_title: Option<String>,
     dirty_items: HashMap<EntityId, Subscription>,
@@ -1413,6 +1414,11 @@ pub struct FollowerState {
     dock_pane: Option<Entity<Pane>>,
     active_view_id: Option<ViewId>,
     items_by_leader_view_id: HashMap<ViewId, FollowerView>,
+}
+
+pub struct AutoWatchScreensState {
+    current_peer: Option<PeerId>,
+    share_order: Vec<PeerId>,
 }
 
 struct FollowerView {
@@ -1793,6 +1799,7 @@ impl Workspace {
             project: project.clone(),
             follower_states: Default::default(),
             last_leaders_by_pane: Default::default(),
+            auto_watch_screens: None,
             dispatching_keystrokes: Default::default(),
             window_edited: false,
             last_window_title: None,
@@ -4783,6 +4790,107 @@ impl Workspace {
         }
     }
 
+    pub fn is_auto_watching_screens(&self) -> bool {
+        self.auto_watch_screens.is_some()
+    }
+
+    pub fn toggle_auto_watch_screens(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.auto_watch_screens.is_some() {
+            self.auto_watch_screens = None;
+            cx.notify();
+            return;
+        }
+
+        let active_pane = self.active_pane.clone();
+        self.unfollow_in_pane(&active_pane, window, cx);
+
+        let sharing_peers = self
+            .active_call()
+            .map_or(Vec::new(), |call| call.peer_ids_with_video_tracks(cx));
+
+        let current_peer = sharing_peers.first().copied();
+
+        self.auto_watch_screens = Some(AutoWatchScreensState {
+            current_peer,
+            share_order: sharing_peers,
+        });
+
+        if let Some(peer_id) = current_peer {
+            self.open_shared_screen(peer_id, window, cx);
+        }
+
+        cx.notify();
+    }
+
+    fn handle_auto_watch_video_tracks_changed(
+        &mut self,
+        participant_id: PeerId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.auto_watch_screens.is_none() {
+            return;
+        }
+
+        let participant_is_sharing = self.active_call().map_or(false, |call| {
+            call.peer_ids_with_video_tracks(cx)
+                .contains(&participant_id)
+        });
+
+        let auto_watch = self.auto_watch_screens.as_ref().unwrap();
+        let current_peer = auto_watch.current_peer;
+        let was_in_share_order = auto_watch.share_order.contains(&participant_id);
+
+        if participant_is_sharing && !was_in_share_order {
+            let auto_watch = self.auto_watch_screens.as_mut().unwrap();
+            auto_watch.share_order.push(participant_id);
+
+            if current_peer.is_none() {
+                auto_watch.current_peer = Some(participant_id);
+                self.open_shared_screen(participant_id, window, cx);
+            }
+        } else if !participant_is_sharing && was_in_share_order {
+            let was_viewing_current = current_peer == Some(participant_id)
+                && self.is_active_item_shared_screen_for_peer(participant_id, cx);
+
+            let auto_watch = self.auto_watch_screens.as_mut().unwrap();
+            auto_watch
+                .share_order
+                .retain(|&peer| peer != participant_id);
+
+            if current_peer == Some(participant_id) {
+                let next_peer = auto_watch.share_order.first().copied();
+                auto_watch.current_peer = next_peer;
+
+                if let Some(next_peer) = next_peer {
+                    if let Some(shared_screen) =
+                        self.shared_screen_for_peer(next_peer, &self.active_pane, window, cx)
+                    {
+                        self.active_pane.update(cx, |pane, cx| {
+                            pane.add_item(
+                                Box::new(shared_screen),
+                                false,
+                                was_viewing_current,
+                                None,
+                                window,
+                                cx,
+                            )
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    fn is_active_item_shared_screen_for_peer(&self, peer_id: PeerId, cx: &App) -> bool {
+        let pane = self.active_pane.read(cx);
+        let Some(active_item_id) = pane.active_item().map(|item| item.item_id()) else {
+            return false;
+        };
+        pane.items_of_type::<SharedScreen>()
+            .any(|screen| screen.item_id() == active_item_id && screen.read(cx).peer_id == peer_id)
+    }
+
     pub fn activate_item(
         &mut self,
         item: &dyn ItemHandle,
@@ -6517,6 +6625,10 @@ impl Workspace {
                 self.leader_updated(participant_id, window, cx);
             }
         }
+
+        if let ActiveCallEvent::RemoteVideoTracksChanged { participant_id } = event {
+            self.handle_auto_watch_video_tracks_changed(*participant_id, window, cx);
+        }
     }
 
     pub fn database_id(&self) -> Option<WorkspaceId> {
@@ -7908,6 +8020,7 @@ pub trait AnyActiveCall {
         _: &mut Window,
         _: &mut App,
     ) -> Option<Entity<SharedScreen>>;
+    fn peer_ids_with_video_tracks(&self, _: &App) -> Vec<PeerId>;
 }
 
 #[derive(Clone)]

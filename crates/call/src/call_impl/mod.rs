@@ -297,6 +297,18 @@ impl AnyActiveCall for ActiveCallEntity {
             )
         }))
     }
+
+    fn peer_ids_with_video_tracks(&self, cx: &App) -> Vec<proto::PeerId> {
+        let Some(room) = self.0.read(cx).room() else {
+            return Vec::new();
+        };
+        room.read(cx)
+            .remote_participants()
+            .values()
+            .filter(|p| p.has_video_tracks())
+            .map(|p| p.peer_id)
+            .collect()
+    }
 }
 
 pub struct OneAtATime {

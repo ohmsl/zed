@@ -11,6 +11,7 @@ use collections::{HashMap, HashSet};
 use contact_finder::ContactFinder;
 use db::kvp::KeyValueStore;
 use editor::{Editor, EditorElement, EditorStyle};
+use feature_flags::{AutoWatchScreensFeatureFlag, FeatureFlagAppExt as _};
 use fuzzy::{StringMatch, StringMatchCandidate, match_strings};
 use gpui::{
     AnyElement, App, AsyncWindowContext, Bounds, ClickEvent, ClipboardItem, DismissEvent, Div,
@@ -35,8 +36,8 @@ use theme::ActiveTheme;
 use theme_settings::ThemeSettings;
 use ui::{
     Avatar, AvatarAvailabilityIndicator, CollabNotification, ContextMenu, CopyButton, Facepile,
-    HighlightedLabel, IconButtonShape, Indicator, ListHeader, ListItem, Tab, Tooltip, prelude::*,
-    tooltip_container,
+    HighlightedLabel, IconButtonShape, Indicator, ListHeader, ListItem, Tab, TintColor, Tooltip,
+    prelude::*, tooltip_container,
 };
 use util::{ResultExt, TryFutureExt, maybe};
 use workspace::{
@@ -2895,13 +2896,64 @@ impl CollabPanel {
             Section::Offline => SharedString::from("Offline"),
         };
 
+        let is_auto_watching = self.workspace.upgrade().map_or(false, |workspace| {
+            workspace.read(cx).is_auto_watching_screens()
+        });
+
         let button = match section {
-            Section::ActiveCall => channel_link.map(|channel_link| {
-                CopyButton::new("copy-channel-link", channel_link)
-                    .visible_on_hover("section-header")
-                    .tooltip_label("Copy Channel Link")
-                    .into_any_element()
-            }),
+            Section::ActiveCall => {
+                let has_auto_watch_flag = cx.has_flag::<AutoWatchScreensFeatureFlag>();
+                let show_auto_watch = has_auto_watch_flag && is_auto_watching;
+                let show_copy = channel_link.is_some();
+
+                if show_auto_watch || show_copy {
+                    Some(
+                        h_flex()
+                            .when(has_auto_watch_flag, |this| {
+                                this.child(
+                                    IconButton::new(
+                                        "auto-watch-screens",
+                                        if is_auto_watching {
+                                            IconName::Eye
+                                        } else {
+                                            IconName::EyeOff
+                                        },
+                                    )
+                                    .icon_size(IconSize::Small)
+                                    .toggle_state(is_auto_watching)
+                                    .selected_style(ButtonStyle::Tinted(TintColor::Accent))
+                                    .when(!is_auto_watching, |this| {
+                                        this.visible_on_hover("section-header")
+                                    })
+                                    .tooltip(Tooltip::text(if is_auto_watching {
+                                        "Stop Auto Watching Screens"
+                                    } else {
+                                        "Auto Watch Screens"
+                                    }))
+                                    .on_click(cx.listener(
+                                        |this, _, window, cx| {
+                                            this.workspace
+                                                .update(cx, |workspace, cx| {
+                                                    workspace.toggle_auto_watch_screens(window, cx)
+                                                })
+                                                .ok();
+                                        },
+                                    )),
+                                )
+                            })
+                            .when_some(channel_link, |this, channel_link| {
+                                this.child(
+                                    CopyButton::new("copy-channel-link", channel_link)
+                                        .visible_on_hover("section-header")
+                                        .tooltip_label("Copy Channel Link"),
+                                )
+                            })
+                            .into_any_element(),
+                    )
+                } else {
+                    None
+                }
+            }
             Section::Contacts => Some(
                 IconButton::new("add-contact", IconName::Plus)
                     .icon_size(IconSize::Small)
