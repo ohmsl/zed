@@ -4835,12 +4835,9 @@ impl Workspace {
         if participant_is_sharing && spotlighted_peer.is_none() {
             if let Some(auto_watch) = self.auto_watch_screens.as_mut() {
                 auto_watch.spotlighted_peer = Some(participant_id);
-                self.open_shared_screen(participant_id, window, cx);
             }
+            self.open_shared_screen(participant_id, window, cx);
         } else if !participant_is_sharing && spotlighted_peer == Some(participant_id) {
-            let was_viewing_spotlighted_peer =
-                self.is_active_item_shared_screen_for_peer(participant_id, cx);
-
             let next_peer = self
                 .active_call()
                 .and_then(|call| call.peer_ids_with_video_tracks(cx).first().copied());
@@ -4850,32 +4847,9 @@ impl Workspace {
             }
 
             if let Some(next_peer) = next_peer {
-                if let Some(shared_screen) =
-                    self.shared_screen_for_peer(next_peer, &self.active_pane, window, cx)
-                {
-                    self.active_pane.update(cx, |pane, cx| {
-                        pane.add_item_inner(
-                            Box::new(shared_screen),
-                            false,
-                            was_viewing_spotlighted_peer,
-                            was_viewing_spotlighted_peer,
-                            None,
-                            window,
-                            cx,
-                        )
-                    });
-                }
+                self.open_shared_screen(next_peer, window, cx);
             }
         }
-    }
-
-    fn is_active_item_shared_screen_for_peer(&self, peer_id: PeerId, cx: &App) -> bool {
-        let pane = self.active_pane.read(cx);
-        let Some(active_item_id) = pane.active_item().map(|item| item.item_id()) else {
-            return false;
-        };
-        pane.items_of_type::<SharedScreen>()
-            .any(|screen| screen.item_id() == active_item_id && screen.read(cx).peer_id == peer_id)
     }
 
     pub fn activate_item(

@@ -4,7 +4,7 @@ use gpui::{App, BackgroundExecutor, Entity, TestAppContext, TestScreenCaptureSou
 use project::Project;
 use serde_json::json;
 use util::{path, rel_path::rel_path};
-use workspace::{Item as _, SharedScreen, Workspace};
+use workspace::Workspace;
 
 use super::TestClient;
 
@@ -207,7 +207,7 @@ async fn test_auto_watch_toggle_off_leaves_tabs_open(
 }
 
 #[gpui::test]
-async fn test_auto_watch_does_not_steal_focus_when_viewing_other_tab(
+async fn test_auto_watch_steals_focus_even_when_viewing_other_tab(
     executor: BackgroundExecutor,
     cx_a: &mut TestAppContext,
     cx_b: &mut TestAppContext,
@@ -267,17 +267,6 @@ async fn test_auto_watch_does_not_steal_focus_when_viewing_other_tab(
     executor.run_until_parked();
 
     workspace_a.update(cx_a, |workspace, cx| {
-        assert_active_item(workspace, "file.txt", cx);
-
-        let pane = workspace.active_pane().read(cx);
-        let screen_tabs: Vec<_> = pane
-            .items_of_type::<SharedScreen>()
-            .map(|screen| screen.read(cx).tab_content_text(0, cx))
-            .collect();
-        assert!(
-            screen_tabs.iter().any(|t| t == "user_c's screen"),
-            "user_c's SharedScreen should be open in the pane, just not focused. tabs: {:?}",
-            screen_tabs
-        );
+        assert_active_item(workspace, "user_c's screen", cx);
     });
 }
