@@ -35459,3 +35459,90 @@ async fn test_align_selections_multicolumn(cx: &mut TestAppContext) {
     cx.update_editor(|e, window, cx| e.align_selections(&AlignSelections, window, cx));
     cx.assert_editor_state(after);
 }
+
+#[gpui::test]
+async fn test_previous_ordered_list_number_at_indent(cx: &mut TestAppContext) {
+    init_test(cx, |settings| {
+        settings.defaults.tab_size = Some(2.try_into().unwrap());
+    });
+
+    let markdown_language = languages::language("markdown", tree_sitter_md::LANGUAGE.into());
+    let mut cx = EditorTestContext::new(cx).await;
+    cx.update_buffer(|buffer, cx| buffer.set_language(Some(markdown_language), cx));
+
+    // Row layout:
+    //   0: 1. first           (indent 0)
+    //   1: 2. second          (indent 0)
+    //   2:   1. nested        (indent 2)
+    //   3:   2. nested        (indent 2)
+    //   4: 3. third           (indent 0)
+    //   5:   1. deep nested   (indent 2)
+    //   6:     1. deeper      (indent 4)
+    //   7: plain text         (indent 0, not a list item)
+    //   8: 4. after plain     (indent 0)
+    cx.set_state(indoc! {"
+        1. first
+        2. second
+          1. nested
+          2. nested
+        3. third
+          1. deep nested
+            1. deeper
+        plain text
+        4. after plainˇ
+    "});
+
+    cx.update_editor(|editor, _window, cx| {
+        let buffer = editor.buffer().read(cx);
+        let snapshot = buffer.snapshot(cx);
+        let language = snapshot.language_scope_at(Point::new(0, 0)).unwrap();
+
+        // Equal: scans backward from row 4, finds "2. second" at indent 0
+        // (rows 2-3 are skipped because indent 2 > 0).
+        assert_eq!(
+            previous_ordered_list_number_at_indent(4, 0, &snapshot, &language),
+            2
+        );
+
+        // Equal: scans backward from row 3, finds "1. nested" at indent 2.
+        assert_eq!(
+            previous_ordered_list_number_at_indent(3, 2, &snapshot, &language),
+            1
+        );
+
+        // Less: scans backward from row 2 looking for indent 2, hits
+        // "2. second" at indent 0 which is less than 2, so no sibling found.
+        assert_eq!(
+            previous_ordered_list_number_at_indent(2, 2, &snapshot, &language),
+            0
+        );
+
+        // Greater: scans backward from row 7 at indent 2, skips row 6
+        // (indent 4 > 2), finds "1. deep nested" at indent 2.
+        assert_eq!(
+            previous_ordered_list_number_at_indent(7, 2, &snapshot, &language),
+            1
+        );
+
+        // No previous rows: before row 0, nothing to scan.
+        assert_eq!(
+            previous_ordered_list_number_at_indent(0, 0, &snapshot, &language),
+            0
+        );
+
+        // Equal but not a list item: scans backward from row 8 at indent 0,
+        // hits "plain text" at indent 0 which has no ordered list marker,
+        // returns 0.
+        assert_eq!(
+            previous_ordered_list_number_at_indent(8, 0, &snapshot, &language),
+            0
+        );
+
+        // Scanning from the very end at indent 0, hits "plain text" on row 7
+        // which is not a list item, returns 0.
+        assert_eq!(
+            previous_ordered_list_number_at_indent(9, 0, &snapshot, &language),
+            0
+        );
+    });
+}

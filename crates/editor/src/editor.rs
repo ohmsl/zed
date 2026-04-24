@@ -11306,9 +11306,12 @@ impl Editor {
         false
     }
 
+    /// Indents the current selections while also re-numbering the list items
+    /// according to their new indent level and order.
     fn apply_markdown_ordered_list_indent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.hide_mouse_cursor(HideMouseCursorOrigin::TypingAction, cx);
         let mut selections = self.selections.all::<Point>(&self.display_snapshot(cx));
+        let original_selections = selections.clone();
         let mut prev_edited_row = 0;
         let mut row_delta = 0;
         let mut edits = Vec::new();
@@ -11320,10 +11323,17 @@ impl Editor {
             }
             prev_edited_row = selection.end.row;
 
-            row_delta = Self::markdown_indent_selection(
-                buffer, &snapshot, selection, &mut edits, row_delta, cx,
-            );
+            row_delta =
+                Self::indent_selection(buffer, &snapshot, selection, &mut edits, row_delta, cx);
         }
+
+        Self::renumber_ordered_list_markers_for_indent(
+            buffer,
+            &snapshot,
+            &original_selections,
+            &mut edits,
+            cx,
+        );
 
         self.transact(window, cx, |this, window, cx| {
             this.buffer.update(cx, |b, cx| b.edit(edits, None, cx));
@@ -11331,88 +11341,85 @@ impl Editor {
         });
     }
 
-    fn markdown_indent_selection(
+    /// Traverses the list of `selections`, creating new edits to renumber the
+    /// list item markers according to their new indent level and order.
+    fn renumber_ordered_list_markers_for_indent(
         buffer: &MultiBuffer,
         snapshot: &MultiBufferSnapshot,
-        selection: &mut Selection<Point>,
+        selections: &[Selection<Point>],
         edits: &mut Vec<(Range<Point>, String)>,
-        delta_for_start_row: u32,
         cx: &App,
-    ) -> u32 {
-        let settings = buffer.language_settings_at(selection.start, cx);
-        let tab_size = settings.tab_size.get();
-        let indent_kind = if settings.hard_tabs {
-            IndentKind::Tab
-        } else {
-            IndentKind::Space
-        };
-        let mut start_row = selection.start.row;
-        let mut end_row = selection.end.row + 1;
-
-        if selection.end.column == 0 && selection.end.row > selection.start.row {
-            end_row -= 1;
-        }
-
-        if delta_for_start_row > 0 {
-            start_row += 1;
-            selection.start.column += delta_for_start_row;
-            if selection.end.row == selection.start.row {
-                selection.end.column += delta_for_start_row;
-            }
-        }
-
-        let mut delta_for_end_row = 0;
-        let mut next_ordered_list_number: Option<u32> = None;
-        let has_multiple_rows = start_row + 1 != end_row;
-        let mut trailing_renumber_anchor_row: Option<u32> = None;
-        let mut trailing_renumber_indent_len: Option<u32> = None;
-        let mut moved_ordered_items_at_trailing_indent = 0u32;
-        for row in start_row..end_row {
-            let current_indent = snapshot.indent_size_for_line(MultiBufferRow(row));
-            let indent_delta = match (current_indent.kind, indent_kind) {
-                (IndentKind::Space, IndentKind::Space) => {
-                    let columns_to_next_tab_stop = tab_size - (current_indent.len % tab_size);
-                    IndentSize::spaces(columns_to_next_tab_stop)
-                }
-                (IndentKind::Tab, IndentKind::Space) => IndentSize::spaces(tab_size),
-                (_, IndentKind::Tab) => IndentSize::tab(),
+    ) {
+        for Selection { start, end, .. } in selections {
+            let settings = buffer.language_settings_at(*start, cx);
+            let tab_size = settings.tab_size.get();
+            let indent_kind = match settings.hard_tabs {
+                true => IndentKind::Tab,
+                false => IndentKind::Space,
             };
 
-            let start = if has_multiple_rows || current_indent.len < selection.start.column {
-                0
-            } else {
-                selection.start.column
+            let start_row = start.row;
+            let end_row = match (end.column == 0, end.row > start.row) {
+                (true, true) => end.row,
+                (_, _) => end.row + 1,
             };
-            let row_start = Point::new(row, start);
-            edits.push((
-                row_start..row_start,
-                indent_delta.chars().collect::<String>(),
-            ));
 
-            if let Some(language) = snapshot.language_scope_at(Point::new(row, current_indent.len))
-            {
-                let renumber_to = *next_ordered_list_number.get_or_insert_with(|| {
-                    let target_indent_len = current_indent.len + indent_delta.len;
-                    previous_ordered_list_number_at_indent(
-                        row,
-                        target_indent_len,
-                        snapshot,
-                        &language,
-                    ) + 1
-                });
+            // Keeps track of the next number to use for renumbering ordered
+            // list items. Needs to be an `Option` because we're not guaranteed
+            // that the first row will already contain a list item number, as
+            // the selection can span multiple rows, with some rows containing
+            // list items and others not.
+            let mut next_number: Option<u32> = None;
+            let mut trailing_renumber_anchor_row: Option<u32> = None;
+            let mut trailing_renumber_indent_len: Option<u32> = None;
+            let mut moved_ordered_items_at_trailing_indent = 0u32;
+
+            // For each of the rows spanned by the selection, we'll:
+            //
+            // 1. Determine the current indent size used for the row
+            // 2. Determine what language applies to the point determined by the
+            //    row and indent size
+            // 3. If the current row does have an ordered list marker, we'll
+            //    check if we already know what to renumber it to, otherwise we'll
+            //    attempt to find a list item number at the same indent level, in
+            //    the rows before.
+            for row in start_row..end_row {
+                let current_indent = snapshot.indent_size_for_line(MultiBufferRow(row));
+                let indent_delta = match (current_indent.kind, indent_kind) {
+                    (IndentKind::Space, IndentKind::Space) => {
+                        let columns_to_next_tab_stop = tab_size - (current_indent.len % tab_size);
+                        IndentSize::spaces(columns_to_next_tab_stop)
+                    }
+                    (IndentKind::Tab, IndentKind::Space) => IndentSize::spaces(tab_size),
+                    (_, IndentKind::Tab) => IndentSize::tab(),
+                };
+
+                let Some(language) =
+                    snapshot.language_scope_at(Point::new(row, current_indent.len))
+                else {
+                    continue;
+                };
 
                 if let Some(marker) =
                     ordered_list_marker(row, current_indent.len, snapshot, &language)
                 {
-                    let marker_text = marker.format.replace("{1}", &renumber_to.to_string());
+                    let renumber_to = *next_number.get_or_insert_with(|| {
+                        let target_indent_len = current_indent.len + indent_delta.len;
+                        previous_ordered_list_number_at_indent(
+                            row,
+                            target_indent_len,
+                            snapshot,
+                            &language,
+                        ) + 1
+                    });
 
+                    let marker_text = marker.format.replace("{1}", &renumber_to.to_string());
                     edits.push((
                         Point::new(row, marker.start_col)..Point::new(row, marker.end_col),
                         marker_text,
                     ));
-                    if has_multiple_rows {
-                        next_ordered_list_number = Some(renumber_to.saturating_add(1));
-                    }
+
+                    next_number = Some(renumber_to.saturating_add(1));
 
                     if let Some(indent_len) = trailing_renumber_indent_len {
                         if current_indent.len == indent_len {
@@ -11426,35 +11433,23 @@ impl Editor {
                 }
             }
 
-            if row == selection.start.row {
-                selection.start.column += indent_delta.len;
+            if moved_ordered_items_at_trailing_indent > 0
+                && let (Some(anchor_row), Some(indent_len)) =
+                    (trailing_renumber_anchor_row, trailing_renumber_indent_len)
+                && let Some(language) =
+                    snapshot.language_scope_at(Point::new(anchor_row, indent_len))
+            {
+                renumber_following_ordered_list_siblings_after_indent(
+                    previous_ordered_list_number_at_indent(
+                        anchor_row, indent_len, snapshot, &language,
+                    ) + 1,
+                    end_row,
+                    indent_len,
+                    snapshot,
+                    &language,
+                    edits,
+                );
             }
-            if row == selection.end.row {
-                selection.end.column += indent_delta.len;
-                delta_for_end_row = indent_delta.len;
-            }
-        }
-
-        if moved_ordered_items_at_trailing_indent > 0
-            && let (Some(anchor_row), Some(indent_len)) =
-                (trailing_renumber_anchor_row, trailing_renumber_indent_len)
-            && let Some(language) = snapshot.language_scope_at(Point::new(anchor_row, indent_len))
-        {
-            renumber_following_ordered_list_siblings_after_indent(
-                previous_ordered_list_number_at_indent(anchor_row, indent_len, snapshot, &language)
-                    + 1,
-                end_row,
-                indent_len,
-                snapshot,
-                &language,
-                edits,
-            );
-        }
-
-        if selection.start.row == selection.end.row {
-            delta_for_start_row + delta_for_end_row
-        } else {
-            delta_for_end_row
         }
     }
 
@@ -26797,29 +26792,38 @@ fn ordered_list_marker(
 
 const ORDERED_LIST_BACKWARD_SCAN_LIMIT: u32 = 256;
 
+/// Attempts to find a list number at the provided `indent_len` starting from
+/// the provided `row` and taking into consideration the
+/// [`ORDERED_LIST_BACKWARD_SCAN_LIMIT`] rows before.
+///
+/// In case no list marker is found within the scan limit, `0` is returned.
 fn previous_ordered_list_number_at_indent(
-    before_row: u32,
+    row: u32,
     indent_len: u32,
     snapshot: &MultiBufferSnapshot,
     language: &LanguageScope,
 ) -> u32 {
-    let scan_limit = before_row.saturating_sub(ORDERED_LIST_BACKWARD_SCAN_LIMIT);
-    for row in (scan_limit..before_row).rev() {
+    let scan_limit = row.saturating_sub(ORDERED_LIST_BACKWARD_SCAN_LIMIT);
+
+    for row in (scan_limit..row).rev() {
         let row = MultiBufferRow(row);
+
+        // Blank lines do not have any list marker, so we can safely skip them.
         if snapshot.is_line_blank(row) {
             continue;
         }
 
-        let row_indent_len = snapshot.indent_size_for_line(row).len;
-        if row_indent_len < indent_len {
-            return 0;
-        }
-
-        if row_indent_len == indent_len {
-            if let Some(marker) = ordered_list_marker(row.0, indent_len, snapshot, language) {
-                return marker.number;
+        match snapshot.indent_size_for_line(row).len.cmp(&indent_len) {
+            // In case the indentation level of the current row we're looking at
+            // is greater than the one we're searching for, we'll continue to
+            // the next row, as we might be looking at a sublist of the sibling
+            // list item we're looking for.
+            Ordering::Greater => continue,
+            Ordering::Less => return 0,
+            Ordering::Equal => {
+                return ordered_list_marker(row.0, indent_len, snapshot, language)
+                    .map_or(0, |marker| marker.number);
             }
-            return 0;
         }
     }
 
