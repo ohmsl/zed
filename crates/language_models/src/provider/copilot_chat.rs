@@ -208,6 +208,23 @@ pub struct CopilotChatLanguageModel {
     request_limiter: RateLimiter,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CopilotChatEndpoint {
+    Messages,
+    Responses,
+    ChatCompletions,
+}
+
+fn endpoint_for_model(model: &CopilotChatModel) -> CopilotChatEndpoint {
+    if model.supports_messages() {
+        CopilotChatEndpoint::Messages
+    } else if model.supports_response() {
+        CopilotChatEndpoint::Responses
+    } else {
+        CopilotChatEndpoint::ChatCompletions
+    }
+}
+
 impl LanguageModel for CopilotChatLanguageModel {
     fn id(&self) -> LanguageModelId {
         LanguageModelId::from(self.model.id().to_string())
@@ -324,7 +341,7 @@ impl LanguageModel for CopilotChatLanguageModel {
             | CompletionIntent::EditFile => false,
         });
 
-        if self.model.supports_messages() {
+        if endpoint_for_model(&self.model) == CopilotChatEndpoint::Messages {
             let location = intent_to_chat_location(request.intent);
             let model = self.model.clone();
             let request_limiter = self.request_limiter.clone();
@@ -407,7 +424,7 @@ impl LanguageModel for CopilotChatLanguageModel {
             return async move { Ok(future.await?.boxed()) }.boxed();
         }
 
-        if self.model.supports_response() {
+        if endpoint_for_model(&self.model) == CopilotChatEndpoint::Responses {
             let location = intent_to_chat_location(request.intent);
             let responses_request = into_copilot_responses(&self.model, request);
             let request_limiter = self.request_limiter.clone();
@@ -1633,34 +1650,138 @@ mod tests {
         );
     }
 
-    fn make_test_model_json(id: &str, vendor: &str, endpoints: &[&str]) -> String {
-        let endpoints_json: Vec<String> = endpoints.iter().map(|e| format!("\"{}\"", e)).collect();
-        format!(
-            r#"{{
-                "billing": {{ "is_premium": false, "multiplier": 1.0 }},
-                "capabilities": {{
-                    "family": "test",
-                    "limits": {{ "max_context_window_tokens": 128000, "max_output_tokens": 4096 }},
-                    "supports": {{ "streaming": true, "tool_calls": true, "vision": true }},
-                    "type": "chat"
-                }},
-                "id": "{}",
-                "name": "{}",
-                "vendor": "{}",
-                "is_chat_default": false,
-                "is_chat_fallback": false,
-                "model_picker_enabled": true,
-                "supported_endpoints": [{}]
-            }}"#,
-            id,
-            id,
-            vendor,
-            endpoints_json.join(", ")
-        )
+    #[test]
+    fn chat_completions_stream_empty_choices_returns_error() {
+        use copilot_chat::ResponseEvent;
+
+        let events = vec![ResponseEvent {
+            choices: vec![],
+            id: "chatcmpl-empty".to_string(),
+            usage: None,
+        }];
+
+        let mapped = futures::executor::block_on(async {
+            map_to_language_model_completion_events(
+                Box::pin(futures::stream::iter(events.into_iter().map(Ok))),
+                true,
+            )
+            .collect::<Vec<_>>()
+            .await
+        });
+
+        assert_eq!(mapped.len(), 1);
+        match &mapped[0] {
+            Err(LanguageModelCompletionError::Other(error)) => {
+                assert_eq!(error.to_string(), "Response contained no choices");
+            }
+            other => panic!("expected empty choices error, got {other:?}"),
+        }
     }
 
     fn make_test_model(id: &str, vendor: &str, endpoints: &[&str]) -> CopilotChatModel {
-        serde_json::from_str(&make_test_model_json(id, vendor, endpoints)).unwrap()
+        serde_json::from_value(serde_json::json!({
+            "billing": { "is_premium": false, "multiplier": 1.0 },
+            "capabilities": {
+                "family": "test",
+                "limits": { "max_context_window_tokens": 128000, "max_output_tokens": 4096 },
+                "supports": { "streaming": true, "tool_calls": true, "vision": true },
+                "type": "chat"
+            },
+            "id": id,
+            "name": id,
+            "vendor": vendor,
+            "is_chat_default": false,
+            "is_chat_fallback": false,
+            "model_picker_enabled": true,
+            "supported_endpoints": endpoints
+        }))
+        .unwrap()
+    }
+
+    fn assert_chat_message_text(message: &ChatMessage, expected_role: Role, expected_text: &str) {
+        match (message, expected_role) {
+            (ChatMessage::System { content }, Role::System) => {
+                assert_eq!(content, expected_text);
+            }
+            (
+                ChatMessage::User {
+                    content: ChatMessageContent::Plain(content),
+                },
+                Role::User,
+            ) => {
+                assert_eq!(content, expected_text);
+            }
+            (
+                ChatMessage::Assistant {
+                    content: ChatMessageContent::Plain(content),
+                    ..
+                },
+                Role::Assistant,
+            ) => {
+                assert_eq!(content, expected_text);
+            }
+            other => panic!("expected {expected_role:?} text message, got {other:?}"),
+        }
+    }
+
+    fn assert_response_input_text(
+        item: &responses::ResponseInputItem,
+        expected_role: &str,
+        expected_text: &str,
+    ) {
+        let responses::ResponseInputItem::Message {
+            role,
+            content: Some(content),
+            ..
+        } = item
+        else {
+            panic!("expected response input message, got {item:?}");
+        };
+
+        assert_eq!(role, expected_role);
+        assert_eq!(content.len(), 1);
+        match &content[0] {
+            responses::ResponseInputContent::InputText { text }
+            | responses::ResponseInputContent::OutputText { text } => {
+                assert_eq!(text, expected_text);
+            }
+            other => panic!("expected text content, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn endpoint_selection_uses_supported_endpoint_precedence() {
+        let cases = [
+            (
+                "claude-sonnet-4",
+                "Anthropic",
+                &["/v1/messages"][..],
+                CopilotChatEndpoint::Messages,
+            ),
+            (
+                "o3",
+                "OpenAI",
+                &["/responses"][..],
+                CopilotChatEndpoint::Responses,
+            ),
+            (
+                "gpt-4o",
+                "OpenAI",
+                &["/chat/completions"][..],
+                CopilotChatEndpoint::ChatCompletions,
+            ),
+            (
+                "multi-endpoint-model",
+                "Anthropic",
+                &["/responses", "/v1/messages"][..],
+                CopilotChatEndpoint::Messages,
+            ),
+        ];
+
+        for (id, vendor, endpoints, expected_endpoint) in cases {
+            let model = make_test_model(id, vendor, endpoints);
+            assert_eq!(endpoint_for_model(&model), expected_endpoint);
+        }
     }
 
     #[test]
@@ -1699,6 +1820,14 @@ mod tests {
         assert!((result.temperature - 0.7).abs() < 0.001);
         assert!(result.stream);
         assert_eq!(result.messages.len(), 2);
+        assert_chat_message_text(
+            &result.messages[0],
+            Role::System,
+            "You are a helpful assistant.",
+        );
+        assert_chat_message_text(&result.messages[1], Role::User, "Hello");
+        assert!(result.tools.is_empty());
+        assert!(result.tool_choice.is_none());
         assert!(result.thinking_budget.is_none());
     }
 
@@ -1735,6 +1864,7 @@ mod tests {
         let result = into_copilot_chat(&model, request).unwrap();
 
         assert_eq!(result.messages.len(), 1);
+        assert_chat_message_text(&result.messages[0], Role::User, "First Second");
     }
 
     #[test]
@@ -1772,6 +1902,19 @@ mod tests {
         let result = into_copilot_chat(&model, request).unwrap();
 
         assert_eq!(result.tools.len(), 1);
+        let Tool::Function { function } = &result.tools[0];
+        assert_eq!(function.name, "list_directory");
+        assert_eq!(function.description, "Lists files in a directory");
+        assert_eq!(
+            function.parameters,
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" }
+                }
+            })
+        );
+        assert_chat_message_text(&result.messages[0], Role::User, "List files");
         assert!(matches!(result.tool_choice, Some(ToolChoice::Auto)));
     }
 
@@ -1804,6 +1947,9 @@ mod tests {
         let model = make_test_model("gpt-4o", "OpenAI", &["/chat/completions"]);
         let result = into_copilot_chat(&model, request).unwrap();
 
+        assert_eq!(result.tools.len(), 1);
+        let Tool::Function { function } = &result.tools[0];
+        assert_eq!(function.name, "test_tool");
         assert!(matches!(result.tool_choice, Some(ToolChoice::Required)));
     }
 
@@ -1843,7 +1989,16 @@ mod tests {
         assert_eq!(result.temperature, Some(0.5));
         assert!(result.stream);
         assert_eq!(result.input.len(), 2);
+        assert_response_input_text(&result.input[0], "system", "You are helpful.");
+        assert_response_input_text(&result.input[1], "user", "Hello");
+        assert!(result.tools.is_empty());
+        assert!(result.tool_choice.is_none());
         assert!(result.reasoning.is_none());
+        assert_eq!(
+            serde_json::to_value(&result.include).unwrap(),
+            serde_json::json!(["reasoning.encrypted_content"])
+        );
+        assert!(!result.store);
     }
 
     #[test]
@@ -1876,6 +2031,11 @@ mod tests {
             reasoning.effort,
             copilot_responses::ReasoningEffort::High
         ));
+        assert!(matches!(
+            reasoning.summary,
+            Some(copilot_responses::ReasoningSummary::Detailed)
+        ));
+        assert_response_input_text(&result.input[0], "user", "Think about this");
     }
 
     #[test]
@@ -1911,6 +2071,23 @@ mod tests {
         let result = into_copilot_responses(&model, request);
 
         assert_eq!(result.tools.len(), 1);
+        let responses::ToolDefinition::Function {
+            name,
+            description,
+            parameters,
+            strict,
+        } = &result.tools[0];
+        assert_eq!(name, "list_directory");
+        assert_eq!(description.as_deref(), Some("Lists files"));
+        assert_eq!(
+            parameters.as_ref(),
+            Some(&serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } }
+            }))
+        );
+        assert!(strict.is_none());
+        assert_response_input_text(&result.input[0], "user", "List files");
         assert!(matches!(
             result.tool_choice,
             Some(copilot_responses::ToolChoice::Auto)
@@ -1946,6 +2123,9 @@ mod tests {
         let model = make_test_model("o3", "OpenAI", &["/responses"]);
         let result = into_copilot_responses(&model, request);
 
+        assert_eq!(result.tools.len(), 1);
+        let responses::ToolDefinition::Function { name, .. } = &result.tools[0];
+        assert_eq!(name, "tool");
         assert!(matches!(
             result.tool_choice,
             Some(copilot_responses::ToolChoice::Required)

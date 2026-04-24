@@ -1751,8 +1751,6 @@ mod tests {
         );
     }
 
-    // --- Response parsing tests (Phase 3: Error handling) ---
-
     #[test]
     fn test_response_event_parsing_with_text_delta() {
         let json = r#"{
@@ -1895,18 +1893,6 @@ mod tests {
     }
 
     #[test]
-    fn test_response_event_parsing_empty_choices() {
-        let json = r#"{
-            "id": "chatcmpl-empty",
-            "choices": [],
-            "usage": null
-        }"#;
-
-        let event: ResponseEvent = serde_json::from_str(json).unwrap();
-        assert!(event.choices.is_empty());
-    }
-
-    #[test]
     fn test_response_event_parsing_with_message_instead_of_delta() {
         let json = r#"{
             "id": "chatcmpl-msg",
@@ -1989,274 +1975,170 @@ mod tests {
         assert_eq!(usage.total_tokens, 150);
     }
 
-    // --- Vendor routing tests (Phase 4) ---
-
-    fn make_test_model(
-        id: &str,
-        vendor: ModelVendor,
-        endpoints: Vec<ModelSupportedEndpoint>,
-    ) -> Model {
-        Model {
-            billing: ModelBilling {
-                is_premium: false,
-                multiplier: 1.0,
-                restricted_to: None,
-            },
-            capabilities: ModelCapabilities {
-                family: "test".to_string(),
-                limits: ModelLimits::default(),
-                supports: ModelSupportedFeatures {
-                    streaming: true,
-                    tool_calls: false,
-                    parallel_tool_calls: false,
-                    vision: false,
-                    thinking: false,
-                    adaptive_thinking: false,
-                    max_thinking_budget: None,
-                    min_thinking_budget: None,
-                    reasoning_effort: vec![],
-                },
-                model_type: "chat".to_string(),
-                tokenizer: None,
-            },
-            id: id.to_string(),
-            name: id.to_string(),
-            policy: None,
-            vendor,
-            is_chat_default: false,
-            is_chat_fallback: false,
-            model_picker_enabled: true,
-            supported_endpoints: endpoints,
-        }
-    }
-
     #[test]
-    fn test_anthropic_model_routes_to_messages_endpoint() {
-        let model = make_test_model(
-            "claude-sonnet-4",
-            ModelVendor::Anthropic,
-            vec![ModelSupportedEndpoint::Messages],
-        );
-
-        assert!(model.supports_messages());
-        assert!(!model.supports_response());
-        assert_eq!(model.vendor(), ModelVendor::Anthropic);
-    }
-
-    #[test]
-    fn test_openai_model_routes_to_chat_completions() {
-        let model = make_test_model(
-            "gpt-4o",
-            ModelVendor::OpenAI,
-            vec![ModelSupportedEndpoint::ChatCompletions],
-        );
-
-        assert!(!model.supports_messages());
-        assert!(!model.supports_response());
-        assert_eq!(model.vendor(), ModelVendor::OpenAI);
-    }
-
-    #[test]
-    fn test_model_with_responses_endpoint() {
-        let model = make_test_model(
-            "o1-preview",
-            ModelVendor::OpenAI,
-            vec![
-                ModelSupportedEndpoint::ChatCompletions,
-                ModelSupportedEndpoint::Responses,
-            ],
-        );
-
-        assert!(model.supports_response());
-        assert!(!model.supports_messages());
-    }
-
-    #[test]
-    fn test_google_model_routing() {
-        let model = make_test_model(
-            "gemini-3-pro",
-            ModelVendor::Google,
-            vec![ModelSupportedEndpoint::ChatCompletions],
-        );
-
-        assert_eq!(model.vendor(), ModelVendor::Google);
-        assert!(!model.supports_messages());
-    }
-
-    #[test]
-    fn test_xai_model_routing() {
-        let model = make_test_model(
-            "grok-3",
-            ModelVendor::XAI,
-            vec![ModelSupportedEndpoint::ChatCompletions],
-        );
-
-        assert_eq!(model.vendor(), ModelVendor::XAI);
-    }
-
-    #[test]
-    fn test_unknown_vendor_routing() {
-        let model = make_test_model(
-            "future-model",
-            ModelVendor::Unknown,
-            vec![ModelSupportedEndpoint::ChatCompletions],
-        );
-
-        assert_eq!(model.vendor(), ModelVendor::Unknown);
-        assert!(!model.supports_messages());
-        assert!(!model.supports_response());
-    }
-
-    #[test]
-    fn test_model_with_all_endpoints() {
-        let model = make_test_model(
-            "multi-endpoint-model",
-            ModelVendor::OpenAI,
-            vec![
-                ModelSupportedEndpoint::ChatCompletions,
-                ModelSupportedEndpoint::Responses,
-                ModelSupportedEndpoint::Messages,
-            ],
-        );
-
-        assert!(model.supports_messages());
-        assert!(model.supports_response());
-    }
-
-    #[test]
-    fn test_model_with_unknown_endpoint_only() {
-        let model = make_test_model(
-            "weird-model",
-            ModelVendor::Unknown,
-            vec![ModelSupportedEndpoint::Unknown],
-        );
-
-        assert!(!model.supports_messages());
-        assert!(!model.supports_response());
-    }
-
-    #[test]
-    fn test_vendor_deserialization_all_known_vendors() {
-        let vendors = [
-            ("Azure OpenAI", ModelVendor::OpenAI),
-            ("Anthropic", ModelVendor::Anthropic),
-            ("Google", ModelVendor::Google),
-            ("xAI", ModelVendor::XAI),
-            ("FutureVendor", ModelVendor::Unknown),
-        ];
-
-        for (json_value, expected) in vendors {
-            let json = format!(r#""{json_value}""#);
-            let vendor: ModelVendor = serde_json::from_str(&json).unwrap();
-            assert_eq!(
-                vendor, expected,
-                "Vendor '{}' should map to {:?}",
-                json_value, expected
-            );
-        }
-    }
-
-    #[test]
-    fn test_model_thinking_support() {
+    fn test_model_schema_deserializes_endpoints_vendors_and_thinking_capabilities() {
         let json = r#"{
-            "data": [{
-                "billing": { "is_premium": true, "multiplier": 1 },
-                "capabilities": {
-                    "family": "claude-sonnet-4",
-                    "limits": { "max_context_window_tokens": 200000, "max_output_tokens": 16384 },
-                    "supports": {
-                        "streaming": true,
-                        "tool_calls": true,
-                        "thinking": true,
-                        "max_thinking_budget": 32000,
-                        "min_thinking_budget": 1024
+            "data": [
+                {
+                    "billing": { "is_premium": false, "multiplier": 1 },
+                    "capabilities": {
+                        "family": "gpt-4o",
+                        "limits": { "max_context_window_tokens": 128000, "max_output_tokens": 16384 },
+                        "supports": { "streaming": true, "tool_calls": true },
+                        "type": "chat"
                     },
-                    "type": "chat"
+                    "id": "gpt-4o",
+                    "is_chat_default": false,
+                    "is_chat_fallback": false,
+                    "model_picker_enabled": true,
+                    "name": "GPT-4o",
+                    "vendor": "Azure OpenAI",
+                    "supported_endpoints": ["/chat/completions"]
                 },
-                "id": "claude-sonnet-4",
-                "is_chat_default": false,
-                "is_chat_fallback": false,
-                "model_picker_enabled": true,
-                "name": "Claude Sonnet 4",
-                "vendor": "Anthropic",
-                "supported_endpoints": ["/v1/messages"]
-            }]
+                {
+                    "billing": { "is_premium": true, "multiplier": 1 },
+                    "capabilities": {
+                        "family": "claude-sonnet-4",
+                        "limits": { "max_context_window_tokens": 200000, "max_output_tokens": 16384 },
+                        "supports": {
+                            "streaming": true,
+                            "tool_calls": true,
+                            "thinking": true,
+                            "max_thinking_budget": 32000,
+                            "min_thinking_budget": 1024
+                        },
+                        "type": "chat"
+                    },
+                    "id": "claude-sonnet-4",
+                    "is_chat_default": false,
+                    "is_chat_fallback": false,
+                    "model_picker_enabled": true,
+                    "name": "Claude Sonnet 4",
+                    "vendor": "Anthropic",
+                    "supported_endpoints": ["/v1/messages"]
+                },
+                {
+                    "billing": { "is_premium": true, "multiplier": 1 },
+                    "capabilities": {
+                        "family": "claude-opus-4",
+                        "limits": { "max_context_window_tokens": 200000, "max_output_tokens": 32000 },
+                        "supports": {
+                            "streaming": true,
+                            "tool_calls": true,
+                            "adaptive_thinking": true
+                        },
+                        "type": "chat"
+                    },
+                    "id": "claude-opus-4",
+                    "is_chat_default": false,
+                    "is_chat_fallback": false,
+                    "model_picker_enabled": true,
+                    "name": "Claude Opus 4",
+                    "vendor": "Anthropic",
+                    "supported_endpoints": ["/v1/messages"]
+                },
+                {
+                    "billing": { "is_premium": true, "multiplier": 1 },
+                    "capabilities": {
+                        "family": "gemini-3",
+                        "limits": { "max_context_window_tokens": 128000, "max_output_tokens": 8192 },
+                        "supports": {
+                            "streaming": true,
+                            "tool_calls": true,
+                            "reasoning_effort": ["low", "medium", "high"]
+                        },
+                        "type": "chat"
+                    },
+                    "id": "gemini-3-pro",
+                    "is_chat_default": false,
+                    "is_chat_fallback": false,
+                    "model_picker_enabled": true,
+                    "name": "Gemini 3 Pro",
+                    "vendor": "Google",
+                    "supported_endpoints": ["/responses"]
+                },
+                {
+                    "billing": { "is_premium": false, "multiplier": 1 },
+                    "capabilities": {
+                        "family": "grok",
+                        "limits": { "max_context_window_tokens": 128000, "max_output_tokens": 8192 },
+                        "supports": { "streaming": true, "tool_calls": true },
+                        "type": "chat"
+                    },
+                    "id": "grok-3",
+                    "is_chat_default": false,
+                    "is_chat_fallback": false,
+                    "model_picker_enabled": true,
+                    "name": "Grok 3",
+                    "vendor": "xAI",
+                    "supported_endpoints": ["/chat/completions"]
+                },
+                {
+                    "billing": { "is_premium": false, "multiplier": 1 },
+                    "capabilities": {
+                        "family": "future-model",
+                        "limits": { "max_context_window_tokens": 128000, "max_output_tokens": 8192 },
+                        "supports": { "streaming": true, "tool_calls": true },
+                        "type": "chat"
+                    },
+                    "id": "future-model",
+                    "is_chat_default": false,
+                    "is_chat_fallback": false,
+                    "model_picker_enabled": true,
+                    "name": "Future Model",
+                    "vendor": "FutureVendor",
+                    "supported_endpoints": ["/future"]
+                }
+            ]
         }"#;
 
         let schema: ModelSchema = serde_json::from_str(json).unwrap();
-        let model = &schema.data[0];
+        assert_eq!(schema.data.len(), 6);
 
-        assert!(model.supports_thinking());
-        assert!(model.can_think());
-        assert_eq!(model.max_thinking_budget(), Some(32000));
-        assert_eq!(model.min_thinking_budget(), Some(1024));
-    }
+        let openai = &schema.data[0];
+        assert_eq!(openai.vendor(), ModelVendor::OpenAI);
+        assert_eq!(
+            openai.supported_endpoints,
+            vec![ModelSupportedEndpoint::ChatCompletions]
+        );
+        assert!(!openai.supports_messages());
+        assert!(!openai.supports_response());
 
-    #[test]
-    fn test_model_adaptive_thinking_support() {
-        let json = r#"{
-            "data": [{
-                "billing": { "is_premium": true, "multiplier": 1 },
-                "capabilities": {
-                    "family": "claude-opus-4",
-                    "limits": { "max_context_window_tokens": 200000, "max_output_tokens": 32000 },
-                    "supports": {
-                        "streaming": true,
-                        "tool_calls": true,
-                        "adaptive_thinking": true
-                    },
-                    "type": "chat"
-                },
-                "id": "claude-opus-4",
-                "is_chat_default": false,
-                "is_chat_fallback": false,
-                "model_picker_enabled": true,
-                "name": "Claude Opus 4",
-                "vendor": "Anthropic",
-                "supported_endpoints": ["/v1/messages"]
-            }]
-        }"#;
+        let thinking = &schema.data[1];
+        assert_eq!(thinking.vendor(), ModelVendor::Anthropic);
+        assert_eq!(
+            thinking.supported_endpoints,
+            vec![ModelSupportedEndpoint::Messages]
+        );
+        assert!(thinking.supports_messages());
+        assert!(thinking.supports_thinking());
+        assert!(thinking.can_think());
+        assert_eq!(thinking.max_thinking_budget(), Some(32000));
+        assert_eq!(thinking.min_thinking_budget(), Some(1024));
 
-        let schema: ModelSchema = serde_json::from_str(json).unwrap();
-        let model = &schema.data[0];
+        let adaptive = &schema.data[2];
+        assert!(adaptive.supports_adaptive_thinking());
+        assert!(adaptive.can_think());
 
-        assert!(model.supports_adaptive_thinking());
-        assert!(model.can_think());
-    }
+        let reasoning_effort = &schema.data[3];
+        assert_eq!(reasoning_effort.vendor(), ModelVendor::Google);
+        assert!(reasoning_effort.supports_response());
+        assert!(reasoning_effort.can_think());
+        assert_eq!(
+            reasoning_effort.reasoning_effort_levels(),
+            &["low".to_string(), "medium".to_string(), "high".to_string()]
+        );
 
-    #[test]
-    fn test_model_reasoning_effort_levels() {
-        let json = r#"{
-            "data": [{
-                "billing": { "is_premium": true, "multiplier": 1 },
-                "capabilities": {
-                    "family": "gemini-3",
-                    "limits": { "max_context_window_tokens": 128000, "max_output_tokens": 8192 },
-                    "supports": {
-                        "streaming": true,
-                        "tool_calls": true,
-                        "reasoning_effort": ["low", "medium", "high"]
-                    },
-                    "type": "chat"
-                },
-                "id": "gemini-3-pro",
-                "is_chat_default": false,
-                "is_chat_fallback": false,
-                "model_picker_enabled": true,
-                "name": "Gemini 3 Pro",
-                "vendor": "Google",
-                "supported_endpoints": ["/chat/completions"]
-            }]
-        }"#;
+        let xai = &schema.data[4];
+        assert_eq!(xai.vendor(), ModelVendor::XAI);
 
-        let schema: ModelSchema = serde_json::from_str(json).unwrap();
-        let model = &schema.data[0];
-
-        assert!(model.can_think());
-        let levels = model.reasoning_effort_levels();
-        assert_eq!(levels.len(), 3);
-        assert!(levels.contains(&"low".to_string()));
-        assert!(levels.contains(&"medium".to_string()));
-        assert!(levels.contains(&"high".to_string()));
+        let unknown = &schema.data[5];
+        assert_eq!(unknown.vendor(), ModelVendor::Unknown);
+        assert_eq!(
+            unknown.supported_endpoints,
+            vec![ModelSupportedEndpoint::Unknown]
+        );
+        assert!(!unknown.supports_messages());
+        assert!(!unknown.supports_response());
     }
 }

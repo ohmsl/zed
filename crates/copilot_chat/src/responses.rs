@@ -473,8 +473,6 @@ mod tests {
         assert_eq!(json[0], "reasoning.encrypted_content");
     }
 
-    // --- Error handling tests (Phase 3) ---
-
     #[test]
     fn test_stream_event_generic_error_parsing() {
         let json = r#"{
