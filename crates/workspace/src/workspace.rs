@@ -4838,7 +4838,7 @@ impl Workspace {
                 self.open_shared_screen(participant_id, window, cx);
             }
         } else if !participant_is_sharing && spotlighted_peer == Some(participant_id) {
-            let was_viewing_spotlighted =
+            let was_viewing_spotlighted_peer =
                 self.is_active_item_shared_screen_for_peer(participant_id, cx);
 
             let next_peer = self
@@ -4857,8 +4857,8 @@ impl Workspace {
                         pane.add_item_inner(
                             Box::new(shared_screen),
                             false,
-                            was_viewing_spotlighted,
-                            was_viewing_spotlighted,
+                            was_viewing_spotlighted_peer,
+                            was_viewing_spotlighted_peer,
                             None,
                             window,
                             cx,
