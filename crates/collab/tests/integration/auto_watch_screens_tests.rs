@@ -1,14 +1,14 @@
 use crate::TestServer;
 use call::ActiveCall;
-use gpui::{BackgroundExecutor, Entity, TestAppContext, TestScreenCaptureSource};
+use gpui::{App, BackgroundExecutor, Entity, TestAppContext, TestScreenCaptureSource};
 use project::Project;
 use serde_json::json;
-use util::path;
-use workspace::{Item as _, SharedScreen};
+use util::{path, rel_path::rel_path};
+use workspace::{Item as _, SharedScreen, Workspace};
 
 use super::TestClient;
 
-fn assert_active_item(workspace: &workspace::Workspace, expected_title: &str, cx: &gpui::App) {
+fn assert_active_item(workspace: &Workspace, expected_title: &str, cx: &App) {
     let active_item = workspace.active_item(cx).expect("no active item");
     assert_eq!(
         active_item.tab_content_text(0, cx),
@@ -237,13 +237,7 @@ async fn test_auto_watch_does_not_steal_focus_when_viewing_other_tab(
 
     let editor_a = workspace_a
         .update_in(cx_a, |workspace, window, cx| {
-            workspace.open_path(
-                (worktree_id, util::rel_path::rel_path("file.txt")),
-                None,
-                true,
-                window,
-                cx,
-            )
+            workspace.open_path((worktree_id, rel_path("file.txt")), None, true, window, cx)
         })
         .await
         .unwrap();
