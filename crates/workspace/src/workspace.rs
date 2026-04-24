@@ -6581,14 +6581,13 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match event {
-            ActiveCallEvent::ParticipantLocationChanged { participant_id }
-            | ActiveCallEvent::RemoteVideoTracksChanged { participant_id } => {
+            ActiveCallEvent::ParticipantLocationChanged { participant_id } => {
                 self.leader_updated(participant_id, window, cx);
             }
-        }
-
-        if let ActiveCallEvent::RemoteVideoTracksChanged { participant_id } = event {
-            self.handle_auto_watch_video_tracks_changed(*participant_id, window, cx);
+            ActiveCallEvent::RemoteVideoTracksChanged { participant_id } => {
+                self.leader_updated(participant_id, window, cx);
+                self.handle_auto_watch_video_tracks_changed(*participant_id, window, cx);
+            }
         }
     }
 
