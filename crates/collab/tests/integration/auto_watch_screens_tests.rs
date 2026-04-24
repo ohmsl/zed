@@ -92,7 +92,7 @@ async fn setup_auto_watch_test(
 }
 
 #[gpui::test]
-async fn test_auto_watch_opens_first_available_share(
+async fn test_auto_watch_opens_existing_share_on_toggle(
     executor: BackgroundExecutor,
     cx_a: &mut TestAppContext,
     cx_b: &mut TestAppContext,
@@ -117,7 +117,7 @@ async fn test_auto_watch_opens_first_available_share(
 }
 
 #[gpui::test]
-async fn test_auto_watch_opens_share_when_waiting(
+async fn test_auto_watch_opens_share_when_no_one_is_sharing_yet(
     executor: BackgroundExecutor,
     cx_a: &mut TestAppContext,
     cx_b: &mut TestAppContext,
@@ -143,7 +143,7 @@ async fn test_auto_watch_opens_share_when_waiting(
 }
 
 #[gpui::test]
-async fn test_auto_watch_switches_on_share_end(
+async fn test_auto_watch_switches_to_next_share_on_share_end(
     executor: BackgroundExecutor,
     cx_a: &mut TestAppContext,
     cx_b: &mut TestAppContext,
