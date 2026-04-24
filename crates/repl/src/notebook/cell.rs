@@ -663,7 +663,9 @@ pub struct CodeCell {
 impl EventEmitter<CellEvent> for CodeCell {}
 
 pub(super) enum CellSource {
-    New,
+    /// Crate a new empty cell
+    None,
+    /// Backed by an existing notebook cell
     Existing {
         execution_count: Option<i32>,
         outputs: Vec<Output>,
@@ -671,7 +673,6 @@ pub(super) enum CellSource {
 }
 
 impl CodeCell {
-    /// Load a code cell from notebook file data, including existing outputs and execution count
     pub(super) fn new(
         cell_source: CellSource,
         id: CellId,
@@ -727,7 +728,7 @@ impl CodeCell {
                 execution_count,
                 outputs,
             } => (execution_count, outputs),
-            CellSource::New => Default::default(),
+            CellSource::None => Default::default(),
         };
 
         Self {
