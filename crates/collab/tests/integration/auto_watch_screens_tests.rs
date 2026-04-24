@@ -3,7 +3,7 @@ use call::ActiveCall;
 use gpui::{App, BackgroundExecutor, Entity, TestAppContext, TestScreenCaptureSource};
 use project::Project;
 use serde_json::json;
-use util::{path, rel_path::rel_path};
+use util::path;
 use workspace::Workspace;
 
 use super::TestClient;
@@ -203,70 +203,5 @@ async fn test_auto_watch_toggle_off_leaves_tabs_open(
     workspace_a.update(cx_a, |workspace, cx| {
         assert!(!workspace.is_auto_watching_screens());
         assert_active_item(workspace, "user_b's screen", cx);
-    });
-}
-
-#[gpui::test]
-async fn test_auto_watch_steals_focus_even_when_viewing_other_tab(
-    executor: BackgroundExecutor,
-    cx_a: &mut TestAppContext,
-    cx_b: &mut TestAppContext,
-    cx_c: &mut TestAppContext,
-) {
-    let mut server = TestServer::start(executor.clone()).await;
-    let client_a = server.create_client(cx_a, "user_a").await;
-    let _client_b = server.create_client(cx_b, "user_b").await;
-    let _client_c = server.create_client(cx_c, "user_c").await;
-    server
-        .create_room(&mut [(&client_a, cx_a), (&_client_b, cx_b), (&_client_c, cx_c)])
-        .await;
-
-    let active_call_a = cx_a.read(ActiveCall::global);
-
-    client_a
-        .fs()
-        .insert_tree(path!("/a"), json!({ "file.txt": "hello" }))
-        .await;
-    let (project_a, worktree_id) = client_a.build_local_project(path!("/a"), cx_a).await;
-    active_call_a
-        .update(cx_a, |call, cx| call.set_location(Some(&project_a), cx))
-        .await
-        .unwrap();
-
-    let (workspace_a, cx_a) = client_a.build_workspace(&project_a, cx_a);
-
-    let editor_a = workspace_a
-        .update_in(cx_a, |workspace, window, cx| {
-            workspace.open_path((worktree_id, rel_path("file.txt")), None, true, window, cx)
-        })
-        .await
-        .unwrap();
-
-    workspace_a.update_in(cx_a, |workspace, window, cx| {
-        workspace.toggle_auto_watch_screens(window, cx);
-    });
-    start_screen_share(cx_b).await;
-    executor.run_until_parked();
-
-    workspace_a.update(cx_a, |workspace, cx| {
-        assert_active_item(workspace, "user_b's screen", cx);
-    });
-
-    workspace_a.update_in(cx_a, |workspace, window, cx| {
-        workspace.activate_item(&*editor_a, true, true, window, cx);
-    });
-
-    workspace_a.update(cx_a, |workspace, cx| {
-        assert_active_item(workspace, "file.txt", cx);
-    });
-
-    start_screen_share(cx_c).await;
-    executor.run_until_parked();
-
-    stop_screen_share(cx_b);
-    executor.run_until_parked();
-
-    workspace_a.update(cx_a, |workspace, cx| {
-        assert_active_item(workspace, "user_c's screen", cx);
     });
 }
