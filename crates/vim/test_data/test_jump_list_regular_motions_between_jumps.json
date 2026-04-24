@@ -1,0 +1,12 @@
+{"Put":{"state":"ˇfn a() { }\n\nfn b() { }\n\nfn b() { }"}}
+{"Key":"3"}
+{"Key":"}"}
+{"Get":{"state":"fn a() { }\n\nfn b() { }\n\nfn b() { ˇ}","mode":"Normal"}}
+{"Key":"2l"}
+{"Get":{"state":"fn a() { }\n\nfn b() { }\n\nfn b() { ˇ}","mode":"Normal"}}
+{"Key":"ctrl-o"}
+{"Get":{"state":"ˇfn a() { }\n\nfn b() { }\n\nfn b() { }","mode":"Normal"}}
+{"Key":"4d"}
+{"Get":{"state":"ˇfn a() { }\n\nfn b() { }\n\nfn b() { }","mode":"Normal"}}
+{"Key":"ctrl-i"}
+{"Get":{"state":"fn a() { }\n\nfn b() { }\n\nfn b() { ˇ}","mode":"Normal"}}

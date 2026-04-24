@@ -268,6 +268,15 @@ impl NeovimBackedTestContext {
         self.simulate_keystrokes(keystroke_texts);
     }
 
+    /// Run multiple sequences of keystrokes, asserting that both states remain
+    /// in-sync between every sequence.
+    pub async fn simulate_and_assert_matches(&mut self, sequences: impl IntoIterator<Item = &str>) {
+        for sequence in sequences {
+            self.simulate_shared_keystrokes(sequence).await;
+            self.shared_state().await.assert_matches();
+        }
+    }
+
     #[must_use]
     pub async fn simulate(&mut self, keystrokes: &str, initial_state: &str) -> SharedState {
         self.set_shared_state(initial_state).await;

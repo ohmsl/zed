@@ -2287,6 +2287,64 @@ mod test {
     }
 
     #[gpui::test]
+    async fn test_jump_list_regular_motions(cx: &mut gpui::TestAppContext) {
+        let mut cx = NeovimBackedTestContext::new(cx).await;
+
+        cx.set_shared_state(indoc! {"
+            ˇ
+            fn a() { }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+            
+
+            fn b() { }
+
+            fn b() { }"})
+            .await;
+        
+        cx.simulate_and_assert_matches(["gg", "20j", "ctrl-o"])
+            .await;
+
+    }
+
+    #[gpui::test]
+    async fn test_jump_list_regular_motions_between_jumps(cx: &mut gpui::TestAppContext) {
+        let mut cx = NeovimBackedTestContext::new(cx).await;
+
+        cx.set_shared_state(indoc! {"
+            ˇfn a() { }
+
+            fn b() { }
+
+            fn b() { }"})
+            .await;
+
+        cx.simulate_and_assert_matches(["3 }", "2l", "ctrl-o", "4d", "ctrl-i"])
+            .await;
+    }
+
+    #[gpui::test]
     async fn test_undo_last_line(cx: &mut gpui::TestAppContext) {
         let mut cx = NeovimBackedTestContext::new(cx).await;
 

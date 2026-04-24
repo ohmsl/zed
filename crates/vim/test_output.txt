@@ -1,0 +1,115 @@
+
+running 3 tests
+test normal::test::test_jump_list_regular_motions ... FAILED
+test normal::test::test_jump_list_regular_motions_between_jumps ... ok
+test normal::test::test_jump_list ... ok
+
+failures:
+
+---- normal::test::test_jump_list_regular_motions stdout ----
+
+thread 'normal::test::test_jump_list_regular_motions' (356219) panicked at crates/vim/src/test/neovim_backed_test_context.rs:276:39:
+Test failed (zed does not match nvim behavior)
+# initial state:
+ˇ
+fn a() { }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+fn b() { }
+
+fn b() { }
+# keystrokes:
+gg 20j ctrl-o
+# neovim (NORMAL):
+ˇ
+fn a() { }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+fn b() { }
+
+fn b() { }
+# zed (NORMAL):
+
+fn a() { }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+fn b() { }
+
+fn b() { }ˇ
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    normal::test::test_jump_list_regular_motions
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 496 filtered out; finished in 0.50s
+
