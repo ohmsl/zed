@@ -113,6 +113,21 @@ pub enum ExternalAgentSource {
     Registry,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalAgentSurface {
+    Acp,
+    Terminal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExternalAgentTerminalRequest {
+    NewSession { session_id: SharedString },
+    ResumeSession { session_id: SharedString },
+}
+
+const CLAUDE_EXTERNAL_AGENT_ID: &str = "claude-acp";
+const CLAUDE_CLI_COMMAND: &str = "claude";
+
 pub trait ExternalAgentServer {
     fn get_command(
         &self,
@@ -120,6 +135,19 @@ pub trait ExternalAgentServer {
         extra_env: HashMap<String, String>,
         cx: &mut AsyncApp,
     ) -> Task<Result<AgentServerCommand>>;
+
+    fn supports_surface(&self, surface: ExternalAgentSurface) -> bool {
+        matches!(surface, ExternalAgentSurface::Acp)
+    }
+
+    fn get_terminal_command(
+        &self,
+        _request: ExternalAgentTerminalRequest,
+        _extra_env: HashMap<String, String>,
+        cx: &mut AsyncApp,
+    ) -> Task<Result<AgentServerCommand>> {
+        cx.spawn(async |_| anyhow::bail!("external agent does not support terminal launch"))
+    }
 
     fn version(&self) -> Option<&SharedString> {
         None
@@ -367,6 +395,24 @@ pub fn resolve_extension_icon_path(
 }
 
 impl AgentServerStore {
+    pub fn agent_supports_surface(&self, name: &AgentId, surface: ExternalAgentSurface) -> bool {
+        self.external_agents
+            .get(name)
+            .is_some_and(|entry| entry.server.supports_surface(surface))
+    }
+
+    pub fn terminal_command(
+        &mut self,
+        name: &AgentId,
+        request: ExternalAgentTerminalRequest,
+        extra_env: HashMap<String, String>,
+        cx: &mut AsyncApp,
+    ) -> Option<Task<Result<AgentServerCommand>>> {
+        self.external_agents
+            .get_mut(name)
+            .map(|entry| entry.server.get_terminal_command(request, extra_env, cx))
+    }
+
     pub fn agent_display_name(&self, name: &AgentId) -> Option<SharedString> {
         self.external_agents
             .get(name)
@@ -1512,9 +1558,95 @@ struct LocalRegistryNpxAgent {
     new_version_available_tx: Option<watch::Sender<Option<String>>>,
 }
 
+async fn build_local_registry_npx_command(
+    fs: Arc<dyn Fs>,
+    node_runtime: NodeRuntime,
+    project_environment: gpui::WeakEntity<ProjectEnvironment>,
+    registry_id: Arc<str>,
+    package: SharedString,
+    package_args: Vec<String>,
+    distribution_env: HashMap<String, String>,
+    settings_env: HashMap<String, String>,
+    extra_args: Vec<String>,
+    extra_env: HashMap<String, String>,
+    cx: &mut AsyncApp,
+) -> Result<AgentServerCommand> {
+    let mut env = project_environment
+        .update(cx, |project_environment, cx| {
+            project_environment.default_environment(cx)
+        })?
+        .await
+        .unwrap_or_default();
+
+    let prefix_dir = paths::external_agents_dir()
+        .join("registry")
+        .join("npx")
+        .join(sanitize_path_component(&registry_id));
+    fs.create_dir(&prefix_dir).await?;
+
+    let mut exec_args = vec!["--yes".to_string(), "--".to_string(), package.to_string()];
+    exec_args.extend(package_args);
+
+    let npm_command = node_runtime
+        .npm_command(
+            Some(&prefix_dir),
+            "exec",
+            &exec_args.iter().map(|arg| arg.as_str()).collect::<Vec<_>>(),
+        )
+        .await?;
+
+    env.extend(npm_command.env);
+    env.extend(distribution_env);
+    env.extend(extra_env);
+    env.extend(settings_env);
+
+    let mut args = npm_command.args;
+    args.extend(extra_args);
+
+    Ok(AgentServerCommand {
+        path: npm_command.path,
+        args,
+        env: Some(env),
+    })
+}
+
+fn build_claude_terminal_args(request: ExternalAgentTerminalRequest) -> Vec<String> {
+    match request {
+        ExternalAgentTerminalRequest::NewSession { session_id } => {
+            vec!["--session-id".to_string(), session_id.to_string()]
+        }
+        ExternalAgentTerminalRequest::ResumeSession { session_id } => {
+            vec!["--resume".to_string(), session_id.to_string()]
+        }
+    }
+}
+
+fn build_claude_terminal_command(
+    mut env: HashMap<String, String>,
+    settings_env: HashMap<String, String>,
+    extra_env: HashMap<String, String>,
+    request: ExternalAgentTerminalRequest,
+) -> AgentServerCommand {
+    env.extend(extra_env);
+    env.extend(settings_env);
+
+    AgentServerCommand {
+        path: PathBuf::from(CLAUDE_CLI_COMMAND),
+        args: build_claude_terminal_args(request),
+        env: Some(env),
+    }
+}
+
 impl ExternalAgentServer for LocalRegistryNpxAgent {
     fn version(&self) -> Option<&SharedString> {
         Some(&self.version)
+    }
+
+    fn supports_surface(&self, surface: ExternalAgentSurface) -> bool {
+        match surface {
+            ExternalAgentSurface::Acp => true,
+            ExternalAgentSurface::Terminal => self.registry_id.as_ref() == CLAUDE_EXTERNAL_AGENT_ID,
+        }
     }
 
     fn take_new_version_available_tx(&mut self) -> Option<watch::Sender<Option<String>>> {
@@ -1541,45 +1673,53 @@ impl ExternalAgentServer for LocalRegistryNpxAgent {
         let settings_env = self.settings_env.clone();
 
         cx.spawn(async move |cx| {
-            let mut env = project_environment
+            build_local_registry_npx_command(
+                fs,
+                node_runtime,
+                project_environment,
+                registry_id,
+                package,
+                args,
+                distribution_env,
+                settings_env,
+                extra_args,
+                extra_env,
+                cx,
+            )
+            .await
+        })
+    }
+
+    fn get_terminal_command(
+        &self,
+        request: ExternalAgentTerminalRequest,
+        extra_env: HashMap<String, String>,
+        cx: &mut AsyncApp,
+    ) -> Task<Result<AgentServerCommand>> {
+        let project_environment = self.project_environment.downgrade();
+        let registry_id = self.registry_id.clone();
+        let settings_env = self.settings_env.clone();
+
+        cx.spawn(async move |cx| {
+            anyhow::ensure!(
+                registry_id.as_ref() == CLAUDE_EXTERNAL_AGENT_ID,
+                "terminal launch unsupported for registry agent `{}`",
+                registry_id,
+            );
+
+            let env = project_environment
                 .update(cx, |project_environment, cx| {
                     project_environment.default_environment(cx)
                 })?
                 .await
                 .unwrap_or_default();
 
-            let prefix_dir = paths::external_agents_dir()
-                .join("registry")
-                .join("npx")
-                .join(sanitize_path_component(&registry_id));
-            fs.create_dir(&prefix_dir).await?;
-
-            let mut exec_args = vec!["--yes".to_string(), "--".to_string(), package.to_string()];
-            exec_args.extend(args);
-
-            let npm_command = node_runtime
-                .npm_command(
-                    Some(&prefix_dir),
-                    "exec",
-                    &exec_args.iter().map(|a| a.as_str()).collect::<Vec<_>>(),
-                )
-                .await?;
-
-            env.extend(npm_command.env);
-            env.extend(distribution_env);
-            env.extend(extra_env);
-            env.extend(settings_env);
-
-            let mut args = npm_command.args;
-            args.extend(extra_args);
-
-            let command = AgentServerCommand {
-                path: npm_command.path,
-                args,
-                env: Some(env),
-            };
-
-            Ok(command)
+            Ok(build_claude_terminal_command(
+                env,
+                settings_env,
+                extra_env,
+                request,
+            ))
         })
     }
 
@@ -1994,6 +2134,65 @@ mod tests {
                 )
             })
         })
+    }
+
+    #[test]
+    fn builds_claude_terminal_command_for_new_sessions() {
+        let command = build_claude_terminal_command(
+            vec![
+                ("PATH".to_string(), "/usr/bin".to_string()),
+                ("SHARED".to_string(), "project".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            vec![
+                ("CLAUDE_CONFIG_DIR".to_string(), "/tmp/claude".to_string()),
+                ("SHARED".to_string(), "settings".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            vec![
+                ("EXTRA".to_string(), "1".to_string()),
+                ("SHARED".to_string(), "extra".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            ExternalAgentTerminalRequest::NewSession {
+                session_id: SharedString::from("session-123"),
+            },
+        );
+
+        assert_eq!(command.path, PathBuf::from(CLAUDE_CLI_COMMAND));
+        assert_eq!(
+            command.args,
+            vec!["--session-id".to_string(), "session-123".to_string()]
+        );
+        let env = command.env.expect("terminal command should include env");
+        assert_eq!(env.get("PATH"), Some(&"/usr/bin".to_string()));
+        assert_eq!(env.get("EXTRA"), Some(&"1".to_string()));
+        assert_eq!(
+            env.get("CLAUDE_CONFIG_DIR"),
+            Some(&"/tmp/claude".to_string())
+        );
+        assert_eq!(env.get("SHARED"), Some(&"settings".to_string()));
+    }
+
+    #[test]
+    fn builds_claude_terminal_command_for_resumed_sessions() {
+        let command = build_claude_terminal_command(
+            HashMap::default(),
+            HashMap::default(),
+            HashMap::default(),
+            ExternalAgentTerminalRequest::ResumeSession {
+                session_id: SharedString::from("session-456"),
+            },
+        );
+
+        assert_eq!(command.path, PathBuf::from(CLAUDE_CLI_COMMAND));
+        assert_eq!(
+            command.args,
+            vec!["--resume".to_string(), "session-456".to_string()]
+        );
     }
 
     #[test]

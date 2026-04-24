@@ -28,7 +28,7 @@ use ui::{App, Context, SharedString, ThreadItemWorktreeInfo, WorktreeKind};
 use util::{ResultExt as _, debug_panic};
 use workspace::{PathList, SerializedWorkspaceLocation, WorkspaceDb};
 
-use crate::DEFAULT_THREAD_TITLE;
+use crate::{AgentThreadSurface, DEFAULT_THREAD_TITLE};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ThreadId(uuid::Uuid);
@@ -100,7 +100,7 @@ fn migrate_thread_metadata(cx: &mut App) -> Task<anyhow::Result<()>> {
         let is_first_migration = existing_list.is_empty();
         let existing_session_ids: HashSet<Arc<str>> = existing_list
             .into_iter()
-            .filter_map(|m| m.session_id.map(|s| s.0))
+            .filter_map(|m| m.agent_session_id.map(|s| Arc::<str>::from(s.as_ref())))
             .collect();
 
         let mut to_migrate = store.read_with(cx, |_store, cx| {
@@ -114,7 +114,9 @@ fn migrate_thread_metadata(cx: &mut App) -> Task<anyhow::Result<()>> {
 
                     Some(ThreadMetadata {
                         thread_id: ThreadId::new(),
-                        session_id: Some(entry.id),
+                        surface: AgentThreadSurface::Acp,
+                        session_id: Some(entry.id.clone()),
+                        agent_session_id: Some(entry.id.0.to_string().into()),
                         agent_id: ZED_AGENT_ID.clone(),
                         title: if entry.title.is_empty()
                             || entry.title.as_ref() == DEFAULT_THREAD_TITLE
@@ -285,12 +287,14 @@ fn migrate_thread_ids(cx: &mut App) {
 struct GlobalThreadMetadataStore(Entity<ThreadMetadataStore>);
 impl Global for GlobalThreadMetadataStore {}
 
-/// Lightweight metadata for any thread (native or ACP), enough to populate
+/// Lightweight metadata for any thread (native, ACP, or terminal-backed), enough to populate
 /// the sidebar list and route to the correct load path when clicked.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThreadMetadata {
     pub thread_id: ThreadId,
+    pub surface: AgentThreadSurface,
     pub session_id: Option<acp::SessionId>,
+    pub agent_session_id: Option<SharedString>,
     pub agent_id: AgentId,
     pub title: Option<SharedString>,
     pub updated_at: DateTime<Utc>,
@@ -313,8 +317,19 @@ impl ThreadMetadata {
     pub fn folder_paths(&self) -> &PathList {
         self.worktree_paths.folder_path_list()
     }
+
     pub fn main_worktree_paths(&self) -> &PathList {
         self.worktree_paths.main_worktree_path_list()
+    }
+
+    pub fn acp_session_id(&self) -> Option<&acp::SessionId> {
+        (self.surface == AgentThreadSurface::Acp)
+            .then_some(self.session_id.as_ref())
+            .flatten()
+    }
+
+    pub fn agent_session_id_str(&self) -> Option<&str> {
+        self.agent_session_id.as_deref().map(|id| id.as_ref())
     }
 }
 
@@ -393,8 +408,8 @@ pub fn worktree_info_from_thread_paths<S: std::hash::BuildHasher>(
 impl From<&ThreadMetadata> for acp_thread::AgentSessionInfo {
     fn from(meta: &ThreadMetadata) -> Self {
         let session_id = meta
-            .session_id
-            .clone()
+            .acp_session_id()
+            .cloned()
             .unwrap_or_else(|| acp::SessionId::new(meta.thread_id.0.to_string()));
         Self {
             session_id,
@@ -458,6 +473,7 @@ pub struct ThreadMetadataStore {
     threads_by_paths: HashMap<PathList, HashSet<ThreadId>>,
     threads_by_main_paths: HashMap<PathList, HashSet<ThreadId>>,
     threads_by_session: HashMap<acp::SessionId, ThreadId>,
+    threads_by_agent_session: HashMap<(AgentId, AgentThreadSurface, SharedString), ThreadId>,
     reload_task: Option<Shared<Task<()>>>,
     conversation_subscriptions: HashMap<gpui::EntityId, Subscription>,
     pending_thread_ops_tx: smol::channel::Sender<DbOperation>,
@@ -551,6 +567,20 @@ impl ThreadMetadataStore {
         self.threads.get(thread_id)
     }
 
+    pub fn entry_by_agent_session(
+        &self,
+        agent_id: &AgentId,
+        surface: AgentThreadSurface,
+        agent_session_id: &str,
+    ) -> Option<&ThreadMetadata> {
+        let thread_id = self.threads_by_agent_session.get(&(
+            agent_id.clone(),
+            surface,
+            SharedString::from(agent_session_id.to_string()),
+        ))?;
+        self.threads.get(thread_id)
+    }
+
     /// Returns all threads.
     pub fn entries(&self) -> impl Iterator<Item = &ThreadMetadata> + '_ {
         self.threads.values()
@@ -625,6 +655,7 @@ impl ThreadMetadataStore {
                     this.threads_by_paths.clear();
                     this.threads_by_main_paths.clear();
                     this.threads_by_session.clear();
+                    this.threads_by_agent_session.clear();
 
                     for row in rows {
                         this.cache_thread_metadata(row);
@@ -652,12 +683,31 @@ impl ThreadMetadataStore {
     }
 
     fn save_internal(&mut self, metadata: ThreadMetadata) {
-        if metadata.session_id.is_none() {
-            debug_panic!("cannot store thread metadata without a session_id");
+        if metadata.agent_session_id.is_none() {
+            debug_panic!("cannot store thread metadata without an agent_session_id");
             return;
-        };
+        }
+
+        if metadata.surface == AgentThreadSurface::Acp && metadata.session_id.is_none() {
+            debug_panic!("cannot store ACP thread metadata without a session_id");
+            return;
+        }
 
         if let Some(thread) = self.threads.get(&metadata.thread_id) {
+            if let Some(session_id) = thread.acp_session_id()
+                && metadata.acp_session_id() != Some(session_id)
+            {
+                self.threads_by_session.remove(session_id);
+            }
+            if let Some(agent_session_id) = thread.agent_session_id.clone()
+                && metadata.agent_session_id.as_ref() != Some(&agent_session_id)
+            {
+                self.threads_by_agent_session.remove(&(
+                    thread.agent_id.clone(),
+                    thread.surface,
+                    agent_session_id,
+                ));
+            }
             if thread.folder_paths() != metadata.folder_paths() {
                 if let Some(thread_ids) = self.threads_by_paths.get_mut(thread.folder_paths()) {
                     thread_ids.remove(&metadata.thread_id);
@@ -682,13 +732,21 @@ impl ThreadMetadataStore {
     }
 
     fn cache_thread_metadata(&mut self, metadata: ThreadMetadata) {
-        let Some(session_id) = metadata.session_id.as_ref() else {
-            debug_panic!("cannot store thread metadata without a session_id");
-            return;
-        };
+        if let Some(session_id) = metadata.acp_session_id() {
+            self.threads_by_session
+                .insert(session_id.clone(), metadata.thread_id);
+        }
 
-        self.threads_by_session
-            .insert(session_id.clone(), metadata.thread_id);
+        if let Some(agent_session_id) = metadata.agent_session_id.clone() {
+            self.threads_by_agent_session.insert(
+                (
+                    metadata.agent_id.clone(),
+                    metadata.surface,
+                    agent_session_id,
+                ),
+                metadata.thread_id,
+            );
+        }
 
         self.threads.insert(metadata.thread_id, metadata.clone());
 
@@ -1047,8 +1105,15 @@ impl ThreadMetadataStore {
 
     pub fn delete(&mut self, thread_id: ThreadId, cx: &mut Context<Self>) {
         if let Some(thread) = self.threads.get(&thread_id) {
-            if let Some(sid) = &thread.session_id {
+            if let Some(sid) = thread.acp_session_id() {
                 self.threads_by_session.remove(sid);
+            }
+            if let Some(agent_session_id) = thread.agent_session_id.clone() {
+                self.threads_by_agent_session.remove(&(
+                    thread.agent_id.clone(),
+                    thread.surface,
+                    agent_session_id,
+                ));
             }
             if let Some(thread_ids) = self.threads_by_paths.get_mut(thread.folder_paths()) {
                 thread_ids.remove(&thread_id);
@@ -1128,6 +1193,7 @@ impl ThreadMetadataStore {
             threads_by_paths: HashMap::default(),
             threads_by_main_paths: HashMap::default(),
             threads_by_session: HashMap::default(),
+            threads_by_agent_session: HashMap::default(),
             reload_task: None,
             conversation_subscriptions: HashMap::default(),
             pending_thread_ops_tx: tx,
@@ -1211,7 +1277,9 @@ impl ThreadMetadataStore {
 
         let metadata = ThreadMetadata {
             thread_id,
-            session_id,
+            surface: AgentThreadSurface::Acp,
+            session_id: session_id.clone(),
+            agent_session_id: session_id.map(|id| id.0.to_string().into()),
             agent_id,
             title,
             created_at: Some(created_at),
@@ -1322,6 +1390,16 @@ impl Domain for ThreadMetadataDb {
         sql!(
             ALTER TABLE sidebar_threads ADD COLUMN interacted_at TEXT;
         ),
+        sql!(
+            ALTER TABLE sidebar_threads ADD COLUMN surface TEXT NOT NULL DEFAULT "acp";
+        ),
+        sql!(
+            ALTER TABLE sidebar_threads ADD COLUMN agent_session_id TEXT;
+
+            UPDATE sidebar_threads
+            SET agent_session_id = COALESCE(agent_session_id, session_id)
+            WHERE session_id IS NOT NULL;
+        ),
     ];
 }
 
@@ -1332,21 +1410,21 @@ impl ThreadMetadataDb {
     pub fn list_ids(&self) -> anyhow::Result<Vec<ThreadId>> {
         self.select::<ThreadId>(
             "SELECT thread_id FROM sidebar_threads \
-             WHERE session_id IS NOT NULL \
+             WHERE agent_session_id IS NOT NULL \
              ORDER BY updated_at DESC",
         )?()
     }
 
-    const LIST_QUERY: &str = "SELECT thread_id, session_id, agent_id, title, updated_at, \
+    const LIST_QUERY: &str = "SELECT thread_id, surface, session_id, agent_session_id, agent_id, title, updated_at, \
         created_at, interacted_at, folder_paths, folder_paths_order, archived, main_worktree_paths, \
         main_worktree_paths_order, remote_connection \
         FROM sidebar_threads \
-        WHERE session_id IS NOT NULL \
+        WHERE agent_session_id IS NOT NULL \
         ORDER BY updated_at DESC";
 
     /// List all sidebar thread metadata, ordered by updated_at descending.
     ///
-    /// Only returns threads that have a `session_id`.
+    /// Only returns threads that have a stored external agent session identifier.
     pub fn list(&self) -> anyhow::Result<Vec<ThreadMetadata>> {
         self.select::<ThreadMetadata>(Self::LIST_QUERY)?()
     }
@@ -1354,11 +1432,20 @@ impl ThreadMetadataDb {
     /// Upsert metadata for a thread.
     pub async fn save(&self, row: ThreadMetadata) -> anyhow::Result<()> {
         anyhow::ensure!(
-            row.session_id.is_some(),
-            "refusing to persist thread metadata without a session_id"
+            row.agent_session_id.is_some(),
+            "refusing to persist thread metadata without an agent_session_id"
+        );
+        anyhow::ensure!(
+            row.surface != AgentThreadSurface::Acp || row.session_id.is_some(),
+            "refusing to persist ACP thread metadata without a session_id"
         );
 
+        let surface = match row.surface {
+            AgentThreadSurface::Acp => "acp",
+            AgentThreadSurface::Terminal => "terminal",
+        };
         let session_id = row.session_id.as_ref().map(|s| s.0.clone());
+        let agent_session_id = row.agent_session_id.as_ref().map(|s| s.to_string());
         let agent_id = if row.agent_id.as_ref() == ZED_AGENT_ID.as_ref() {
             None
         } else {
@@ -1395,10 +1482,12 @@ impl ThreadMetadataDb {
         let archived = row.archived;
 
         self.write(move |conn| {
-            let sql = "INSERT INTO sidebar_threads(thread_id, session_id, agent_id, title, updated_at, created_at, interacted_at, folder_paths, folder_paths_order, archived, main_worktree_paths, main_worktree_paths_order, remote_connection) \
-                       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
+            let sql = "INSERT INTO sidebar_threads(thread_id, surface, session_id, agent_session_id, agent_id, title, updated_at, created_at, interacted_at, folder_paths, folder_paths_order, archived, main_worktree_paths, main_worktree_paths_order, remote_connection) \
+                       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
                        ON CONFLICT(thread_id) DO UPDATE SET \
+                           surface = excluded.surface, \
                            session_id = excluded.session_id, \
+                           agent_session_id = excluded.agent_session_id, \
                            agent_id = excluded.agent_id, \
                            title = excluded.title, \
                            updated_at = excluded.updated_at, \
@@ -1412,7 +1501,9 @@ impl ThreadMetadataDb {
                            remote_connection = excluded.remote_connection";
             let mut stmt = Statement::prepare(conn, sql)?;
             let mut i = stmt.bind(&thread_id, 1)?;
+            i = stmt.bind(&surface, i)?;
             i = stmt.bind(&session_id, i)?;
+            i = stmt.bind(&agent_session_id, i)?;
             i = stmt.bind(&agent_id, i)?;
             i = stmt.bind(&title, i)?;
             i = stmt.bind(&updated_at, i)?;
@@ -1564,7 +1655,9 @@ impl ThreadMetadataDb {
 impl Column for ThreadMetadata {
     fn column(statement: &mut Statement, start_index: i32) -> anyhow::Result<(Self, i32)> {
         let (thread_id_uuid, next): (uuid::Uuid, i32) = Column::column(statement, start_index)?;
+        let (surface, next): (String, i32) = Column::column(statement, next)?;
         let (id, next): (Option<Arc<str>>, i32) = Column::column(statement, next)?;
+        let (agent_session_id, next): (Option<String>, i32) = Column::column(statement, next)?;
         let (agent_id, next): (Option<String>, i32) = Column::column(statement, next)?;
         let (title, next): (String, i32) = Column::column(statement, next)?;
         let (updated_at_str, next): (String, i32) = Column::column(statement, next)?;
@@ -1580,6 +1673,12 @@ impl Column for ThreadMetadata {
             Column::column(statement, next)?;
         let (remote_connection_json, next): (Option<String>, i32) =
             Column::column(statement, next)?;
+
+        let surface = match surface.as_str() {
+            "acp" => AgentThreadSurface::Acp,
+            "terminal" => AgentThreadSurface::Terminal,
+            other => anyhow::bail!("unknown thread surface `{other}`"),
+        };
 
         let agent_id = agent_id
             .map(|id| AgentId::new(id))
@@ -1627,10 +1726,17 @@ impl Column for ThreadMetadata {
 
         let thread_id = ThreadId(thread_id_uuid);
 
+        let session_id = id.clone().map(acp::SessionId::new);
+        let agent_session_id = agent_session_id
+            .map(Into::into)
+            .or_else(|| id.map(|id| id.to_string().into()));
+
         Ok((
             ThreadMetadata {
                 thread_id,
-                session_id: id.map(acp::SessionId::new),
+                surface,
+                session_id,
+                agent_session_id,
                 agent_id,
                 title: if title.is_empty() || title == DEFAULT_THREAD_TITLE {
                     None
@@ -1719,7 +1825,9 @@ mod tests {
         ThreadMetadata {
             thread_id: ThreadId::new(),
             archived: false,
+            surface: AgentThreadSurface::Acp,
             session_id: Some(acp::SessionId::new(session_id)),
+            agent_session_id: Some(session_id.to_string().into()),
             agent_id: agent::ZED_AGENT_ID.clone(),
             title: if title.is_empty() {
                 None
@@ -1905,7 +2013,9 @@ mod tests {
 
         let moved_metadata = ThreadMetadata {
             thread_id: session1_thread_id,
+            surface: AgentThreadSurface::Acp,
             session_id: Some(acp::SessionId::new("session-1")),
+            agent_session_id: Some("session-1".into()),
             agent_id: agent::ZED_AGENT_ID.clone(),
             title: Some("First Thread".into()),
             updated_at: updated_time,
@@ -1989,7 +2099,9 @@ mod tests {
 
         let existing_metadata = ThreadMetadata {
             thread_id: ThreadId::new(),
+            surface: AgentThreadSurface::Acp,
             session_id: Some(acp::SessionId::new("a-session-0")),
+            agent_session_id: Some("a-session-0".into()),
             agent_id: agent::ZED_AGENT_ID.clone(),
             title: Some("Existing Metadata".into()),
             updated_at: now - chrono::Duration::seconds(10),
@@ -2110,7 +2222,9 @@ mod tests {
 
         let existing_metadata = ThreadMetadata {
             thread_id: ThreadId::new(),
+            surface: AgentThreadSurface::Acp,
             session_id: Some(acp::SessionId::new("existing-session")),
+            agent_session_id: Some("existing-session".into()),
             agent_id: agent::ZED_AGENT_ID.clone(),
             title: Some("Existing Metadata".into()),
             updated_at: existing_updated_at,
@@ -2784,7 +2898,9 @@ mod tests {
         let local_linked_thread = ThreadMetadata {
             thread_id: ThreadId::new(),
             archived: false,
+            surface: AgentThreadSurface::Acp,
             session_id: Some(acp::SessionId::new("local-linked")),
+            agent_session_id: Some("local-linked".into()),
             agent_id: agent::ZED_AGENT_ID.clone(),
             title: Some("Local Linked".into()),
             updated_at: now,
@@ -2797,7 +2913,9 @@ mod tests {
         let remote_linked_thread = ThreadMetadata {
             thread_id: ThreadId::new(),
             archived: false,
+            surface: AgentThreadSurface::Acp,
             session_id: Some(acp::SessionId::new("remote-linked")),
+            agent_session_id: Some("remote-linked".into()),
             agent_id: agent::ZED_AGENT_ID.clone(),
             title: Some("Remote Linked".into()),
             updated_at: now - chrono::Duration::seconds(1),

@@ -23,6 +23,7 @@ mod mode_selector;
 mod model_selector;
 mod model_selector_popover;
 mod profile_selector;
+mod terminal_agent_view;
 mod terminal_codegen;
 mod terminal_inline_assistant;
 #[cfg(any(test, feature = "test-support"))]
@@ -242,6 +243,14 @@ pub struct ToggleCommandPattern {
 #[serde(deny_unknown_fields)]
 pub struct NewThread;
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentThreadSurface {
+    #[default]
+    Acp,
+    Terminal,
+}
+
 /// Creates a new external agent conversation thread.
 #[derive(Default, Clone, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = agent)]
@@ -249,6 +258,8 @@ pub struct NewThread;
 pub struct NewExternalAgentThread {
     /// Which agent to use for the conversation.
     agent: Option<Agent>,
+    /// Which surface to launch for the selected external agent.
+    surface: Option<AgentThreadSurface>,
 }
 
 #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]

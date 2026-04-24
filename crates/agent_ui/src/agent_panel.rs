@@ -15,7 +15,7 @@ use agent_servers::AgentServer;
 use collections::HashSet;
 use db::kvp::{Dismissable, KeyValueStore};
 use itertools::Itertools;
-use project::AgentId;
+use project::{AgentId, agent_server_store::ExternalAgentSurface};
 use serde::{Deserialize, Serialize};
 use settings::{LanguageModelProviderSetting, LanguageModelSelection};
 
@@ -33,7 +33,8 @@ use crate::DEFAULT_THREAD_TITLE;
 use crate::ExpandMessageEditor;
 use crate::ManageProfiles;
 use crate::agent_connection_store::AgentConnectionStore;
-use crate::thread_metadata_store::{ThreadId, ThreadMetadataStore};
+use crate::terminal_agent_view::TerminalAgentView;
+use crate::thread_metadata_store::{ThreadId, ThreadMetadata, ThreadMetadataStore};
 use crate::{
     AddContextServer, AgentDiffPane, ConversationView, CopyThreadToClipboard, Follow,
     InlineAssistant, LoadThreadFromClipboard, NewThread, OpenActiveThreadAsMarkdown, OpenAgentDiff,
@@ -44,7 +45,7 @@ use crate::{
     ui::EndTrialUpsell,
 };
 use crate::{
-    Agent, AgentInitialContent, ExternalSourcePrompt, NewExternalAgentThread,
+    Agent, AgentInitialContent, AgentThreadSurface, ExternalSourcePrompt, NewExternalAgentThread,
     NewNativeAgentThreadFromSummary,
 };
 use agent_settings::AgentSettings;
@@ -165,6 +166,8 @@ struct SerializedAgentPanel {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct SerializedActiveThread {
+    #[serde(default)]
+    surface: AgentThreadSurface,
     session_id: Option<String>,
     agent_type: Agent,
     title: Option<String>,
@@ -631,10 +634,17 @@ pub(crate) struct AgentThread {
     conversation_view: Entity<ConversationView>,
 }
 
+pub(crate) struct TerminalThread {
+    terminal_agent_view: Entity<TerminalAgentView>,
+}
+
 enum BaseView {
     Uninitialized,
     AgentThread {
         conversation_view: Entity<ConversationView>,
+    },
+    TerminalThread {
+        terminal_agent_view: Entity<TerminalAgentView>,
     },
 }
 
@@ -646,6 +656,14 @@ impl From<AgentThread> for BaseView {
     }
 }
 
+impl From<TerminalThread> for BaseView {
+    fn from(thread: TerminalThread) -> Self {
+        BaseView::TerminalThread {
+            terminal_agent_view: thread.terminal_agent_view,
+        }
+    }
+}
+
 enum OverlayView {
     Configuration,
 }
@@ -653,6 +671,7 @@ enum OverlayView {
 enum VisibleSurface<'a> {
     Uninitialized,
     AgentThread(&'a Entity<ConversationView>),
+    TerminalThread(&'a Entity<TerminalAgentView>),
     Configuration(Option<&'a Entity<AgentConfiguration>>),
 }
 
@@ -703,6 +722,7 @@ pub struct AgentPanel {
     new_user_onboarding: Entity<AgentPanelOnboarding>,
     new_user_onboarding_upsell_dismissed: AtomicBool,
     selected_agent: Agent,
+    selected_surface: AgentThreadSurface,
     _thread_view_subscription: Option<Subscription>,
     _active_thread_focus_subscription: Option<Subscription>,
     show_trust_workspace_message: bool,
@@ -727,6 +747,7 @@ impl AgentPanel {
                 let title = thread.title();
                 let work_dirs = thread.work_dirs().cloned();
                 SerializedActiveThread {
+                    surface: AgentThreadSurface::Acp,
                     session_id: (!is_draft_active).then(|| thread.session_id().0.to_string()),
                     agent_type: self.selected_agent.clone(),
                     title: title.map(|t| t.to_string()),
@@ -747,6 +768,10 @@ impl AgentPanel {
                 let metadata = ThreadMetadataStore::try_global(cx)
                     .and_then(|store| store.read(cx).entry_by_session(&session_id).cloned());
                 Some(SerializedActiveThread {
+                    surface: metadata
+                        .as_ref()
+                        .map(|m| m.surface)
+                        .unwrap_or(AgentThreadSurface::Acp),
                     session_id: Some(session_id.0.to_string()),
                     agent_type: self.selected_agent.clone(),
                     title: metadata
@@ -827,13 +852,16 @@ impl AgentPanel {
             {
                 match &thread_info.session_id {
                     Some(session_id_str) => {
-                        let session_id = acp::SessionId::new(session_id_str.clone());
                         let is_restorable = cx
                             .update(|_window, cx| {
                                 let store = ThreadMetadataStore::global(cx);
                                 store
                                     .read(cx)
-                                    .entry_by_session(&session_id)
+                                    .entry_by_agent_session(
+                                        &thread_info.agent_type.id(),
+                                        thread_info.surface,
+                                        session_id_str,
+                                    )
                                     .is_some_and(|entry| !entry.archived)
                             })
                             .unwrap_or(false);
@@ -881,19 +909,22 @@ impl AgentPanel {
                 if let Some(thread_info) = last_active_thread {
                     if let Some(session_id_str) = &thread_info.session_id {
                         let agent = thread_info.agent_type.clone();
-                        let session_id: acp::SessionId = session_id_str.clone().into();
                         panel.update(cx, |panel, cx| {
                             panel.selected_agent = agent.clone();
-                            panel.load_agent_thread(
-                                agent,
-                                session_id,
-                                thread_info.work_dirs.as_ref().map(|dirs| PathList::deserialize(dirs)),
-                                thread_info.title.as_ref().map(|t| t.clone().into()),
-                                false,
-                                "agent_panel",
-                                window,
-                                cx,
-                            );
+                            panel.selected_surface = thread_info.surface;
+                            let metadata = ThreadMetadataStore::global(cx)
+                                .read(cx)
+                                .entry_by_agent_session(&agent.id(), thread_info.surface, session_id_str)
+                                .cloned();
+                            if let Some(metadata) = metadata {
+                                panel.open_thread_from_metadata(
+                                    &metadata,
+                                    false,
+                                    "agent_panel",
+                                    window,
+                                    cx,
+                                );
+                            }
                         });
                     }
                 }
@@ -1049,6 +1080,7 @@ impl AgentPanel {
             new_user_onboarding: onboarding,
             thread_store,
             selected_agent: Agent::default(),
+            selected_surface: AgentThreadSurface::Acp,
             _thread_view_subscription: None,
             _active_thread_focus_subscription: None,
             show_trust_workspace_message: false,
@@ -1191,7 +1223,16 @@ impl AgentPanel {
         if let Some(agent) = action.agent.clone() {
             self.selected_agent = agent;
         }
-        self.activate_draft(true, "agent_panel", window, cx);
+        if let Some(surface) = action.surface {
+            self.selected_surface = surface;
+        }
+
+        match self.selected_surface {
+            AgentThreadSurface::Acp => self.activate_draft(true, "agent_panel", window, cx),
+            AgentThreadSurface::Terminal => {
+                self.new_terminal_thread(self.selected_agent(cx), true, "agent_panel", window, cx)
+            }
+        }
     }
 
     pub fn activate_draft(
@@ -1336,7 +1377,10 @@ impl AgentPanel {
             BaseView::AgentThread { conversation_view } => {
                 Some(conversation_view.read(cx).thread_id)
             }
-            _ => None,
+            BaseView::TerminalThread {
+                terminal_agent_view,
+            } => Some(terminal_agent_view.read(cx).thread_id()),
+            BaseView::Uninitialized => None,
         }
     }
 
@@ -2043,8 +2087,9 @@ impl AgentPanel {
     }
 
     fn retain_running_thread(&mut self, old_view: BaseView, cx: &mut Context<Self>) {
-        let BaseView::AgentThread { conversation_view } = old_view else {
-            return;
+        let conversation_view = match old_view {
+            BaseView::AgentThread { conversation_view } => conversation_view,
+            BaseView::TerminalThread { .. } | BaseView::Uninitialized => return,
         };
 
         if self
@@ -2113,12 +2158,28 @@ impl AgentPanel {
         let old_view = std::mem::replace(&mut self.base_view, new_view);
         self.retain_running_thread(old_view, cx);
 
-        if let BaseView::AgentThread { conversation_view } = &self.base_view {
-            let thread_agent = conversation_view.read(cx).agent_key().clone();
-            if self.selected_agent != thread_agent {
-                self.selected_agent = thread_agent;
-                self.serialize(cx);
+        match &self.base_view {
+            BaseView::AgentThread { conversation_view } => {
+                let thread_agent = conversation_view.read(cx).agent_key().clone();
+                if self.selected_agent != thread_agent {
+                    self.selected_agent = thread_agent;
+                    self.selected_surface = AgentThreadSurface::Acp;
+                    self.serialize(cx);
+                }
             }
+            BaseView::TerminalThread {
+                terminal_agent_view,
+            } => {
+                let thread_agent = terminal_agent_view.read(cx).agent().clone();
+                if self.selected_agent != thread_agent
+                    || self.selected_surface != AgentThreadSurface::Terminal
+                {
+                    self.selected_agent = thread_agent;
+                    self.selected_surface = AgentThreadSurface::Terminal;
+                    self.serialize(cx);
+                }
+            }
+            BaseView::Uninitialized => {}
         }
 
         self.refresh_base_view_subscriptions(window, cx);
@@ -2181,6 +2242,26 @@ impl AgentPanel {
                     },
                 ))
             }
+            BaseView::TerminalThread {
+                terminal_agent_view,
+            } => {
+                self._thread_view_subscription = None;
+                let focus_handle = terminal_agent_view.focus_handle(cx);
+                self._active_thread_focus_subscription =
+                    Some(cx.on_focus_in(&focus_handle, window, |_this, _window, cx| {
+                        cx.emit(AgentPanelEvent::ThreadFocused);
+                        cx.notify();
+                    }));
+                Some(cx.observe_in(
+                    terminal_agent_view,
+                    window,
+                    |this, _terminal_agent_view, _window, cx| {
+                        cx.emit(AgentPanelEvent::ActiveViewChanged);
+                        this.serialize(cx);
+                        cx.notify();
+                    },
+                ))
+            }
             BaseView::Uninitialized => {
                 self._thread_view_subscription = None;
                 self._active_thread_focus_subscription = None;
@@ -2204,6 +2285,9 @@ impl AgentPanel {
             BaseView::AgentThread { conversation_view } => {
                 VisibleSurface::AgentThread(conversation_view)
             }
+            BaseView::TerminalThread {
+                terminal_agent_view,
+            } => VisibleSurface::TerminalThread(terminal_agent_view),
         }
     }
 
@@ -2289,6 +2373,164 @@ impl AgentPanel {
             window,
             cx,
         );
+    }
+
+    pub fn open_thread_from_metadata(
+        &mut self,
+        metadata: &ThreadMetadata,
+        focus: bool,
+        source: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected_agent = Agent::from(metadata.agent_id.clone());
+        self.selected_surface = metadata.surface;
+
+        match metadata.surface {
+            AgentThreadSurface::Acp => {
+                let Some(session_id) = metadata.session_id.clone() else {
+                    log::error!(
+                        "ACP thread metadata missing session_id for {:?}",
+                        metadata.thread_id
+                    );
+                    return;
+                };
+                self.load_agent_thread(
+                    Agent::from(metadata.agent_id.clone()),
+                    session_id,
+                    Some(metadata.folder_paths().clone()),
+                    metadata.title.clone(),
+                    focus,
+                    source,
+                    window,
+                    cx,
+                );
+            }
+            AgentThreadSurface::Terminal => {
+                self.load_terminal_thread_from_metadata(metadata, focus, source, window, cx);
+            }
+        }
+    }
+
+    fn new_terminal_thread(
+        &mut self,
+        agent: Agent,
+        focus: bool,
+        _source: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let thread_id = ThreadId::new();
+        let agent_session_id = SharedString::from(uuid::Uuid::new_v4().to_string());
+        let title = Some(agent.label());
+        let work_dirs = self.project.read(cx).default_path_list(cx);
+        let worktree_paths = self.project.read(cx).worktree_paths(cx);
+        let remote_connection = self.project.read(cx).remote_connection_options(cx);
+
+        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+            store.save(
+                ThreadMetadata {
+                    thread_id,
+                    surface: AgentThreadSurface::Terminal,
+                    session_id: None,
+                    agent_session_id: Some(agent_session_id.clone()),
+                    agent_id: agent.id(),
+                    title: title.clone(),
+                    updated_at: Utc::now(),
+                    created_at: Some(Utc::now()),
+                    interacted_at: Some(Utc::now()),
+                    worktree_paths,
+                    remote_connection,
+                    archived: false,
+                },
+                cx,
+            );
+        });
+
+        let terminal_thread = self.create_terminal_thread(
+            thread_id,
+            agent,
+            agent_session_id,
+            work_dirs,
+            title,
+            true,
+            window,
+            cx,
+        );
+        self.set_base_view(terminal_thread.into(), focus, window, cx);
+    }
+
+    fn load_terminal_thread_from_metadata(
+        &mut self,
+        metadata: &ThreadMetadata,
+        focus: bool,
+        _source: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(agent_session_id) = metadata.agent_session_id.clone() else {
+            log::error!(
+                "terminal thread metadata missing agent_session_id for {:?}",
+                metadata.thread_id
+            );
+            return;
+        };
+
+        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+            store.unarchive(metadata.thread_id, cx);
+        });
+
+        let terminal_thread = self.create_terminal_thread(
+            metadata.thread_id,
+            Agent::from(metadata.agent_id.clone()),
+            agent_session_id,
+            metadata.folder_paths().clone(),
+            metadata.title.clone(),
+            false,
+            window,
+            cx,
+        );
+        self.set_base_view(terminal_thread.into(), focus, window, cx);
+    }
+
+    fn create_terminal_thread(
+        &mut self,
+        thread_id: ThreadId,
+        agent: Agent,
+        agent_session_id: SharedString,
+        work_dirs: PathList,
+        title: Option<SharedString>,
+        is_new_session: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> TerminalThread {
+        let terminal_agent_view = cx.new(|cx| {
+            TerminalAgentView::new(
+                thread_id,
+                agent.clone(),
+                agent_session_id.clone(),
+                title.clone(),
+                work_dirs.clone(),
+                self.workspace.clone(),
+                self.project.downgrade(),
+                window,
+                cx,
+            )
+        });
+
+        if is_new_session {
+            terminal_agent_view
+                .update(cx, |view, cx| view.launch_new_session(window, cx))
+                .detach_and_log_err(cx);
+        } else {
+            terminal_agent_view
+                .update(cx, |view, cx| view.resume_session(window, cx))
+                .detach_and_log_err(cx);
+        }
+
+        TerminalThread {
+            terminal_agent_view,
+        }
     }
 
     pub fn load_agent_thread(
@@ -2487,6 +2729,9 @@ impl Focusable for AgentPanel {
         match self.visible_surface() {
             VisibleSurface::Uninitialized => self.focus_handle.clone(),
             VisibleSurface::AgentThread(conversation_view) => conversation_view.focus_handle(cx),
+            VisibleSurface::TerminalThread(terminal_agent_view) => {
+                terminal_agent_view.focus_handle(cx)
+            }
             VisibleSurface::Configuration(configuration) => {
                 if let Some(configuration) = configuration {
                     configuration.focus_handle(cx)
@@ -2660,6 +2905,9 @@ impl AgentPanel {
                                 .is_empty()
                     })
             }
+            BaseView::TerminalThread {
+                terminal_agent_view,
+            } => terminal_agent_view.read(cx).terminal_view().is_some(),
         }
     }
 
@@ -2821,6 +3069,12 @@ impl AgentPanel {
                         .truncate()
                         .into_any_element()
                 }
+            }
+            VisibleSurface::TerminalThread(terminal_agent_view) => {
+                Label::new(terminal_agent_view.read(cx).title())
+                    .color(Color::Muted)
+                    .truncate()
+                    .into_any_element()
             }
             VisibleSurface::Configuration(_) => {
                 Label::new("Settings").truncate().into_any_element()
@@ -2985,13 +3239,14 @@ impl AgentPanel {
             BaseView::AgentThread { conversation_view } => {
                 conversation_view.read(cx).as_native_thread(cx)
             }
-            BaseView::Uninitialized => None,
+            BaseView::TerminalThread { .. } | BaseView::Uninitialized => None,
         };
 
         let new_thread_menu_builder: Rc<
             dyn Fn(&mut Window, &mut App) -> Option<Entity<ContextMenu>>,
         > = {
             let selected_agent = self.selected_agent.clone();
+            let selected_surface = self.selected_surface;
             let is_agent_selected = move |agent: Agent| selected_agent == agent;
 
             let workspace = self.workspace.clone();
@@ -3033,7 +3288,10 @@ impl AgentPanel {
                         .item(
                             ContextMenuEntry::new("Zed Agent")
                                 .when(is_agent_selected(Agent::NativeAgent), |this| {
-                                    this.action(Box::new(NewExternalAgentThread { agent: None }))
+                                    this.action(Box::new(NewExternalAgentThread {
+                                        agent: None,
+                                        surface: Some(AgentThreadSurface::Acp),
+                                    }))
                                 })
                                 .icon(IconName::ZedAgent)
                                 .icon_color(Color::Muted)
@@ -3049,6 +3307,9 @@ impl AgentPanel {
                                                         panel.new_external_agent_thread(
                                                             &NewExternalAgentThread {
                                                                 agent: Some(Agent::NativeAgent),
+                                                                surface: Some(
+                                                                    AgentThreadSurface::Acp,
+                                                                ),
                                                             },
                                                             window,
                                                             cx,
@@ -3068,6 +3329,8 @@ impl AgentPanel {
                             struct AgentMenuItem {
                                 id: AgentId,
                                 display_name: SharedString,
+                                supports_acp: bool,
+                                supports_terminal: bool,
                             }
 
                             let agent_items = agent_server_store
@@ -3085,6 +3348,12 @@ impl AgentPanel {
                                     AgentMenuItem {
                                         id: agent_id.clone(),
                                         display_name,
+                                        supports_acp: agent_server_store
+                                            .agent_supports_surface(agent_id, ExternalAgentSurface::Acp),
+                                        supports_terminal: agent_server_store.agent_supports_surface(
+                                            agent_id,
+                                            ExternalAgentSurface::Terminal,
+                                        ),
                                     }
                                 })
                                 .sorted_unstable_by_key(|e| e.display_name.to_lowercase())
@@ -3110,14 +3379,93 @@ impl AgentPanel {
                                     entry = entry.icon(IconName::Sparkle);
                                 }
 
+                                if item.supports_acp && item.supports_terminal {
+                                    let agent_id = item.id.clone();
+                                    let workspace_for_acp = workspace.clone();
+                                    let workspace_for_terminal = workspace.clone();
+                                    menu = menu.submenu(
+                                        item.display_name.clone(),
+                                        move |menu, _window, _cx| {
+                                            menu.item(
+                                                ContextMenuEntry::new("Open in ACP")
+                                                    .icon_color(Color::Muted)
+                                                    .handler({
+                                                        let agent_id = agent_id.clone();
+                                                        let workspace = workspace_for_acp.clone();
+                                                        move |window, cx| {
+                                                            if let Some(workspace) = workspace.upgrade() {
+                                                                workspace.update(cx, |workspace, cx| {
+                                                                    if let Some(panel) =
+                                                                        workspace.panel::<AgentPanel>(cx)
+                                                                    {
+                                                                        panel.update(cx, |panel, cx| {
+                                                                            panel.new_external_agent_thread(
+                                                                                &NewExternalAgentThread {
+                                                                                    agent: Some(Agent::Custom {
+                                                                                        id: agent_id.clone(),
+                                                                                    }),
+                                                                                    surface: Some(AgentThreadSurface::Acp),
+                                                                                },
+                                                                                window,
+                                                                                cx,
+                                                                            );
+                                                                        });
+                                                                    }
+                                                                });
+                                                            }
+                                                        }
+                                                    }),
+                                            )
+                                            .item(
+                                                ContextMenuEntry::new("Open in Terminal")
+                                                    .icon_color(Color::Muted)
+                                                    .handler({
+                                                        let agent_id = agent_id.clone();
+                                                        let workspace = workspace_for_terminal.clone();
+                                                        move |window, cx| {
+                                                            if let Some(workspace) = workspace.upgrade() {
+                                                                workspace.update(cx, |workspace, cx| {
+                                                                    if let Some(panel) =
+                                                                        workspace.panel::<AgentPanel>(cx)
+                                                                    {
+                                                                        panel.update(cx, |panel, cx| {
+                                                                            panel.new_external_agent_thread(
+                                                                                &NewExternalAgentThread {
+                                                                                    agent: Some(Agent::Custom {
+                                                                                        id: agent_id.clone(),
+                                                                                    }),
+                                                                                    surface: Some(AgentThreadSurface::Terminal),
+                                                                                },
+                                                                                window,
+                                                                                cx,
+                                                                            );
+                                                                        });
+                                                                    }
+                                                                });
+                                                            }
+                                                        }
+                                                    }),
+                                            )
+                                        },
+                                    );
+                                    continue;
+                                }
+
+                                let surface = if item.supports_terminal {
+                                    AgentThreadSurface::Terminal
+                                } else {
+                                    AgentThreadSurface::Acp
+                                };
+
                                 entry = entry
                                     .when(
                                         is_agent_selected(Agent::Custom {
                                             id: item.id.clone(),
-                                        }),
+                                        }) && selected_surface == surface,
                                         |this| {
                                             this.action(Box::new(NewExternalAgentThread {
                                                 agent: None,
+                                                surface: Some(surface),
                                             }))
                                         },
                                     )
@@ -3138,6 +3486,7 @@ impl AgentPanel {
                                                                     agent: Some(Agent::Custom {
                                                                         id: agent_id.clone(),
                                                                     }),
+                                                                    surface: Some(surface),
                                                                 },
                                                                 window,
                                                                 cx,
@@ -3393,7 +3742,7 @@ impl AgentPanel {
                     return false;
                 }
             }
-            BaseView::Uninitialized => {
+            BaseView::TerminalThread { .. } | BaseView::Uninitialized => {
                 return false;
             }
         }
@@ -3454,6 +3803,7 @@ impl AgentPanel {
                     false
                 }
             }
+            BaseView::TerminalThread { .. } => false,
         }
     }
 
@@ -3574,7 +3924,7 @@ impl AgentPanel {
                     conversation_view.insert_dragged_files(paths, added_worktrees, window, cx);
                 });
             }
-            BaseView::Uninitialized => {}
+            BaseView::TerminalThread { .. } | BaseView::Uninitialized => {}
         }
     }
 
@@ -3615,6 +3965,7 @@ impl AgentPanel {
         key_context.add("AgentPanel");
         match &self.base_view {
             BaseView::AgentThread { .. } => key_context.add("acp_thread"),
+            BaseView::TerminalThread { .. } => key_context.add("terminal_thread"),
             BaseView::Uninitialized => {}
         }
         key_context
@@ -3666,6 +4017,9 @@ impl Render for AgentPanel {
                 VisibleSurface::AgentThread(conversation_view) => parent
                     .child(conversation_view.clone())
                     .child(self.render_drag_target(cx)),
+                VisibleSurface::TerminalThread(terminal_agent_view) => {
+                    parent.child(terminal_agent_view.clone())
+                }
                 VisibleSurface::Configuration(configuration) => {
                     parent.children(configuration.cloned())
                 }
@@ -4242,7 +4596,9 @@ mod tests {
                 store.save(
                     ThreadMetadata {
                         thread_id: ThreadId::new(),
+                        surface: AgentThreadSurface::Acp,
                         session_id: Some(resume_session_id.clone()),
+                        agent_session_id: Some(resume_session_id.0.to_string().into()),
                         agent_id: ProjectAgentId::new("Flaky"),
                         title: Some("Persistent chat".into()),
                         updated_at: Utc::now(),
@@ -5791,7 +6147,10 @@ mod tests {
         });
 
         // Press cmd-n (activate_draft again with the same agent).
-        cx.dispatch_action(NewExternalAgentThread { agent: None });
+        cx.dispatch_action(NewExternalAgentThread {
+            agent: None,
+            surface: Some(AgentThreadSurface::Acp),
+        });
         cx.run_until_parked();
 
         // The draft entity should not have changed.
@@ -5871,6 +6230,7 @@ mod tests {
         // content from the old draft and pre-fill the new one.
         cx.dispatch_action(NewExternalAgentThread {
             agent: Some(Agent::Stub),
+            surface: Some(AgentThreadSurface::Acp),
         });
         cx.run_until_parked();
 

@@ -3366,7 +3366,9 @@ pub(crate) mod tests {
                 store.save(
                     ThreadMetadata {
                         thread_id: ThreadId::new(),
+                        surface: crate::AgentThreadSurface::Acp,
                         session_id: Some(resume_session_id.clone()),
+                        agent_session_id: Some(resume_session_id.0.to_string().into()),
                         agent_id: ProjectAgentId::new("Flaky"),
                         title: Some(stored_title.clone()),
                         updated_at: Utc::now(),

@@ -2436,20 +2436,8 @@ impl Sidebar {
                            focus: bool,
                            window: &mut Window,
                            cx: &mut App| {
-            let Some(session_id) = metadata.session_id.clone() else {
-                return;
-            };
             agent_panel.update(cx, |panel, cx| {
-                panel.load_agent_thread(
-                    Agent::from(metadata.agent_id.clone()),
-                    session_id,
-                    Some(metadata.folder_paths().clone()),
-                    metadata.title.clone(),
-                    focus,
-                    "sidebar",
-                    window,
-                    cx,
-                );
+                panel.open_thread_from_metadata(metadata, focus, "sidebar", window, cx);
             });
         };
 

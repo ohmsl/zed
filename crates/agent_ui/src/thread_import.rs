@@ -24,7 +24,7 @@ use util::ResultExt;
 use workspace::{ModalView, MultiWorkspace, Workspace};
 
 use crate::{
-    Agent, AgentPanel,
+    Agent, AgentPanel, AgentThreadSurface,
     agent_connection_store::AgentConnectionStore,
     thread_metadata_store::{ThreadId, ThreadMetadata, ThreadMetadataStore, WorktreePaths},
 };
@@ -587,7 +587,9 @@ fn collect_importable_threads(
             };
             to_insert.push(ThreadMetadata {
                 thread_id: ThreadId::new(),
-                session_id: Some(session.session_id),
+                surface: AgentThreadSurface::Acp,
+                session_id: Some(session.session_id.clone()),
+                agent_session_id: Some(session.session_id.0.to_string().into()),
                 agent_id: agent_id.clone(),
                 title: session.title,
                 updated_at: session.updated_at.unwrap_or_else(|| Utc::now()),
