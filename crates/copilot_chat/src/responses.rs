@@ -639,7 +639,10 @@ mod tests {
         let json = r#"{}"#;
 
         let result: Result<StreamEvent, _> = serde_json::from_str(json);
-        assert!(result.is_err(), "Empty object should fail without 'type' field");
+        assert!(
+            result.is_err(),
+            "Empty object should fail without 'type' field"
+        );
     }
 
     #[test]

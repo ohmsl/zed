@@ -1804,7 +1804,10 @@ mod tests {
 
         let event: ResponseEvent = serde_json::from_str(json).unwrap();
 
-        assert_eq!(event.choices[0].finish_reason, Some("tool_calls".to_string()));
+        assert_eq!(
+            event.choices[0].finish_reason,
+            Some("tool_calls".to_string())
+        );
         let delta = event.choices[0].delta.as_ref().unwrap();
         assert_eq!(delta.tool_calls.len(), 1);
         assert_eq!(delta.tool_calls[0].id, Some("call_abc123".to_string()));
@@ -1926,7 +1929,10 @@ mod tests {
 
         assert!(event.choices[0].delta.is_none());
         let message = event.choices[0].message.as_ref().unwrap();
-        assert_eq!(message.content, Some("This is the full message".to_string()));
+        assert_eq!(
+            message.content,
+            Some("This is the full message".to_string())
+        );
     }
 
     #[test]
@@ -2142,7 +2148,11 @@ mod tests {
         for (json_value, expected) in vendors {
             let json = format!(r#""{json_value}""#);
             let vendor: ModelVendor = serde_json::from_str(&json).unwrap();
-            assert_eq!(vendor, expected, "Vendor '{}' should map to {:?}", json_value, expected);
+            assert_eq!(
+                vendor, expected,
+                "Vendor '{}' should map to {:?}",
+                json_value, expected
+            );
         }
     }
 
