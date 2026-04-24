@@ -4,7 +4,7 @@ use gpui::{BackgroundExecutor, Entity, TestAppContext, TestScreenCaptureSource};
 use project::Project;
 use serde_json::json;
 use util::path;
-use workspace::{Item as _, SharedScreen, item::ItemHandle as _};
+use workspace::{Item as _, SharedScreen};
 
 use super::TestClient;
 
