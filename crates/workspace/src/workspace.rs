@@ -4828,56 +4828,62 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.auto_watch_screens.is_none() {
+        let Some(auto_watch) = self.auto_watch_screens.as_ref() else {
             return;
-        }
+        };
+
+        let current_peer = auto_watch.current_peer;
+        let was_in_share_order = auto_watch.share_order.contains(&participant_id);
 
         let participant_is_sharing = self.active_call().map_or(false, |call| {
             call.peer_ids_with_video_tracks(cx)
                 .contains(&participant_id)
         });
 
-        let auto_watch = self.auto_watch_screens.as_ref().unwrap();
-        let current_peer = auto_watch.current_peer;
-        let was_in_share_order = auto_watch.share_order.contains(&participant_id);
-
         if participant_is_sharing && !was_in_share_order {
-            let auto_watch = self.auto_watch_screens.as_mut().unwrap();
-            auto_watch.share_order.push(participant_id);
+            if let Some(auto_watch) = self.auto_watch_screens.as_mut() {
+                auto_watch.share_order.push(participant_id);
 
-            if current_peer.is_none() {
-                auto_watch.current_peer = Some(participant_id);
-                self.open_shared_screen(participant_id, window, cx);
+                if current_peer.is_none() {
+                    auto_watch.current_peer = Some(participant_id);
+                    self.open_shared_screen(participant_id, window, cx);
+                }
             }
         } else if !participant_is_sharing && was_in_share_order {
             let was_viewing_current = current_peer == Some(participant_id)
                 && self.is_active_item_shared_screen_for_peer(participant_id, cx);
 
-            let auto_watch = self.auto_watch_screens.as_mut().unwrap();
-            auto_watch
-                .share_order
-                .retain(|&peer| peer != participant_id);
+            let next_peer = if let Some(auto_watch) = self.auto_watch_screens.as_mut() {
+                auto_watch
+                    .share_order
+                    .retain(|&peer| peer != participant_id);
 
-            if current_peer == Some(participant_id) {
-                let next_peer = auto_watch.share_order.first().copied();
-                auto_watch.current_peer = next_peer;
+                if current_peer == Some(participant_id) {
+                    let next_peer = auto_watch.share_order.first().copied();
+                    auto_watch.current_peer = next_peer;
+                    next_peer
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
-                if let Some(next_peer) = next_peer {
-                    if let Some(shared_screen) =
-                        self.shared_screen_for_peer(next_peer, &self.active_pane, window, cx)
-                    {
-                        self.active_pane.update(cx, |pane, cx| {
-                            pane.add_item_inner(
-                                Box::new(shared_screen),
-                                false,
-                                was_viewing_current,
-                                was_viewing_current,
-                                None,
-                                window,
-                                cx,
-                            )
-                        });
-                    }
+            if let Some(next_peer) = next_peer {
+                if let Some(shared_screen) =
+                    self.shared_screen_for_peer(next_peer, &self.active_pane, window, cx)
+                {
+                    self.active_pane.update(cx, |pane, cx| {
+                        pane.add_item_inner(
+                            Box::new(shared_screen),
+                            false,
+                            was_viewing_current,
+                            was_viewing_current,
+                            None,
+                            window,
+                            cx,
+                        )
+                    });
                 }
             }
         }
