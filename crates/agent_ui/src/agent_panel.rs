@@ -2625,6 +2625,12 @@ impl Panel for AgentPanel {
         true
     }
 
+    fn hide_button_setting(&self, _cx: &App) -> Option<workspace::HideStatusItem> {
+        Some(workspace::HideStatusItem::new(|settings| {
+            settings.agent.get_or_insert_default().button = Some(false);
+        }))
+    }
+
     fn is_zoomed(&self, _window: &Window, _cx: &App) -> bool {
         self.zoomed
     }
