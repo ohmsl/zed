@@ -9,7 +9,7 @@ use project::{
 };
 use task::{HideStrategy, RevealStrategy, SpawnInTerminal, TaskId};
 use terminal_view::TerminalView;
-use ui::prelude::*;
+use ui::{Button, Callout, CommonAnimationExt, prelude::*};
 use workspace::{PathList, Workspace};
 
 use crate::{Agent, ThreadId};
@@ -20,6 +20,13 @@ pub enum TerminalAgentViewEvent {
 
 impl EventEmitter<TerminalAgentViewEvent> for TerminalAgentView {}
 
+#[derive(Clone)]
+enum TerminalLaunchState {
+    Launching,
+    Failed(SharedString),
+    Loaded,
+}
+
 pub struct TerminalAgentView {
     thread_id: ThreadId,
     agent: Agent,
@@ -27,6 +34,8 @@ pub struct TerminalAgentView {
     title: Option<SharedString>,
     work_dirs: PathList,
     terminal_view: Option<Entity<TerminalView>>,
+    launch_state: TerminalLaunchState,
+    last_request: Option<ExternalAgentTerminalRequest>,
     focus_handle: FocusHandle,
     workspace: WeakEntity<Workspace>,
     project: WeakEntity<Project>,
@@ -59,6 +68,8 @@ impl TerminalAgentView {
             title,
             work_dirs,
             terminal_view: None,
+            launch_state: TerminalLaunchState::Launching,
+            last_request: None,
             focus_handle,
             workspace,
             project,
@@ -110,16 +121,34 @@ impl TerminalAgentView {
         )
     }
 
+    pub fn retry(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Task<Result<()>> {
+        let Some(request) = self.last_request.clone() else {
+            return Task::ready(Err(anyhow::anyhow!(
+                "terminal launch request is unavailable"
+            )));
+        };
+        self.launch_terminal(request, window, cx)
+    }
+
     fn launch_terminal(
         &mut self,
         request: ExternalAgentTerminalRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
+        self.last_request = Some(request.clone());
+        self.launch_state = TerminalLaunchState::Launching;
+        self.terminal_view = None;
+        cx.notify();
+
         let Some(project) = self.project.upgrade() else {
+            self.launch_state = TerminalLaunchState::Failed("Project no longer exists".into());
+            cx.notify();
             return Task::ready(Err(anyhow::anyhow!("project no longer exists")));
         };
         let Some(workspace) = self.workspace.upgrade() else {
+            self.launch_state = TerminalLaunchState::Failed("Workspace no longer exists".into());
+            cx.notify();
             return Task::ready(Err(anyhow::anyhow!("workspace no longer exists")));
         };
 
@@ -141,35 +170,95 @@ impl TerminalAgentView {
         let project_weak = project.downgrade();
 
         cx.spawn_in(window, async move |this, cx| {
-            let command_task = command_task?;
-            let command = command_task.await?;
-            let spawn_task = build_spawn_in_terminal(&agent_id, &title, &work_dirs, &command);
-            let terminal_task = project_for_command.update(cx, |project, cx| {
-                project.create_terminal_task(spawn_task, cx)
-            });
-            let terminal = terminal_task.await?;
+            let result = async {
+                let command_task = command_task?;
+                let command = command_task.await?;
+                let spawn_task = build_spawn_in_terminal(&agent_id, &title, &work_dirs, &command);
+                let terminal_task = project_for_command.update(cx, |project, cx| {
+                    project.create_terminal_task(spawn_task, cx)
+                });
+                let terminal = terminal_task.await?;
 
-            let terminal_view = cx.new_window_entity(|window, cx| {
-                let mut terminal_view = TerminalView::new(
-                    terminal,
-                    workspace_weak.clone(),
-                    None,
-                    project_weak.clone(),
-                    window,
-                    cx,
-                );
-                terminal_view.set_embedded_mode(Some(1000), cx);
-                terminal_view
-            })?;
+                let terminal_view = cx.new_window_entity(|window, cx| {
+                    let mut terminal_view = TerminalView::new(
+                        terminal,
+                        workspace_weak.clone(),
+                        None,
+                        project_weak.clone(),
+                        window,
+                        cx,
+                    );
+                    terminal_view.set_embedded_mode(Some(1000), cx);
+                    terminal_view
+                })?;
 
-            this.update_in(cx, |this, _window, cx| {
-                this.terminal_view = Some(terminal_view);
-                cx.emit(TerminalAgentViewEvent::Loaded);
-                cx.notify();
-            })?;
+                this.update_in(cx, |this, _window, cx| {
+                    this.terminal_view = Some(terminal_view);
+                    this.launch_state = TerminalLaunchState::Loaded;
+                    cx.emit(TerminalAgentViewEvent::Loaded);
+                    cx.notify();
+                })?;
 
-            anyhow::Ok(())
+                anyhow::Ok(())
+            }
+            .await;
+
+            if let Err(error) = &result {
+                let error_message: SharedString = format!("{error:#}").into();
+                this.update_in(cx, |this, _window, cx| {
+                    this.terminal_view = None;
+                    this.launch_state = TerminalLaunchState::Failed(error_message.clone());
+                    cx.notify();
+                })
+                .ok();
+            }
+
+            result
         })
+    }
+
+    fn render_loading_state(&self) -> impl IntoElement {
+        v_flex().size_full().items_center().justify_center().child(
+            h_flex()
+                .gap_1p5()
+                .justify_center()
+                .child(
+                    Icon::new(IconName::LoadCircle)
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted)
+                        .with_rotate_animation(3),
+                )
+                .child(
+                    Label::new(format!("Launching {}…", self.title()))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                ),
+        )
+    }
+
+    fn render_error_state(&self, error: SharedString, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .p_4()
+            .child(
+                div().max_w_112().child(
+                    Callout::new()
+                        .severity(Severity::Error)
+                        .icon(IconName::XCircle)
+                        .title("Failed to launch terminal")
+                        .description(error)
+                        .actions_slot(
+                            Button::new("retry-launch-terminal", "Retry")
+                                .label_size(LabelSize::Small)
+                                .style(ButtonStyle::Outlined)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.retry(window, cx).detach_and_log_err(cx);
+                                })),
+                        ),
+                ),
+            )
     }
 }
 
@@ -211,10 +300,20 @@ impl Focusable for TerminalAgentView {
 
 impl Render for TerminalAgentView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = match (&self.launch_state, self.terminal_view.clone()) {
+            (_, Some(terminal_view)) => terminal_view.into_any_element(),
+            (TerminalLaunchState::Failed(error), None) => self
+                .render_error_state(error.clone(), cx)
+                .into_any_element(),
+            (TerminalLaunchState::Launching | TerminalLaunchState::Loaded, None) => {
+                self.render_loading_state().into_any_element()
+            }
+        };
+
         div()
             .track_focus(&self.focus_handle)
             .size_full()
             .bg(cx.theme().colors().editor_background)
-            .children(self.terminal_view.clone())
+            .child(content)
     }
 }
