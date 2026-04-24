@@ -2963,6 +2963,102 @@ async fn test_autoscroll(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_autoscroll_relative(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorTestContext::new(cx).await;
+
+    let line_height = cx.update_editor(|editor, window, cx| {
+        editor.set_vertical_scroll_margin(0, cx);
+        editor
+            .style(cx)
+            .text
+            .line_height_in_pixels(window.rem_size())
+    });
+    let window = cx.window;
+
+    // Resize the window such that only 6 lines of text fit on screen.
+    cx.simulate_window_resize(window, size(px(1000.), 6. * line_height));
+
+    cx.set_state(
+        r#"ˇone
+            two
+            three
+            four
+            five
+            six
+            seven
+            eight
+            nine
+            ten
+            eleven
+            twelve
+            thirteen
+            fourteen
+            fifteen
+        "#,
+    );
+    cx.update_editor(|editor, window, cx| {
+        assert_eq!(
+            editor.snapshot(window, cx).scroll_position(),
+            gpui::Point::new(0., 0.0)
+        );
+    });
+
+    // Placing the cursor at row 7 with a top-relative autoscroll of 2 display
+    // rows, should land the scroll position's y coordinate at 5.0 (7 - 2).
+    cx.update_editor(|editor, window, cx| {
+        editor.change_selections(
+            SelectionEffects::scroll(Autoscroll::top_relative(2.0)),
+            window,
+            cx,
+            |selections| selections.select_ranges([Point::new(7, 0)..Point::new(7, 0)]),
+        );
+    });
+    cx.update_editor(|editor, window, cx| {
+        assert_eq!(
+            editor.snapshot(window, cx).scroll_position(),
+            gpui::Point::new(0., 5.0)
+        );
+    });
+
+    // Seeing as fractional offsets are supported, with the cursor at row 10 and
+    // a top-relative autoscroll of 2.5 display rows, the scroll position's y
+    // coordinate lands at 7.5 (10 - 2.5).
+    cx.update_editor(|editor, window, cx| {
+        editor.change_selections(
+            SelectionEffects::scroll(Autoscroll::top_relative(2.5)),
+            window,
+            cx,
+            |selections| selections.select_ranges([Point::new(10, 0)..Point::new(10, 0)]),
+        );
+    });
+    cx.update_editor(|editor, window, cx| {
+        assert_eq!(
+            editor.snapshot(window, cx).scroll_position(),
+            gpui::Point::new(0., 7.5)
+        );
+    });
+
+    // When the requested offset would scroll past the top of the buffer,
+    // `scroll_position.y` is clamped to 0 rather than going negative.
+    cx.update_editor(|editor, window, cx| {
+        editor.change_selections(
+            SelectionEffects::scroll(Autoscroll::top_relative(4.0)),
+            window,
+            cx,
+            |selections| selections.select_ranges([Point::new(1, 0)..Point::new(1, 0)]),
+        );
+    });
+
+    cx.update_editor(|editor, window, cx| {
+        assert_eq!(
+            editor.snapshot(window, cx).scroll_position(),
+            gpui::Point::new(0., 0.0)
+        );
+    });
+}
+
+#[gpui::test]
 async fn test_exclude_overscroll_margin_clamps_scroll_position(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
     update_test_editor_settings(cx, &|settings| {
@@ -37038,6 +37134,77 @@ async fn test_tsx_nested_jsx_member_expression_highlights(cx: &mut TestAppContex
                 (13..14, HighlightStyle::color(component_color)),
             ],
         );
+    });
+}
+
+#[gpui::test]
+async fn test_cursor_top_offset(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorTestContext::new(cx).await;
+    let window = cx.window;
+    let line_height = cx.update_editor(|editor, window, cx| {
+        editor.set_vertical_scroll_margin(0, cx);
+        editor
+            .style(cx)
+            .text
+            .line_height_in_pixels(window.rem_size())
+    });
+
+    cx.simulate_window_resize(window, size(px(1000.), 6. * line_height));
+
+    cx.set_state(
+        r#"ˇone
+            two
+            three
+            four
+            five
+            six
+            seven
+            eight
+            nine
+            ten
+        "#,
+    );
+
+    cx.update_editor(|editor, window, cx| {
+        assert_eq!(
+            editor.snapshot(window, cx).scroll_position(),
+            gpui::Point::new(0., 0.0)
+        );
+    });
+
+    // Add a cursor below the visible area, to ensure that `None` is returned.
+    cx.update_editor(|editor, window, cx| {
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_ranges([Point::new(8, 0)..Point::new(8, 0)]);
+        });
+
+        assert_eq!(editor.cursor_top_offset(cx), None);
+    });
+
+    // Update the cursor so it's now in the visible area, ensuring that we do
+    // return the cursor offset when compared to the top of the viewport.
+    cx.update_editor(|editor, window, cx| {
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_ranges([Point::new(4, 0)..Point::new(4, 0)]);
+        });
+
+        assert_eq!(editor.cursor_top_offset(cx), Some(4.0));
+    });
+
+    // Update the scroll position to a fractional display row, to ensure that
+    // this is taken into account when returning the scroll offset for the
+    // cursor position.
+    cx.update_editor(|editor, window, cx| {
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_ranges([Point::new(4, 0)..Point::new(4, 0)]);
+        });
+
+        editor.set_scroll_position(gpui::Point::new(0.0, 0.5), window, cx);
+    });
+
+    cx.update_editor(|editor, _window, cx| {
+        assert_eq!(editor.cursor_top_offset(cx), Some(3.5));
     });
 }
 

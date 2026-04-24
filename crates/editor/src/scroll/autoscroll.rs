@@ -36,11 +36,14 @@ impl Autoscroll {
 
     /// Returns the autoscroll strategy configured for navigation to definitions
     /// and references, based on `go_to_definition_scroll_strategy`.
-    pub fn for_go_to_definition(cx: &App) -> Self {
+    pub fn for_go_to_definition(offset: Option<ScrollOffset>, cx: &App) -> Self {
         match EditorSettings::get_global(cx).go_to_definition_scroll_strategy {
             GoToDefinitionScrollStrategy::Center => Self::center(),
             GoToDefinitionScrollStrategy::Minimum => Self::fit(),
             GoToDefinitionScrollStrategy::Top => Self::focused(),
+            GoToDefinitionScrollStrategy::Preserve => {
+                offset.map(Self::top_relative).unwrap_or_else(Self::center)
+            }
         }
     }
 
@@ -50,9 +53,10 @@ impl Autoscroll {
         Self::Strategy(AutoscrollStrategy::Focused, None)
     }
 
-    /// Scrolls so that the newest cursor is roughly an n-th line from the top.
-    pub fn top_relative(n: usize) -> Self {
-        Self::Strategy(AutoscrollStrategy::TopRelative(n), None)
+    /// Scrolls so that the newest cursor is the given offset (in display rows)
+    /// from the top of the viewport.
+    pub fn top_relative(offset: ScrollOffset) -> Self {
+        Self::Strategy(AutoscrollStrategy::TopRelative(offset), None)
     }
 
     /// Scrolls so that the newest cursor is at the top.
@@ -60,9 +64,10 @@ impl Autoscroll {
         Self::Strategy(AutoscrollStrategy::Top, None)
     }
 
-    /// Scrolls so that the newest cursor is roughly an n-th line from the bottom.
-    pub fn bottom_relative(n: usize) -> Self {
-        Self::Strategy(AutoscrollStrategy::BottomRelative(n), None)
+    /// Scrolls so that the newest cursor is the given offset (in display rows)
+    /// from the bottom of the viewport.
+    pub fn bottom_relative(offset: ScrollOffset) -> Self {
+        Self::Strategy(AutoscrollStrategy::BottomRelative(offset), None)
     }
 
     /// Scrolls so that the newest cursor is at the bottom.
@@ -91,7 +96,7 @@ impl Into<SelectionEffects> for Option<Autoscroll> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Default, Clone, Copy)]
+#[derive(Debug, PartialEq, Default, Clone, Copy)]
 pub enum AutoscrollStrategy {
     Fit,
     Newest,
@@ -100,9 +105,11 @@ pub enum AutoscrollStrategy {
     Focused,
     Top,
     Bottom,
-    TopRelative(usize),
-    BottomRelative(usize),
+    TopRelative(ScrollOffset),
+    BottomRelative(ScrollOffset),
 }
+
+impl Eq for AutoscrollStrategy {}
 
 impl AutoscrollStrategy {
     fn next(&self) -> Self {
@@ -429,5 +436,69 @@ impl Editor {
     ) {
         self.scroll_manager.autoscroll_request = Some((autoscroll, false));
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use gpui::{TestAppContext, UpdateGlobal};
+    use settings::SettingsStore;
+
+    fn assert_strategy(
+        strategy: GoToDefinitionScrollStrategy,
+        offset: Option<ScrollOffset>,
+        expected: Autoscroll,
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, _cx| {
+                let mut editor_settings = store.get::<EditorSettings>(None).clone();
+                editor_settings.go_to_definition_scroll_strategy = strategy;
+                store.override_global(editor_settings);
+            });
+
+            assert_eq!(Autoscroll::for_go_to_definition(offset, cx), expected);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_for_go_to_definition(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+
+        assert_strategy(
+            GoToDefinitionScrollStrategy::Center,
+            None,
+            Autoscroll::center(),
+            cx,
+        );
+        assert_strategy(
+            GoToDefinitionScrollStrategy::Minimum,
+            None,
+            Autoscroll::fit(),
+            cx,
+        );
+        assert_strategy(
+            GoToDefinitionScrollStrategy::Top,
+            None,
+            Autoscroll::focused(),
+            cx,
+        );
+        assert_strategy(
+            GoToDefinitionScrollStrategy::Preserve,
+            None,
+            Autoscroll::center(),
+            cx,
+        );
+        assert_strategy(
+            GoToDefinitionScrollStrategy::Preserve,
+            Some(4.0),
+            Autoscroll::top_relative(4.0),
+            cx,
+        );
     }
 }
