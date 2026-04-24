@@ -2,10 +2,9 @@ use crate::TestServer;
 use call::ActiveCall;
 use gpui::{BackgroundExecutor, Entity, TestAppContext, TestScreenCaptureSource};
 use project::Project;
-use rpc::proto::PeerId;
 use serde_json::json;
 use util::path;
-use workspace::{SharedScreen, item::ItemHandle as _};
+use workspace::{Item as _, SharedScreen, item::ItemHandle as _};
 
 use super::TestClient;
 
@@ -47,8 +46,6 @@ struct AutoWatchTestSetup {
     _client_b: TestClient,
     _client_c: TestClient,
     project_a: Entity<Project>,
-    peer_id_b: PeerId,
-    peer_id_c: PeerId,
 }
 
 async fn setup_auto_watch_test(
@@ -76,16 +73,11 @@ async fn setup_auto_watch_test(
         .await
         .unwrap();
 
-    let peer_id_b = client_b.peer_id().unwrap();
-    let peer_id_c = client_c.peer_id().unwrap();
-
     AutoWatchTestSetup {
         client_a,
         _client_b: client_b,
         _client_c: client_c,
         project_a,
-        peer_id_b,
-        peer_id_c,
     }
 }
 
@@ -141,9 +133,11 @@ async fn test_auto_watch_opens_first_available_share(
 
     workspace_a.update(cx_a, |workspace, cx| {
         let active_item = workspace.active_item(cx).expect("no active item");
-        active_item
-            .downcast::<SharedScreen>()
-            .expect("active item should be a SharedScreen");
+        assert_eq!(
+            active_item.tab_content_text(0, cx),
+            "user_b's screen",
+            "should be viewing user_b's screen"
+        );
     });
 }
 
@@ -170,9 +164,11 @@ async fn test_auto_watch_opens_share_when_waiting(
 
     workspace_a.update(cx_a, |workspace, cx| {
         let active_item = workspace.active_item(cx).expect("no active item");
-        active_item
-            .downcast::<SharedScreen>()
-            .expect("active item should be a SharedScreen");
+        assert_eq!(
+            active_item.tab_content_text(0, cx),
+            "user_b's screen",
+            "should be viewing user_b's screen"
+        );
     });
 }
 
@@ -195,11 +191,10 @@ async fn test_auto_watch_switches_on_share_end(
     executor.run_until_parked();
 
     workspace_a.update(cx_a, |workspace, cx| {
-        workspace
-            .active_item(cx)
-            .expect("no active item")
-            .downcast::<SharedScreen>()
-            .expect("should be viewing B's SharedScreen");
+        assert_eq!(
+            workspace.active_item(cx).unwrap().tab_content_text(0, cx),
+            "user_b's screen"
+        );
     });
 
     start_screen_share(cx_c).await;
@@ -209,11 +204,11 @@ async fn test_auto_watch_switches_on_share_end(
     executor.run_until_parked();
 
     workspace_a.update(cx_a, |workspace, cx| {
-        let active_item = workspace.active_item(cx).expect("no active item");
-        let shared_screen = active_item
-            .downcast::<SharedScreen>()
-            .expect("should switch to C's SharedScreen");
-        assert_eq!(shared_screen.read(cx).peer_id, setup.peer_id_c);
+        assert_eq!(
+            workspace.active_item(cx).unwrap().tab_content_text(0, cx),
+            "user_c's screen",
+            "should switch to user_c's screen after user_b stops sharing"
+        );
     });
 }
 
@@ -234,13 +229,11 @@ async fn test_auto_watch_toggle_off_leaves_tabs_open(
     start_screen_share(cx_b).await;
     executor.run_until_parked();
 
-    let shared_screen_id = workspace_a.update(cx_a, |workspace, cx| {
-        workspace
-            .active_item(cx)
-            .expect("no active item")
-            .downcast::<SharedScreen>()
-            .expect("should be a SharedScreen")
-            .item_id()
+    workspace_a.update(cx_a, |workspace, cx| {
+        assert_eq!(
+            workspace.active_item(cx).unwrap().tab_content_text(0, cx),
+            "user_b's screen"
+        );
     });
 
     workspace_a.update_in(cx_a, |workspace, window, cx| {
@@ -249,8 +242,11 @@ async fn test_auto_watch_toggle_off_leaves_tabs_open(
 
     workspace_a.update(cx_a, |workspace, cx| {
         assert!(!workspace.is_auto_watching_screens());
-        let active_item = workspace.active_item(cx).expect("no active item");
-        assert_eq!(active_item.item_id(), shared_screen_id);
+        assert_eq!(
+            workspace.active_item(cx).unwrap().tab_content_text(0, cx),
+            "user_b's screen",
+            "screen share tab should remain open after toggling off"
+        );
     });
 }
 
@@ -272,11 +268,10 @@ async fn test_auto_watch_contextual_focus_user_viewing(
     executor.run_until_parked();
 
     workspace_a.update(cx_a, |workspace, cx| {
-        workspace
-            .active_item(cx)
-            .unwrap()
-            .downcast::<SharedScreen>()
-            .expect("should be viewing B's screen");
+        assert_eq!(
+            workspace.active_item(cx).unwrap().tab_content_text(0, cx),
+            "user_b's screen"
+        );
     });
 
     start_screen_share(cx_c).await;
@@ -286,13 +281,11 @@ async fn test_auto_watch_contextual_focus_user_viewing(
     executor.run_until_parked();
 
     workspace_a.update(cx_a, |workspace, cx| {
-        let active_item = workspace
-            .active_item(cx)
-            .expect("should have an active item");
-        let shared_screen = active_item
-            .downcast::<SharedScreen>()
-            .expect("should have switched focus to C's SharedScreen");
-        assert_eq!(shared_screen.read(cx).peer_id, setup.peer_id_c);
+        assert_eq!(
+            workspace.active_item(cx).unwrap().tab_content_text(0, cx),
+            "user_c's screen",
+            "should switch focus to user_c's screen since user was viewing user_b's"
+        );
     });
 }
 
@@ -305,14 +298,13 @@ async fn test_auto_watch_contextual_focus_user_navigated_away(
 ) {
     let mut server = TestServer::start(executor.clone()).await;
     let client_a = server.create_client(cx_a, "user_a").await;
-    let client_b = server.create_client(cx_b, "user_b").await;
-    let client_c = server.create_client(cx_c, "user_c").await;
+    let _client_b = server.create_client(cx_b, "user_b").await;
+    let _client_c = server.create_client(cx_c, "user_c").await;
     server
-        .create_room(&mut [(&client_a, cx_a), (&client_b, cx_b), (&client_c, cx_c)])
+        .create_room(&mut [(&client_a, cx_a), (&_client_b, cx_b), (&_client_c, cx_c)])
         .await;
 
     let active_call_a = cx_a.read(ActiveCall::global);
-    let peer_id_c = client_c.peer_id().unwrap();
 
     client_a
         .fs()
@@ -346,11 +338,10 @@ async fn test_auto_watch_contextual_focus_user_navigated_away(
     executor.run_until_parked();
 
     workspace_a.update(cx_a, |workspace, cx| {
-        workspace
-            .active_item(cx)
-            .unwrap()
-            .downcast::<SharedScreen>()
-            .expect("should be viewing B's screen");
+        assert_eq!(
+            workspace.active_item(cx).unwrap().tab_content_text(0, cx),
+            "user_b's screen"
+        );
     });
 
     workspace_a.update_in(cx_a, |workspace, window, cx| {
@@ -358,8 +349,11 @@ async fn test_auto_watch_contextual_focus_user_navigated_away(
     });
 
     workspace_a.update(cx_a, |workspace, cx| {
-        let active_item = workspace.active_item(cx).unwrap();
-        assert_eq!(active_item.item_id(), editor_a.item_id());
+        assert_eq!(
+            workspace.active_item(cx).unwrap().tab_content_text(0, cx),
+            "file.txt",
+            "user should be looking at their editor"
+        );
     });
 
     start_screen_share(cx_c).await;
@@ -369,20 +363,21 @@ async fn test_auto_watch_contextual_focus_user_navigated_away(
     executor.run_until_parked();
 
     workspace_a.update(cx_a, |workspace, cx| {
-        let active_item = workspace.active_item(cx).unwrap();
         assert_eq!(
-            active_item.item_id(),
-            editor_a.item_id(),
-            "Focus should stay on the editor, not switch to C's screen"
+            workspace.active_item(cx).unwrap().tab_content_text(0, cx),
+            "file.txt",
+            "focus should stay on the editor, not switch to user_c's screen"
         );
 
         let pane = workspace.active_pane().read(cx);
-        let has_shared_screen = pane
+        let screen_tabs: Vec<_> = pane
             .items_of_type::<SharedScreen>()
-            .any(|screen| screen.read(cx).peer_id == peer_id_c);
+            .map(|screen| screen.read(cx).tab_content_text(0, cx))
+            .collect();
         assert!(
-            has_shared_screen,
-            "C's SharedScreen should be open in the pane, just not focused"
+            screen_tabs.iter().any(|t| t == "user_c's screen"),
+            "user_c's SharedScreen should be open in the pane, just not focused. tabs: {:?}",
+            screen_tabs
         );
     });
 }

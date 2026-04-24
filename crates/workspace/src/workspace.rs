@@ -4867,9 +4867,10 @@ impl Workspace {
                         self.shared_screen_for_peer(next_peer, &self.active_pane, window, cx)
                     {
                         self.active_pane.update(cx, |pane, cx| {
-                            pane.add_item(
+                            pane.add_item_inner(
                                 Box::new(shared_screen),
                                 false,
+                                was_viewing_current,
                                 was_viewing_current,
                                 None,
                                 window,
