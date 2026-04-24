@@ -438,13 +438,21 @@ impl MacTextSystemState {
                 .subpixel_variant
                 .map(|v| v as f32 / SUBPIXEL_VARIANTS_X as f32);
             cx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
-            cx.set_gray_fill_color(0.0, 1.0);
             cx.set_allows_antialiasing(true);
             cx.set_should_antialias(true);
             cx.set_allows_font_subpixel_positioning(true);
             cx.set_should_subpixel_position_fonts(true);
             cx.set_allows_font_subpixel_quantization(false);
             cx.set_should_subpixel_quantize_fonts(false);
+
+            if params.dilation > 0 {
+                let luminance = params.dilation as f64 * 0.25;
+                cx.set_allows_font_smoothing(true);
+                cx.set_should_smooth_fonts(true);
+                cx.set_gray_fill_color(luminance, 1.0);
+            } else {
+                cx.set_gray_fill_color(0.0, 1.0);
+            }
             self.fonts[params.font_id.0]
                 .native_font()
                 .clone_with_font_size(f32::from(params.font_size) as CGFloat)
