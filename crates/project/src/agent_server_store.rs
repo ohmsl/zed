@@ -126,7 +126,7 @@ pub enum ExternalAgentTerminalRequest {
 }
 
 const CLAUDE_EXTERNAL_AGENT_ID: &str = "claude-acp";
-const CLAUDE_CLI_COMMAND: &str = "claude";
+const CLAUDE_ADAPTER_CLI_FLAG: &str = "--cli";
 
 pub trait ExternalAgentServer {
     fn get_command(
@@ -1611,30 +1611,20 @@ async fn build_local_registry_npx_command(
 }
 
 fn build_claude_terminal_args(request: ExternalAgentTerminalRequest) -> Vec<String> {
+    let mut args = vec![CLAUDE_ADAPTER_CLI_FLAG.to_string()];
+
     match request {
         ExternalAgentTerminalRequest::NewSession { session_id } => {
-            vec!["--session-id".to_string(), session_id.to_string()]
+            args.push("--session-id".to_string());
+            args.push(session_id.to_string());
         }
         ExternalAgentTerminalRequest::ResumeSession { session_id } => {
-            vec!["--resume".to_string(), session_id.to_string()]
+            args.push("--resume".to_string());
+            args.push(session_id.to_string());
         }
     }
-}
 
-fn build_claude_terminal_command(
-    mut env: HashMap<String, String>,
-    settings_env: HashMap<String, String>,
-    extra_env: HashMap<String, String>,
-    request: ExternalAgentTerminalRequest,
-) -> AgentServerCommand {
-    env.extend(extra_env);
-    env.extend(settings_env);
-
-    AgentServerCommand {
-        path: PathBuf::from(CLAUDE_CLI_COMMAND),
-        args: build_claude_terminal_args(request),
-        env: Some(env),
-    }
+    args
 }
 
 impl ExternalAgentServer for LocalRegistryNpxAgent {
@@ -1696,8 +1686,12 @@ impl ExternalAgentServer for LocalRegistryNpxAgent {
         extra_env: HashMap<String, String>,
         cx: &mut AsyncApp,
     ) -> Task<Result<AgentServerCommand>> {
+        let fs = self.fs.clone();
+        let node_runtime = self.node_runtime.clone();
         let project_environment = self.project_environment.downgrade();
         let registry_id = self.registry_id.clone();
+        let package = self.package.clone();
+        let distribution_env = self.distribution_env.clone();
         let settings_env = self.settings_env.clone();
 
         cx.spawn(async move |cx| {
@@ -1707,19 +1701,20 @@ impl ExternalAgentServer for LocalRegistryNpxAgent {
                 registry_id,
             );
 
-            let env = project_environment
-                .update(cx, |project_environment, cx| {
-                    project_environment.default_environment(cx)
-                })?
-                .await
-                .unwrap_or_default();
-
-            Ok(build_claude_terminal_command(
-                env,
+            build_local_registry_npx_command(
+                fs,
+                node_runtime,
+                project_environment,
+                registry_id,
+                package,
+                build_claude_terminal_args(request),
+                distribution_env,
                 settings_env,
+                Vec::new(),
                 extra_env,
-                request,
-            ))
+                cx,
+            )
+            .await
         })
     }
 
@@ -2137,62 +2132,50 @@ mod tests {
     }
 
     #[test]
-    fn builds_claude_terminal_command_for_new_sessions() {
-        let command = build_claude_terminal_command(
-            vec![
-                ("PATH".to_string(), "/usr/bin".to_string()),
-                ("SHARED".to_string(), "project".to_string()),
-            ]
-            .into_iter()
-            .collect(),
-            vec![
-                ("CLAUDE_CONFIG_DIR".to_string(), "/tmp/claude".to_string()),
-                ("SHARED".to_string(), "settings".to_string()),
-            ]
-            .into_iter()
-            .collect(),
-            vec![
-                ("EXTRA".to_string(), "1".to_string()),
-                ("SHARED".to_string(), "extra".to_string()),
-            ]
-            .into_iter()
-            .collect(),
-            ExternalAgentTerminalRequest::NewSession {
-                session_id: SharedString::from("session-123"),
-            },
-        );
+    fn builds_claude_terminal_args_for_new_sessions() {
+        let args = build_claude_terminal_args(ExternalAgentTerminalRequest::NewSession {
+            session_id: SharedString::from("session-123"),
+        });
 
-        assert_eq!(command.path, PathBuf::from(CLAUDE_CLI_COMMAND));
         assert_eq!(
-            command.args,
-            vec!["--session-id".to_string(), "session-123".to_string()]
+            args,
+            vec![
+                CLAUDE_ADAPTER_CLI_FLAG.to_string(),
+                "--session-id".to_string(),
+                "session-123".to_string()
+            ]
         );
-        let env = command.env.expect("terminal command should include env");
-        assert_eq!(env.get("PATH"), Some(&"/usr/bin".to_string()));
-        assert_eq!(env.get("EXTRA"), Some(&"1".to_string()));
-        assert_eq!(
-            env.get("CLAUDE_CONFIG_DIR"),
-            Some(&"/tmp/claude".to_string())
-        );
-        assert_eq!(env.get("SHARED"), Some(&"settings".to_string()));
     }
 
     #[test]
-    fn builds_claude_terminal_command_for_resumed_sessions() {
-        let command = build_claude_terminal_command(
-            HashMap::default(),
-            HashMap::default(),
-            HashMap::default(),
-            ExternalAgentTerminalRequest::ResumeSession {
-                session_id: SharedString::from("session-456"),
-            },
-        );
+    fn builds_claude_terminal_args_for_resumed_sessions() {
+        let args = build_claude_terminal_args(ExternalAgentTerminalRequest::ResumeSession {
+            session_id: SharedString::from("session-456"),
+        });
 
-        assert_eq!(command.path, PathBuf::from(CLAUDE_CLI_COMMAND));
         assert_eq!(
-            command.args,
-            vec!["--resume".to_string(), "session-456".to_string()]
+            args,
+            vec![
+                CLAUDE_ADAPTER_CLI_FLAG.to_string(),
+                "--resume".to_string(),
+                "session-456".to_string()
+            ]
         );
+    }
+
+    #[test]
+    fn claude_terminal_args_use_adapter_cli_handoff() {
+        let args = build_claude_terminal_args(ExternalAgentTerminalRequest::NewSession {
+            session_id: SharedString::from("session-789"),
+        });
+
+        assert_eq!(
+            args.first().map(String::as_str),
+            Some(CLAUDE_ADAPTER_CLI_FLAG)
+        );
+        assert!(args.contains(&"--session-id".to_string()));
+        assert!(!args.contains(&"--stdio".to_string()));
+        assert!(!args.contains(&"--json".to_string()));
     }
 
     #[test]
