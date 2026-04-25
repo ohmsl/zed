@@ -397,7 +397,7 @@ impl MacTextSystemState {
     fn raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
         let font = &self.fonts[params.font_id.0];
         let scale = Transform2F::from_scale(params.scale_factor);
-        let mut bounds: Bounds<DevicePixels> = bounds_from_rect_i(font.raster_bounds(
+        let bounds: Bounds<DevicePixels> = bounds_from_rect_i(font.raster_bounds(
             params.glyph_id.0,
             params.font_size.into(),
             scale,
@@ -405,14 +405,8 @@ impl MacTextSystemState {
             font_kit::canvas::RasterizationOptions::GrayscaleAa,
         )?);
 
-        // Add 3% of font size as padding, clamped between 1 and 5 pixels
-        // to avoid clipping of anti-aliased edges.
-        let pad =
-            ((params.font_size.as_f32() * 0.03 * params.scale_factor).ceil() as i32).clamp(1, 5);
-        bounds.origin.x -= DevicePixels(pad);
-        bounds.size.width += DevicePixels(pad);
-
-        Ok(bounds)
+        // Expand the bounds by 1 pixel on each side to give CG room for anti-aliasing.
+        Ok(bounds.dilate(DevicePixels(1)))
     }
 
     fn rasterize_glyph(
