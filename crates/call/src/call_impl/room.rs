@@ -46,7 +46,6 @@ pub enum Event {
     RemoteVideoTrackUnsubscribed {
         sid: TrackSid,
     },
-    LocalScreenShareStopped,
     RemoteAudioTracksChanged {
         participant_id: proto::PeerId,
     },
@@ -67,6 +66,7 @@ pub enum Event {
     RoomLeft {
         channel_id: Option<ChannelId>,
     },
+    LocalScreenShareStopped,
 }
 
 pub struct Room {
