@@ -4793,6 +4793,15 @@ impl Workspace {
         self.auto_watch_screens.is_some()
     }
 
+    pub fn is_auto_watch_screens_paused(&self, cx: &App) -> bool {
+        self.auto_watch_screens.is_some() && self.local_user_is_sharing_screen(cx)
+    }
+
+    fn local_user_is_sharing_screen(&self, cx: &App) -> bool {
+        self.active_call()
+            .map_or(false, |call| call.is_sharing_screen(cx))
+    }
+
     pub fn toggle_auto_watch_screens(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.auto_watch_screens.is_some() {
             self.auto_watch_screens = None;
@@ -4800,21 +4809,15 @@ impl Workspace {
             return;
         }
 
-        let local_user_is_sharing = self
-            .active_call()
-            .map_or(false, |call| call.is_sharing_screen(cx));
-
-        // Do not allow spotlighting peers while sharing screen
-        if local_user_is_sharing {
-            return;
-        }
-
         let active_pane = self.active_pane.clone();
         self.unfollow_in_pane(&active_pane, window, cx);
 
-        let spotlighted_peer = self
-            .active_call()
-            .and_then(|call| call.peer_ids_with_video_tracks(cx).first().copied());
+        let spotlighted_peer = if self.local_user_is_sharing_screen(cx) {
+            None
+        } else {
+            self.active_call()
+                .and_then(|call| call.peer_ids_with_video_tracks(cx).first().copied())
+        };
 
         self.auto_watch_screens = Some(AutoWatchScreensState { spotlighted_peer });
 
@@ -4835,12 +4838,7 @@ impl Workspace {
             return;
         };
 
-        let local_user_is_sharing = self
-            .active_call()
-            .map_or(false, |call| call.is_sharing_screen(cx));
-
-        // Do not allow spotlighting peers while sharing screen
-        if local_user_is_sharing {
+        if self.local_user_is_sharing_screen(cx) {
             return;
         }
 

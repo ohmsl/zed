@@ -2896,9 +2896,16 @@ impl CollabPanel {
             Section::Offline => SharedString::from("Offline"),
         };
 
-        let is_auto_watching = self.workspace.upgrade().map_or(false, |workspace| {
-            workspace.read(cx).is_auto_watching_screens()
-        });
+        let (is_auto_watching, is_auto_watch_paused) =
+            self.workspace
+                .upgrade()
+                .map_or((false, false), |workspace| {
+                    let workspace = workspace.read(cx);
+                    (
+                        workspace.is_auto_watching_screens(),
+                        workspace.is_auto_watch_screens_paused(cx),
+                    )
+                });
 
         let button = match section {
             Section::ActiveCall => {
@@ -2921,11 +2928,17 @@ impl CollabPanel {
                                     )
                                     .icon_size(IconSize::Small)
                                     .toggle_state(is_auto_watching)
-                                    .selected_style(ButtonStyle::Tinted(TintColor::Accent))
+                                    .selected_style(if is_auto_watch_paused {
+                                        ButtonStyle::Tinted(TintColor::Warning)
+                                    } else {
+                                        ButtonStyle::Tinted(TintColor::Accent)
+                                    })
                                     .when(!is_auto_watching, |this| {
                                         this.visible_on_hover("section-header")
                                     })
-                                    .tooltip(Tooltip::text(if is_auto_watching {
+                                    .tooltip(Tooltip::text(if is_auto_watch_paused {
+                                        "Auto Watch Screens (paused while sharing)"
+                                    } else if is_auto_watching {
                                         "Stop Auto Watching Screens"
                                     } else {
                                         "Auto Watch Screens"
