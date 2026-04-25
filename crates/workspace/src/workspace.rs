@@ -1417,7 +1417,7 @@ pub struct FollowerState {
 }
 
 pub struct AutoWatchScreensState {
-    spotlighted_peer: Option<PeerId>,
+    watched_peer: Option<PeerId>,
 }
 
 struct FollowerView {
@@ -4802,6 +4802,11 @@ impl Workspace {
             .map_or(false, |call| call.is_sharing_screen(cx))
     }
 
+    fn next_watched_peer(&self, cx: &App) -> Option<PeerId> {
+        self.active_call()
+            .and_then(|call| call.peer_ids_with_video_tracks(cx).first().copied())
+    }
+
     pub fn toggle_auto_watch_screens(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.auto_watch_screens.is_some() {
             self.auto_watch_screens = None;
@@ -4812,17 +4817,18 @@ impl Workspace {
         let active_pane = self.active_pane.clone();
         self.unfollow_in_pane(&active_pane, window, cx);
 
-        let spotlighted_peer = if self.local_user_is_sharing_screen(cx) {
+        let next_watched_peer = if self.local_user_is_sharing_screen(cx) {
             None
         } else {
-            self.active_call()
-                .and_then(|call| call.peer_ids_with_video_tracks(cx).first().copied())
+            self.next_watched_peer(cx)
         };
 
-        self.auto_watch_screens = Some(AutoWatchScreensState { spotlighted_peer });
+        self.auto_watch_screens = Some(AutoWatchScreensState {
+            watched_peer: next_watched_peer,
+        });
 
-        if let Some(peer_id) = spotlighted_peer {
-            self.open_shared_screen(peer_id, window, cx);
+        if let Some(next_watched_peer) = next_watched_peer {
+            self.open_shared_screen(next_watched_peer, window, cx);
         }
 
         cx.notify();
@@ -4842,28 +4848,27 @@ impl Workspace {
             return;
         }
 
-        let spotlighted_peer = auto_watch.spotlighted_peer;
+        let watched_peer = auto_watch.watched_peer;
 
         let peer_is_sharing = self.active_call().map_or(false, |call| {
             call.peer_ids_with_video_tracks(cx).contains(&peer_id)
         });
-        let should_spotlight = peer_is_sharing && spotlighted_peer.is_none();
-        let spotlighted_peer_stopped = spotlighted_peer == Some(peer_id) && !peer_is_sharing;
+        let should_watch_peer = peer_is_sharing && watched_peer.is_none();
+        let watched_peer_stopped_sharing = watched_peer == Some(peer_id) && !peer_is_sharing;
 
-        if should_spotlight || spotlighted_peer_stopped {
-            let next_peer = if should_spotlight {
+        if should_watch_peer || watched_peer_stopped_sharing {
+            let next_watched_peer = if should_watch_peer {
                 Some(peer_id)
             } else {
-                self.active_call()
-                    .and_then(|call| call.peer_ids_with_video_tracks(cx).first().copied())
+                self.next_watched_peer(cx)
             };
 
             if let Some(auto_watch) = self.auto_watch_screens.as_mut() {
-                auto_watch.spotlighted_peer = next_peer;
+                auto_watch.watched_peer = next_watched_peer;
             }
 
-            if let Some(next_peer) = next_peer {
-                self.open_shared_screen(next_peer, window, cx);
+            if let Some(next_watched_peer) = next_watched_peer {
+                self.open_shared_screen(next_watched_peer, window, cx);
             }
         }
     }
@@ -4877,15 +4882,14 @@ impl Workspace {
             return;
         }
 
-        let spotlighted_peer = self
-            .active_call()
-            .and_then(|call| call.peer_ids_with_video_tracks(cx).first().copied());
+        let next_watched_peer = self.next_watched_peer(cx);
 
         if let Some(auto_watch) = self.auto_watch_screens.as_mut() {
-            auto_watch.spotlighted_peer = spotlighted_peer;
+            auto_watch.watched_peer = next_watched_peer;
         }
-        if let Some(peer_id) = spotlighted_peer {
-            self.open_shared_screen(peer_id, window, cx);
+
+        if let Some(next_watched_peer) = next_watched_peer {
+            self.open_shared_screen(next_watched_peer, window, cx);
         }
     }
 
