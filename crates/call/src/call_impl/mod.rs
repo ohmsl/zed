@@ -112,6 +112,13 @@ impl AnyActiveCall for ActiveCallEntity {
             .map_or(false, |room| room.read(cx).is_sharing_project())
     }
 
+    fn is_sharing_screen(&self, cx: &App) -> bool {
+        self.0
+            .read(cx)
+            .room()
+            .map_or(false, |room| room.read(cx).is_sharing_screen())
+    }
+
     fn has_remote_participants(&self, cx: &App) -> bool {
         self.0.read(cx).room().map_or(false, |room| {
             !room.read(cx).remote_participants().is_empty()

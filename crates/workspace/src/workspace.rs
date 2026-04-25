@@ -4825,6 +4825,16 @@ impl Workspace {
         let Some(auto_watch) = self.auto_watch_screens.as_ref() else {
             return;
         };
+
+        let local_user_is_sharing = self
+            .active_call()
+            .map_or(false, |call| call.is_sharing_screen(cx));
+
+        // Do not allow spotlighting peers while sharing screen
+        if local_user_is_sharing {
+            return;
+        }
+
         let spotlighted_peer = auto_watch.spotlighted_peer;
 
         let peer_is_sharing = self.active_call().map_or(false, |call| {
@@ -7950,6 +7960,7 @@ pub trait AnyActiveCall {
     fn unshare_project(&self, _: Entity<Project>, _: &mut App) -> Result<()>;
     fn remote_participant_for_peer_id(&self, _: PeerId, _: &App) -> Option<RemoteCollaborator>;
     fn is_sharing_project(&self, _: &App) -> bool;
+    fn is_sharing_screen(&self, _: &App) -> bool;
     fn has_remote_participants(&self, _: &App) -> bool;
     fn local_participant_is_guest(&self, _: &App) -> bool;
     fn client(&self, _: &App) -> Arc<Client>;

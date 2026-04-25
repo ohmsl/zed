@@ -176,6 +176,59 @@ async fn test_auto_watch_switches_to_next_share_on_share_end(
 }
 
 #[gpui::test]
+async fn test_auto_watch_ignores_shares_while_user_is_sharing(
+    executor: BackgroundExecutor,
+    cx_a: &mut TestAppContext,
+    cx_b: &mut TestAppContext,
+    cx_c: &mut TestAppContext,
+) {
+    let mut server = TestServer::start(executor.clone()).await;
+    let setup = setup_auto_watch_test(&mut server, cx_a, cx_b, cx_c).await;
+    let (workspace_a, cx_a) = setup.client_a.build_workspace(&setup.project_a, cx_a);
+
+    // Enable auto-watch.
+    workspace_a.update_in(cx_a, |workspace, window, cx| {
+        workspace.toggle_auto_watch_screens(window, cx);
+    });
+
+    // User A starts sharing their own screen.
+    start_screen_share(cx_a).await;
+    executor.run_until_parked();
+
+    // User B starts sharing — auto-watch should NOT open B's screen.
+    start_screen_share(cx_b).await;
+    executor.run_until_parked();
+
+    workspace_a.update(cx_a, |workspace, cx| {
+        let has_shared_screen_tab = workspace
+            .active_pane()
+            .read(cx)
+            .items()
+            .any(|item| item.tab_content_text(0, cx).contains("screen"));
+        assert!(
+            !has_shared_screen_tab,
+            "should not open anyone's screen share while user is sharing"
+        );
+    });
+
+    // User A stops sharing.
+    stop_screen_share(cx_a);
+    executor.run_until_parked();
+
+    // Now B starts sharing again (or is still sharing) — auto-watch should pick it up.
+    // B is already sharing, so we need a new event. Stop and restart B.
+    stop_screen_share(cx_b);
+    executor.run_until_parked();
+
+    start_screen_share(cx_b).await;
+    executor.run_until_parked();
+
+    workspace_a.update(cx_a, |workspace, cx| {
+        assert_active_item(workspace, "user_b's screen", cx);
+    });
+}
+
+#[gpui::test]
 async fn test_auto_watch_toggle_off_leaves_tabs_open(
     executor: BackgroundExecutor,
     cx_a: &mut TestAppContext,
