@@ -11,7 +11,7 @@ use crate::{
     MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
     PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, Priority, PromptButton,
     PromptLevel, Quad, Render, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams,
-    Replay, ResizeEdge, Rgba, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y,
+    Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y,
     ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite,
     SubscriberSet, Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap,
     TaffyLayoutEngine, Task, TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState,
@@ -3573,18 +3573,7 @@ impl Window {
         );
         let integer_origin = quantized_origin.map(|c| ScaledPixels(c.trunc()));
         let subpixel_rendering = self.should_use_subpixel_rendering(font_id, font_size);
-        let dilation = if cfg!(target_os = "macos") {
-            // CoreGraphics applies stem darkening to glyphs based on the foreground color's
-            // luminance. The luminance is quantized to 5 levels (0.00, 0.25, 0.50, 0.75, 1.00)
-            // which each map to a different dilation amount. We replicate this quantization
-            // so we can cache the correct dilated glyph variant in the atlas.
-            let rgba: Rgba = color.into();
-            let luminance = 0.2126 * rgba.r + 0.7152 * rgba.g + 0.0722 * rgba.b;
-            let level = ((4.0 * luminance) + 0.5).floor() as i32;
-            level.clamp(0, 4) as u8
-        } else {
-            0u8
-        };
+        let dilation = self.text_system().glyph_dilation_for_color(color);
         let params = RenderGlyphParams {
             font_id,
             glyph_id,

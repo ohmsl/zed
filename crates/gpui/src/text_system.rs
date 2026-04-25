@@ -348,6 +348,11 @@ impl TextSystem {
             .rasterize_glyph(params, raster_bounds)
     }
 
+    /// Returns the dilation level to use for a glyph painted in the given color.
+    pub(crate) fn glyph_dilation_for_color(&self, color: Hsla) -> u8 {
+        self.platform_text_system.glyph_dilation_for_color(color)
+    }
+
     /// Returns the text rendering mode recommended by the platform for the given font and size.
     /// The return value will never be [`TextRenderingMode::PlatformDefault`].
     pub(crate) fn recommended_rendering_mode(
