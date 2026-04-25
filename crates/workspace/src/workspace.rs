@@ -4800,6 +4800,15 @@ impl Workspace {
             return;
         }
 
+        let local_user_is_sharing = self
+            .active_call()
+            .map_or(false, |call| call.is_sharing_screen(cx));
+
+        // Do not allow spotlighting peers while sharing screen
+        if local_user_is_sharing {
+            return;
+        }
+
         let active_pane = self.active_pane.clone();
         self.unfollow_in_pane(&active_pane, window, cx);
 

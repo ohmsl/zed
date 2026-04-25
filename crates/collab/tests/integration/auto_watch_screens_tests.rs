@@ -186,17 +186,16 @@ async fn test_auto_watch_ignores_shares_while_user_is_sharing(
     let setup = setup_auto_watch_test(&mut server, cx_a, cx_b, cx_c).await;
     let (workspace_a, cx_a) = setup.client_a.build_workspace(&setup.project_a, cx_a);
 
-    // Enable auto-watch.
+    // User A shares their screen, then B also shares.
+    start_screen_share(cx_a).await;
+    executor.run_until_parked();
+    start_screen_share(cx_b).await;
+    executor.run_until_parked();
+
+    // Toggle auto-watch on while A is sharing — should NOT open B's screen.
     workspace_a.update_in(cx_a, |workspace, window, cx| {
         workspace.toggle_auto_watch_screens(window, cx);
     });
-
-    // User A starts sharing their own screen.
-    start_screen_share(cx_a).await;
-    executor.run_until_parked();
-
-    // User B starts sharing — auto-watch should NOT open B's screen.
-    start_screen_share(cx_b).await;
     executor.run_until_parked();
 
     workspace_a.update(cx_a, |workspace, cx| {
@@ -207,24 +206,40 @@ async fn test_auto_watch_ignores_shares_while_user_is_sharing(
             .any(|item| item.tab_content_text(0, cx).contains("screen"));
         assert!(
             !has_shared_screen_tab,
-            "should not open anyone's screen share while user is sharing"
+            "should not open anyone's screen share when toggling on while sharing"
         );
     });
 
-    // User A stops sharing.
+    // A starts sharing while auto-watch is already on.
+    // (toggle off and back on to reset, then share)
+    workspace_a.update_in(cx_a, |workspace, window, cx| {
+        workspace.toggle_auto_watch_screens(window, cx);
+    });
     stop_screen_share(cx_a);
-    executor.run_until_parked();
-
-    // Now B starts sharing again (or is still sharing) — auto-watch should pick it up.
-    // B is already sharing, so we need a new event. Stop and restart B.
     stop_screen_share(cx_b);
     executor.run_until_parked();
 
-    start_screen_share(cx_b).await;
+    workspace_a.update_in(cx_a, |workspace, window, cx| {
+        workspace.toggle_auto_watch_screens(window, cx);
+    });
+    start_screen_share(cx_a).await;
+    executor.run_until_parked();
+
+    // C starts sharing — auto-watch should NOT open C's screen.
+    start_screen_share(cx_c).await;
     executor.run_until_parked();
 
     workspace_a.update(cx_a, |workspace, cx| {
-        assert_active_item(workspace, "user_b's screen", cx);
+        let screen_tab_count = workspace
+            .active_pane()
+            .read(cx)
+            .items()
+            .filter(|item| item.tab_content_text(0, cx).contains("screen"))
+            .count();
+        assert_eq!(
+            screen_tab_count, 0,
+            "should not open anyone's screen share while user is sharing"
+        );
     });
 }
 
