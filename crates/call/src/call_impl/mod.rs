@@ -216,6 +216,9 @@ impl AnyActiveCall for ActiveCallEntity {
                             participant_id: *participant_id,
                         })
                     }
+                    room::Event::LocalScreenShareStopped => {
+                        Some(ActiveCallEvent::LocalScreenShareStopped)
+                    }
                     _ => None,
                 };
                 if let Some(event) = mapped {

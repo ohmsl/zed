@@ -46,6 +46,7 @@ pub enum Event {
     RemoteVideoTrackUnsubscribed {
         sid: TrackSid,
     },
+    LocalScreenShareStopped,
     RemoteAudioTracksChanged {
         participant_id: proto::PeerId,
     },
@@ -1674,6 +1675,7 @@ impl Room {
                     let sid = track_publication.sid();
                     cx.spawn(async move |_, cx| local_participant.unpublish_track(sid, cx).await)
                         .detach_and_log_err(cx);
+                    cx.emit(Event::LocalScreenShareStopped);
                     cx.notify();
                 }
 

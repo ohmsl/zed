@@ -4868,6 +4868,27 @@ impl Workspace {
         }
     }
 
+    fn handle_auto_watch_local_share_stopped(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.auto_watch_screens.is_none() {
+            return;
+        }
+
+        let spotlighted_peer = self
+            .active_call()
+            .and_then(|call| call.peer_ids_with_video_tracks(cx).first().copied());
+
+        if let Some(auto_watch) = self.auto_watch_screens.as_mut() {
+            auto_watch.spotlighted_peer = spotlighted_peer;
+        }
+        if let Some(peer_id) = spotlighted_peer {
+            self.open_shared_screen(peer_id, window, cx);
+        }
+    }
+
     pub fn activate_item(
         &mut self,
         item: &dyn ItemHandle,
@@ -6604,6 +6625,9 @@ impl Workspace {
                 self.leader_updated(participant_id, window, cx);
                 self.handle_auto_watch_video_tracks_changed(*participant_id, window, cx);
             }
+            ActiveCallEvent::LocalScreenShareStopped => {
+                self.handle_auto_watch_local_share_stopped(window, cx);
+            }
         }
     }
 
@@ -8051,6 +8075,7 @@ pub struct RemoteCollaborator {
 pub enum ActiveCallEvent {
     ParticipantLocationChanged { participant_id: PeerId },
     RemoteVideoTracksChanged { participant_id: PeerId },
+    LocalScreenShareStopped,
 }
 
 fn leader_border_for_pane(
