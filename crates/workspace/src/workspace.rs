@@ -4818,7 +4818,7 @@ impl Workspace {
 
     fn handle_auto_watch_video_tracks_changed(
         &mut self,
-        participant_id: PeerId,
+        peer_id: PeerId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -4827,20 +4827,19 @@ impl Workspace {
         };
         let spotlighted_peer = auto_watch.spotlighted_peer;
 
-        let participant_is_sharing = self.active_call().map_or(false, |call| {
-            call.peer_ids_with_video_tracks(cx)
-                .contains(&participant_id)
+        let peer_is_sharing = self.active_call().map_or(false, |call| {
+            call.peer_ids_with_video_tracks(cx).contains(&peer_id)
         });
+        let should_spotlight = peer_is_sharing && spotlighted_peer.is_none();
+        let spotlighted_peer_stopped = spotlighted_peer == Some(peer_id) && !peer_is_sharing;
 
-        if participant_is_sharing && spotlighted_peer.is_none() {
-            if let Some(auto_watch) = self.auto_watch_screens.as_mut() {
-                auto_watch.spotlighted_peer = Some(participant_id);
-            }
-            self.open_shared_screen(participant_id, window, cx);
-        } else if !participant_is_sharing && spotlighted_peer == Some(participant_id) {
-            let next_peer = self
-                .active_call()
-                .and_then(|call| call.peer_ids_with_video_tracks(cx).first().copied());
+        if should_spotlight || spotlighted_peer_stopped {
+            let next_peer = if should_spotlight {
+                Some(peer_id)
+            } else {
+                self.active_call()
+                    .and_then(|call| call.peer_ids_with_video_tracks(cx).first().copied())
+            };
 
             if let Some(auto_watch) = self.auto_watch_screens.as_mut() {
                 auto_watch.spotlighted_peer = next_peer;
