@@ -238,10 +238,7 @@ fn font_smoothing_allowed_by_user() -> bool {
 
         let key = CFString::new("AppleFontSmoothing");
         let value_ref = unsafe {
-            CFPreferencesCopyAppValue(
-                key.as_concrete_TypeRef(),
-                kCFPreferencesCurrentApplication,
-            )
+            CFPreferencesCopyAppValue(key.as_concrete_TypeRef(), kCFPreferencesCurrentApplication)
         };
         if value_ref.is_null() {
             return true;
