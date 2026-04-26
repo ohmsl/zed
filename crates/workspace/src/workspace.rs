@@ -1363,7 +1363,7 @@ pub struct Workspace {
     project: Entity<Project>,
     follower_states: HashMap<CollaboratorId, FollowerState>,
     last_leaders_by_pane: HashMap<WeakEntity<Pane>, CollaboratorId>,
-    auto_watch_screens: AutoWatchScreensState,
+    auto_watch_screen_state: AutoWatchScreensState,
     window_edited: bool,
     last_window_title: Option<String>,
     dirty_items: HashMap<EntityId, Subscription>,
@@ -1801,7 +1801,7 @@ impl Workspace {
             project: project.clone(),
             follower_states: Default::default(),
             last_leaders_by_pane: Default::default(),
-            auto_watch_screens: AutoWatchScreensState::Off,
+            auto_watch_screen_state: AutoWatchScreensState::Off,
             dispatching_keystrokes: Default::default(),
             window_edited: false,
             last_window_title: None,
@@ -4793,7 +4793,7 @@ impl Workspace {
     }
 
     pub fn auto_watch_screens_state(&self) -> &AutoWatchScreensState {
-        &self.auto_watch_screens
+        &self.auto_watch_screen_state
     }
 
     fn next_watched_peer(&self, cx: &App) -> Option<PeerId> {
@@ -4802,8 +4802,8 @@ impl Workspace {
     }
 
     pub fn toggle_auto_watch_screens(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !matches!(self.auto_watch_screens, AutoWatchScreensState::Off) {
-            self.auto_watch_screens = AutoWatchScreensState::Off;
+        if !matches!(self.auto_watch_screen_state, AutoWatchScreensState::Off) {
+            self.auto_watch_screen_state = AutoWatchScreensState::Off;
             cx.notify();
             return;
         }
@@ -4816,10 +4816,10 @@ impl Workspace {
             .map_or(false, |call| call.is_sharing_screen(cx));
 
         if local_is_sharing {
-            self.auto_watch_screens = AutoWatchScreensState::Paused;
+            self.auto_watch_screen_state = AutoWatchScreensState::Paused;
         } else {
             let watched_peer = self.next_watched_peer(cx);
-            self.auto_watch_screens = AutoWatchScreensState::Active { watched_peer };
+            self.auto_watch_screen_state = AutoWatchScreensState::Active { watched_peer };
 
             if let Some(peer_id) = watched_peer {
                 self.open_shared_screen(peer_id, window, cx);
@@ -4835,7 +4835,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let AutoWatchScreensState::Active { watched_peer } = self.auto_watch_screens else {
+        let AutoWatchScreensState::Active { watched_peer } = self.auto_watch_screen_state else {
             return;
         };
 
@@ -4852,7 +4852,7 @@ impl Workspace {
                 self.next_watched_peer(cx)
             };
 
-            self.auto_watch_screens = AutoWatchScreensState::Active {
+            self.auto_watch_screen_state = AutoWatchScreensState::Active {
                 watched_peer: next_watched_peer,
             };
 
@@ -4867,12 +4867,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !matches!(self.auto_watch_screens, AutoWatchScreensState::Paused) {
+        if !matches!(self.auto_watch_screen_state, AutoWatchScreensState::Paused) {
             return;
         }
 
         let watched_peer = self.next_watched_peer(cx);
-        self.auto_watch_screens = AutoWatchScreensState::Active { watched_peer };
+        self.auto_watch_screen_state = AutoWatchScreensState::Active { watched_peer };
 
         if let Some(peer_id) = watched_peer {
             self.open_shared_screen(peer_id, window, cx);
@@ -6617,10 +6617,10 @@ impl Workspace {
             }
             ActiveCallEvent::LocalScreenShareStarted => {
                 if matches!(
-                    self.auto_watch_screens,
+                    self.auto_watch_screen_state,
                     AutoWatchScreensState::Active { .. }
                 ) {
-                    self.auto_watch_screens = AutoWatchScreensState::Paused;
+                    self.auto_watch_screen_state = AutoWatchScreensState::Paused;
                     cx.notify();
                 }
             }
