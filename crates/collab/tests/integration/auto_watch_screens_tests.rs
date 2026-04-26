@@ -4,7 +4,7 @@ use gpui::{App, BackgroundExecutor, Entity, TestAppContext, TestScreenCaptureSou
 use project::Project;
 use serde_json::json;
 use util::path;
-use workspace::Workspace;
+use workspace::{AutoWatchScreensState, Workspace};
 
 use super::TestClient;
 
@@ -131,7 +131,10 @@ async fn test_auto_watch_opens_share_when_no_one_is_sharing_yet(
         workspace.toggle_auto_watch_screens(window, cx);
     });
     workspace_a.update(cx_a, |workspace, _| {
-        assert!(workspace.is_auto_watching_screens());
+        assert!(matches!(
+            workspace.auto_watch_screens_state(),
+            AutoWatchScreensState::Active { .. }
+        ));
     });
 
     start_screen_share(cx_b).await;
@@ -300,7 +303,10 @@ async fn test_auto_watch_toggle_off_leaves_tabs_open(
     });
 
     workspace_a.update(cx_a, |workspace, cx| {
-        assert!(!workspace.is_auto_watching_screens());
+        assert!(matches!(
+            workspace.auto_watch_screens_state(),
+            AutoWatchScreensState::Off
+        ));
         assert_active_item(workspace, "user_b's screen", cx);
     });
 }

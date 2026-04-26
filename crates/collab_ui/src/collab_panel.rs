@@ -41,8 +41,8 @@ use ui::{
 };
 use util::{ResultExt, TryFutureExt, maybe};
 use workspace::{
-    CopyRoomId, Deafen, LeaveCall, MultiWorkspace, Mute, OpenChannelNotes, OpenChannelNotesById,
-    ScreenShare, ShareProject, Workspace,
+    AutoWatchScreensState, CopyRoomId, Deafen, LeaveCall, MultiWorkspace, Mute, OpenChannelNotes,
+    OpenChannelNotesById, ScreenShare, ShareProject, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
     notifications::{
         DetachAndPromptErr, Notification as WorkspaceNotification, NotificationId, NotifyResultExt,
@@ -2896,16 +2896,13 @@ impl CollabPanel {
             Section::Offline => SharedString::from("Offline"),
         };
 
-        let (is_auto_watching, is_auto_watch_paused) =
-            self.workspace
-                .upgrade()
-                .map_or((false, false), |workspace| {
-                    let workspace = workspace.read(cx);
-                    (
-                        workspace.is_auto_watching_screens(),
-                        workspace.is_auto_watch_screens_paused(cx),
-                    )
-                });
+        let auto_watch_state = self
+            .workspace
+            .upgrade()
+            .map_or(AutoWatchScreensState::Off, |workspace| {
+                *workspace.read(cx).auto_watch_screens_state()
+            });
+        let is_auto_watching = !matches!(auto_watch_state, AutoWatchScreensState::Off);
 
         let button = match section {
             Section::ActiveCall => {
@@ -2928,20 +2925,23 @@ impl CollabPanel {
                                     )
                                     .icon_size(IconSize::Small)
                                     .toggle_state(is_auto_watching)
-                                    .selected_style(if is_auto_watch_paused {
-                                        ButtonStyle::Tinted(TintColor::Warning)
-                                    } else {
-                                        ButtonStyle::Tinted(TintColor::Accent)
+                                    .selected_style(match auto_watch_state {
+                                        AutoWatchScreensState::Paused => {
+                                            ButtonStyle::Tinted(TintColor::Warning)
+                                        }
+                                        _ => ButtonStyle::Tinted(TintColor::Accent),
                                     })
                                     .when(!is_auto_watching, |this| {
                                         this.visible_on_hover("section-header")
                                     })
-                                    .tooltip(Tooltip::text(if is_auto_watch_paused {
-                                        "Auto Watch Screens (paused while sharing)"
-                                    } else if is_auto_watching {
-                                        "Stop Auto Watching Screens"
-                                    } else {
-                                        "Auto Watch Screens"
+                                    .tooltip(Tooltip::text(match auto_watch_state {
+                                        AutoWatchScreensState::Paused => {
+                                            "Auto Watch Screens (paused while sharing)"
+                                        }
+                                        AutoWatchScreensState::Active { .. } => {
+                                            "Stop Auto Watching Screens"
+                                        }
+                                        AutoWatchScreensState::Off => "Auto Watch Screens",
                                     }))
                                     .on_click(cx.listener(
                                         |this, _, window, cx| {

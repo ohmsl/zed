@@ -66,6 +66,7 @@ pub enum Event {
     RoomLeft {
         channel_id: Option<ChannelId>,
     },
+    LocalScreenShareStarted,
     LocalScreenShareStopped,
 }
 
@@ -1514,6 +1515,7 @@ impl Room {
                                 track_publication: publication,
                                 _stream: stream,
                             };
+                            cx.emit(Event::LocalScreenShareStarted);
                             cx.notify();
                         }
 

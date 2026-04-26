@@ -1363,7 +1363,7 @@ pub struct Workspace {
     project: Entity<Project>,
     follower_states: HashMap<CollaboratorId, FollowerState>,
     last_leaders_by_pane: HashMap<WeakEntity<Pane>, CollaboratorId>,
-    auto_watch_screens: Option<AutoWatchScreensState>,
+    auto_watch_screens: AutoWatchScreensState,
     window_edited: bool,
     last_window_title: Option<String>,
     dirty_items: HashMap<EntityId, Subscription>,
@@ -1416,8 +1416,11 @@ pub struct FollowerState {
     items_by_leader_view_id: HashMap<ViewId, FollowerView>,
 }
 
-pub struct AutoWatchScreensState {
-    watched_peer: Option<PeerId>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoWatchScreensState {
+    Off,
+    Active { watched_peer: Option<PeerId> },
+    Paused,
 }
 
 struct FollowerView {
@@ -1798,7 +1801,7 @@ impl Workspace {
             project: project.clone(),
             follower_states: Default::default(),
             last_leaders_by_pane: Default::default(),
-            auto_watch_screens: None,
+            auto_watch_screens: AutoWatchScreensState::Off,
             dispatching_keystrokes: Default::default(),
             window_edited: false,
             last_window_title: None,
@@ -4789,17 +4792,8 @@ impl Workspace {
         }
     }
 
-    pub fn is_auto_watching_screens(&self) -> bool {
-        self.auto_watch_screens.is_some()
-    }
-
-    pub fn is_auto_watch_screens_paused(&self, cx: &App) -> bool {
-        self.auto_watch_screens.is_some() && self.local_user_is_sharing_screen(cx)
-    }
-
-    fn local_user_is_sharing_screen(&self, cx: &App) -> bool {
-        self.active_call()
-            .map_or(false, |call| call.is_sharing_screen(cx))
+    pub fn auto_watch_screens_state(&self) -> &AutoWatchScreensState {
+        &self.auto_watch_screens
     }
 
     fn next_watched_peer(&self, cx: &App) -> Option<PeerId> {
@@ -4808,8 +4802,8 @@ impl Workspace {
     }
 
     pub fn toggle_auto_watch_screens(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.auto_watch_screens.is_some() {
-            self.auto_watch_screens = None;
+        if !matches!(self.auto_watch_screens, AutoWatchScreensState::Off) {
+            self.auto_watch_screens = AutoWatchScreensState::Off;
             cx.notify();
             return;
         }
@@ -4817,18 +4811,19 @@ impl Workspace {
         let active_pane = self.active_pane.clone();
         self.unfollow_in_pane(&active_pane, window, cx);
 
-        let next_watched_peer = if self.local_user_is_sharing_screen(cx) {
-            None
+        let local_is_sharing = self
+            .active_call()
+            .map_or(false, |call| call.is_sharing_screen(cx));
+
+        if local_is_sharing {
+            self.auto_watch_screens = AutoWatchScreensState::Paused;
         } else {
-            self.next_watched_peer(cx)
-        };
+            let watched_peer = self.next_watched_peer(cx);
+            self.auto_watch_screens = AutoWatchScreensState::Active { watched_peer };
 
-        self.auto_watch_screens = Some(AutoWatchScreensState {
-            watched_peer: next_watched_peer,
-        });
-
-        if let Some(next_watched_peer) = next_watched_peer {
-            self.open_shared_screen(next_watched_peer, window, cx);
+            if let Some(peer_id) = watched_peer {
+                self.open_shared_screen(peer_id, window, cx);
+            }
         }
 
         cx.notify();
@@ -4840,15 +4835,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(auto_watch) = self.auto_watch_screens.as_ref() else {
+        let AutoWatchScreensState::Active { watched_peer } = self.auto_watch_screens else {
             return;
         };
-
-        if self.local_user_is_sharing_screen(cx) {
-            return;
-        }
-
-        let watched_peer = auto_watch.watched_peer;
 
         let peer_is_sharing = self.active_call().map_or(false, |call| {
             call.peer_ids_with_video_tracks(cx).contains(&peer_id)
@@ -4863,9 +4852,9 @@ impl Workspace {
                 self.next_watched_peer(cx)
             };
 
-            if let Some(auto_watch) = self.auto_watch_screens.as_mut() {
-                auto_watch.watched_peer = next_watched_peer;
-            }
+            self.auto_watch_screens = AutoWatchScreensState::Active {
+                watched_peer: next_watched_peer,
+            };
 
             if let Some(next_watched_peer) = next_watched_peer {
                 self.open_shared_screen(next_watched_peer, window, cx);
@@ -4878,18 +4867,15 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.auto_watch_screens.is_none() {
+        if !matches!(self.auto_watch_screens, AutoWatchScreensState::Paused) {
             return;
         }
 
-        let next_watched_peer = self.next_watched_peer(cx);
+        let watched_peer = self.next_watched_peer(cx);
+        self.auto_watch_screens = AutoWatchScreensState::Active { watched_peer };
 
-        if let Some(auto_watch) = self.auto_watch_screens.as_mut() {
-            auto_watch.watched_peer = next_watched_peer;
-        }
-
-        if let Some(next_watched_peer) = next_watched_peer {
-            self.open_shared_screen(next_watched_peer, window, cx);
+        if let Some(peer_id) = watched_peer {
+            self.open_shared_screen(peer_id, window, cx);
         }
     }
 
@@ -6629,6 +6615,15 @@ impl Workspace {
                 self.leader_updated(participant_id, window, cx);
                 self.handle_auto_watch_video_tracks_changed(*participant_id, window, cx);
             }
+            ActiveCallEvent::LocalScreenShareStarted => {
+                if matches!(
+                    self.auto_watch_screens,
+                    AutoWatchScreensState::Active { .. }
+                ) {
+                    self.auto_watch_screens = AutoWatchScreensState::Paused;
+                    cx.notify();
+                }
+            }
             ActiveCallEvent::LocalScreenShareStopped => {
                 self.handle_auto_watch_local_share_stopped(window, cx);
             }
@@ -8079,6 +8074,7 @@ pub struct RemoteCollaborator {
 pub enum ActiveCallEvent {
     ParticipantLocationChanged { participant_id: PeerId },
     RemoteVideoTracksChanged { participant_id: PeerId },
+    LocalScreenShareStarted,
     LocalScreenShareStopped,
 }
 
