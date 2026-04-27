@@ -266,9 +266,7 @@ impl Pasteboard {
                 .map(|p| ns_string(&p.to_string_lossy()))
                 .collect();
             let ns_array = NSArray::arrayWithObjects(nil, &ns_paths);
-
-            let types = vec![NSFilenamesPboardType];
-            let types_array = NSArray::arrayWithObjects(nil, &types);
+            let types_array = NSArray::arrayWithObjects(nil, &[NSFilenamesPboardType]);
             self.inner.declareTypes_owner(types_array, nil);
 
             self.inner
