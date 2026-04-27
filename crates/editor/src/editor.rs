@@ -26777,7 +26777,7 @@ impl Editor {
             .as_f64();
 
         match cursor_display_row - scroll_top {
-            offset if offset < 0.0 || offset >= visible as f64 => None,
+            offset if offset < 0.0 || offset >= visible => None,
             offset => Some(offset),
         }
     }
