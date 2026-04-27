@@ -22,8 +22,8 @@ pub fn release_nightly() -> Workflow {
     let check = check_for_changes();
     let style = with_changes_guard(check_style(), &check);
     // Run only on windows as that's our fastest platform right now.
-    let tests = with_changes_guard(run_platform_tests_no_filter(Platform::Windows), &check);
-    let clippy_job = with_changes_guard(clippy(Platform::Windows, None), &check);
+    let tests = with_changes_guard(run_platform_tests_no_filter(Platform::Linux), &check);
+    let clippy_job = with_changes_guard(clippy(Platform::Linux, None), &check);
     const NIGHTLY: Option<ReleaseChannel> = Some(ReleaseChannel::Nightly);
 
     let bundle = ReleaseBundleJobs {
