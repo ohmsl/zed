@@ -114,6 +114,10 @@ impl EventEmitter<workspace::ToolbarItemEvent> for BufferSearchBar {}
 impl Render for BufferSearchBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focus_handle = self.focus_handle(cx);
+        let item_focus_handle = self
+            .active_item
+            .as_ref()
+            .map(|item| item.item_focus_handle(cx));
 
         let has_splittable_editor = self.splittable_editor.is_some();
         let split_buttons = if has_splittable_editor {
@@ -216,8 +220,14 @@ impl Render for BufferSearchBar {
                                 }),
                         )
                         .when_some(self.project_diff_mode, |this, project_diff_mode| {
-                            let uncommitted_focus = split_focus_handle.clone();
-                            let unstaged_focus = split_focus_handle.clone();
+                            // The active item can render an empty-state view without the
+                            // splittable editor focused or even mounted, so use the item's
+                            // focus handle when switching diff modes.
+                            let mode_focus_handle = item_focus_handle
+                                .clone()
+                                .unwrap_or_else(|| split_focus_handle.clone());
+                            let uncommitted_focus = mode_focus_handle.clone();
+                            let unstaged_focus = mode_focus_handle;
 
                             this.child(
                                 ToggleButtonGroup::single_row(
