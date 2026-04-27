@@ -129,7 +129,10 @@ impl From<extension::TcpArgumentsTemplate> for TcpArgumentsTemplate {
         Self {
             host: value.host.and_then(|addr| match addr {
                 IpAddr::V4(v4) => Some(v4.to_bits()),
-                IpAddr::V6(_) => None,
+                IpAddr::V6(v6) => {
+                    log::warn!("DAP extension returned an IPv6 host address ({v6}), which is not supported in the extension API — ignoring");
+                    None
+                }
             }),
             port: value.port,
             timeout: value.timeout,
