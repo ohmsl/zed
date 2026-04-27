@@ -8,7 +8,7 @@ use cocoa::{
         NSPasteboardTypeTIFF,
     },
     base::{id, nil},
-    foundation::{NSArray, NSData, NSFastEnumeration, NSString},
+    foundation::{NSArray, NSData, NSFastEnumeration, NSString, NSURL},
 };
 use objc::{msg_send, runtime::Object, sel, sel_impl};
 use smallvec::SmallVec;
@@ -258,19 +258,28 @@ impl Pasteboard {
 
     unsafe fn write_external_paths(&self, paths: &ExternalPaths) {
         unsafe {
+            // Wipe any prior contents and bump the pasteboard's change count so
+            // observers (other apps, our own paste handlers) see a fresh write.
             self.inner.clearContents();
 
-            let ns_paths: Vec<id> = paths
+            // Build an NSArray of NSURL file URLs. NSURL conforms to
+            // NSPasteboardWriting, so each URL knows how to serialize itself
+            // onto the pasteboard. The system automatically advertises the
+            // appropriate pasteboard types (notably public.file-url, plus a
+            // bridged NSFilenamesPboardType representation for legacy readers),
+            // so we don't need the older declareTypes:/setPropertyList:forType:
+            // dance.
+            let ns_urls: Vec<id> = paths
                 .paths()
                 .iter()
-                .map(|p| ns_string(&p.to_string_lossy()))
+                .map(|p| {
+                    let ns_path = ns_string(&p.to_string_lossy());
+                    NSURL::fileURLWithPath_(nil, ns_path)
+                })
                 .collect();
-            let ns_array = NSArray::arrayWithObjects(nil, &ns_paths);
-            let types_array = NSArray::arrayWithObjects(nil, &[NSFilenamesPboardType]);
-            self.inner.declareTypes_owner(types_array, nil);
+            let urls_array = NSArray::arrayWithObjects(nil, &ns_urls);
 
-            self.inner
-                .setPropertyList_forType(ns_array, NSFilenamesPboardType);
+            self.inner.writeObjects(urls_array);
         }
     }
 }
