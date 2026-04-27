@@ -1,4 +1,4 @@
-use crate::{git_panel::GitStatusEntry, project_diff::ProjectDiff, resolve_active_repository};
+use crate::{git_panel::GitStatusEntry, project_diff::ProjectDiff};
 use anyhow::{Context as _, Result};
 use editor::{Editor, EditorEvent};
 use gpui::{
@@ -46,7 +46,7 @@ impl StagedDiff {
                 "Action"
             }
         );
-        let intended_repo = resolve_active_repository(workspace, cx);
+        let intended_repo = workspace.project().read(cx).active_repository(cx);
         let existing = workspace.items_of_type::<Self>(cx).next();
         let staged_diff = if let Some(existing) = existing {
             workspace.activate_item(&existing, true, true, window, cx);
@@ -71,7 +71,7 @@ impl StagedDiff {
                 .project_diff
                 .read(cx)
                 .repo(cx)
-                .map_or(true, |current| current.read(cx).id != intended.read(cx).id);
+                .map_or(true, |current| current.entity_id() != intended.entity_id());
             if needs_switch {
                 staged_diff.update(cx, |staged_diff, cx| {
                     staged_diff.project_diff.update(cx, |project_diff, cx| {
