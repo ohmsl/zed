@@ -672,6 +672,18 @@ pub(super) enum CellSource {
     },
 }
 
+impl CellSource {
+    fn into_outputs(self) -> (Option<i32>, Vec<Output>) {
+        match self {
+            CellSource::Existing {
+                execution_count,
+                outputs,
+            } => (execution_count, outputs),
+            CellSource::None => Default::default(),
+        }
+    }
+}
+
 impl CodeCell {
     pub(super) fn new(
         cell_source: CellSource,
@@ -723,13 +735,7 @@ impl CodeCell {
             });
         });
 
-        let (execution_count, outputs) = match cell_source {
-            CellSource::Existing {
-                execution_count,
-                outputs,
-            } => (execution_count, outputs),
-            CellSource::None => Default::default(),
-        };
+        let (execution_count, outputs) = cell_source.into_outputs();
 
         Self {
             id,
