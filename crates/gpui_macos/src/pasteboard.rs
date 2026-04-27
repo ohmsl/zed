@@ -1,5 +1,6 @@
 use core::slice;
-use std::ffi::{CStr, c_void};
+use std::ffi::{CStr, c_char, c_void};
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use cocoa::{
@@ -8,9 +9,9 @@ use cocoa::{
         NSPasteboardTypeTIFF,
     },
     base::{id, nil},
-    foundation::{NSArray, NSData, NSFastEnumeration, NSString, NSURL},
+    foundation::{NSArray, NSData, NSFastEnumeration, NSString, NSUInteger},
 };
-use objc::{msg_send, runtime::Object, sel, sel_impl};
+use objc::{class, msg_send, runtime::Object, sel, sel_impl};
 use smallvec::SmallVec;
 use strum::IntoEnumIterator as _;
 
@@ -258,28 +259,52 @@ impl Pasteboard {
 
     unsafe fn write_external_paths(&self, paths: &ExternalPaths) {
         unsafe {
-            // Wipe any prior contents and bump the pasteboard's change count so
-            // observers (other apps, our own paste handlers) see a fresh write.
-            self.inner.clearContents();
-
-            // Build an NSArray of NSURL file URLs. NSURL conforms to
-            // NSPasteboardWriting, so each URL knows how to serialize itself
-            // onto the pasteboard. The system automatically advertises the
-            // appropriate pasteboard types (notably public.file-url, plus a
-            // bridged NSFilenamesPboardType representation for legacy readers),
-            // so we don't need the older declareTypes:/setPropertyList:forType:
-            // dance.
-            let ns_urls: Vec<id> = paths
+            // Convert each path to an NSString using
+            // +[NSString stringWithFileSystemRepresentation:length:], which
+            // takes the path's raw bytes plus an explicit length. This is the
+            // documented lossless conversion from a file system path to an
+            // NSString: no I/O, no null-termination requirement, and no
+            // semantic flags whose behavior we'd have to reason about. Going
+            // through a Rust &str (e.g. via to_string_lossy) would instead
+            // corrupt any path containing non-UTF-8 bytes by replacing them
+            // with U+FFFD.
+            //
+            // We deliberately stay on the legacy NSFilenamesPboardType type
+            // rather than switching to NSURL + writeObjects:, because every
+            // NSURL file-URL initializer either performs a synchronous stat or
+            // requires an isDirectory: hint whose effect on URL resolution is
+            // not guaranteed to be benign for pasteboard consumers.
+            let nsstring_class = class!(NSString);
+            let ns_strings: Vec<id> = paths
                 .paths()
                 .iter()
-                .map(|p| {
-                    let ns_path = ns_string(&p.to_string_lossy());
-                    NSURL::fileURLWithPath_(nil, ns_path)
+                .filter_map(|path| {
+                    let bytes = path.as_os_str().as_bytes();
+                    let ns_string: id = msg_send![
+                        nsstring_class,
+                        stringWithFileSystemRepresentation: bytes.as_ptr() as *const c_char
+                        length: bytes.len() as NSUInteger
+                    ];
+                    if ns_string == nil {
+                        None
+                    } else {
+                        Some(ns_string)
+                    }
                 })
                 .collect();
-            let urls_array = NSArray::arrayWithObjects(nil, &ns_urls);
+            let paths_array = NSArray::arrayWithObjects(nil, &ns_strings);
 
-            self.inner.writeObjects(urls_array);
+            // NSPasteboard's legacy write protocol is two-step: declareTypes:
+            // both clears the pasteboard and registers which types we'll be
+            // providing data for, then setPropertyList:forType: actually writes
+            // the array of paths under that registered type. Calls to
+            // setPropertyList:forType: for an undeclared type are silently
+            // ignored, so the declareTypes: call is required, not just
+            // hygienic.
+            let types_array = NSArray::arrayWithObjects(nil, &[NSFilenamesPboardType]);
+            self.inner.declareTypes_owner(types_array, nil);
+            self.inner
+                .setPropertyList_forType(paths_array, NSFilenamesPboardType);
         }
     }
 }
