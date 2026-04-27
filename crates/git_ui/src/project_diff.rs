@@ -2111,7 +2111,6 @@ impl Addon for BranchDiffAddon {
 #[cfg(test)]
 mod tests {
     use crate::staged_diff::StagedDiff;
-    use anyhow::Context as _;
     use buffer_diff::DiffHunkSecondaryStatus;
     use collections::HashMap;
     use db::indoc;
@@ -3261,10 +3260,7 @@ mod tests {
             diff_editor.read_with(cx, |editor, cx| {
                 let snapshot = editor.buffer().read(cx).snapshot(cx);
                 editor
-                    .diff_hunks_in_ranges(
-                        &[editor::Anchor::min()..editor::Anchor::max()],
-                        &snapshot,
-                    )
+                    .diff_hunks_in_ranges(&[editor::Anchor::Min..editor::Anchor::Max], &snapshot)
                     .map(|hunk| hunk.status.secondary)
                     .collect::<Vec<_>>()
             }),
@@ -3292,10 +3288,7 @@ mod tests {
             diff_editor.read_with(cx, |editor, cx| {
                 let snapshot = editor.buffer().read(cx).snapshot(cx);
                 editor
-                    .diff_hunks_in_ranges(
-                        &[editor::Anchor::min()..editor::Anchor::max()],
-                        &snapshot,
-                    )
+                    .diff_hunks_in_ranges(&[editor::Anchor::Min..editor::Anchor::Max], &snapshot)
                     .map(|hunk| hunk.status.secondary)
                     .collect::<Vec<_>>()
             }),
@@ -3320,10 +3313,7 @@ mod tests {
             diff_editor.read_with(cx, |editor, cx| {
                 let snapshot = editor.buffer().read(cx).snapshot(cx);
                 editor
-                    .diff_hunks_in_ranges(
-                        &[editor::Anchor::min()..editor::Anchor::max()],
-                        &snapshot,
-                    )
+                    .diff_hunks_in_ranges(&[editor::Anchor::Min..editor::Anchor::Max], &snapshot)
                     .map(|hunk| hunk.status.secondary)
                     .collect::<Vec<_>>()
             }),
@@ -3486,7 +3476,7 @@ mod tests {
         cx.run_until_parked();
 
         let project = workspace.update(cx, |workspace, _| workspace.project().clone());
-        let workspace_id = workspace::WORKSPACE_DB.next_id().await.unwrap();
+        let workspace_id = workspace::WorkspaceId::from_i64(1);
         let item_id = 42;
 
         let restore_task = workspace.update_in(cx, |_workspace, window, cx| {
@@ -3588,35 +3578,34 @@ mod tests {
         cx.run_until_parked();
 
         let project = workspace.update(cx, |workspace, _| workspace.project().clone());
-        let workspace_id = workspace::WORKSPACE_DB.next_id().await.unwrap();
+        let workspace_id = workspace::WorkspaceId::from_i64(1);
         let item_id = 42;
-        let diff_base = serde_json::to_string(&DiffBase::Staged).unwrap();
-        persistence::PROJECT_DIFF_DB
-            .write(move |connection| {
+        let db = cx.update(|_, cx| persistence::ProjectDiffDb::global(cx));
+        let write_result: anyhow::Result<()> = db
+            .write(move |connection: &db::sqlez::connection::Connection| {
                 let workspace_sql = sql!(
                     INSERT OR IGNORE INTO workspaces(workspace_id) VALUES (?)
                 );
                 let mut workspace_query =
                     connection.exec_bound::<workspace::WorkspaceId>(workspace_sql)?;
-                workspace_query(workspace_id).context(format!(
-                    "exec_bound failed to execute or parse for: {}",
-                    workspace_sql
-                ))?;
+                workspace_query(workspace_id)?;
 
+                let diff_base = serde_json::to_string(
+                    &persistence::PersistedProjectDiffBase::Staged,
+                )
+                .unwrap();
                 let sql_stmt = sql!(
                     INSERT OR REPLACE INTO project_diffs(item_id, workspace_id, diff_base) VALUES (?, ?, ?)
                 );
-                let mut query =
-                    connection.exec_bound::<(workspace::ItemId, workspace::WorkspaceId, String)>(
+                let mut query = connection
+                    .exec_bound::<(workspace::ItemId, workspace::WorkspaceId, String)>(
                         sql_stmt,
                     )?;
-                query((item_id, workspace_id, diff_base)).context(format!(
-                    "exec_bound failed to execute or parse for: {}",
-                    sql_stmt
-                ))
+                query((item_id, workspace_id, diff_base))?;
+                Ok(())
             })
-            .await
-            .unwrap();
+            .await;
+        write_result.unwrap();
 
         let restore_task = workspace.update_in(cx, |_workspace, window, cx| {
             <ProjectDiff as SerializableItem>::deserialize(
