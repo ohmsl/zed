@@ -8,7 +8,7 @@ use agent_settings::AgentSettings;
 use chrono::{DateTime, Utc};
 use git::Clone as GitClone;
 use gpui::{
-    Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
+    Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Global, InteractiveElement,
     ParentElement, Render, Styled, Task, Window, actions,
 };
 use gpui::{WeakEntity, linear_color_stop, linear_gradient};
@@ -17,6 +17,7 @@ use menu::{SelectNext, SelectPrevious};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::Settings;
+use std::rc::Rc;
 use ui::{ButtonLike, Divider, DividerColor, KeyBinding, Vector, VectorName, prelude::*};
 use util::ResultExt;
 use zed_actions::{
@@ -37,6 +38,44 @@ actions!(
         ShowWelcome
     ]
 );
+
+#[derive(Clone)]
+pub struct RecentWorkspaceOpenRequest {
+    pub workspace_id: WorkspaceId,
+    pub location: SerializedWorkspaceLocation,
+    pub paths: PathList,
+}
+
+pub type OpenRecentWorkspaceCallback =
+    Rc<dyn Fn(RecentWorkspaceOpenRequest, WeakEntity<Workspace>, &mut Window, &mut App) -> bool>;
+
+struct GlobalOpenRecentWorkspaceCallback(OpenRecentWorkspaceCallback);
+
+impl Global for GlobalOpenRecentWorkspaceCallback {}
+
+pub fn register_open_recent_workspace_callback(
+    callback: OpenRecentWorkspaceCallback,
+    cx: &mut App,
+) {
+    cx.set_global(GlobalOpenRecentWorkspaceCallback(callback));
+}
+
+fn open_recent_workspace(
+    request: RecentWorkspaceOpenRequest,
+    workspace: WeakEntity<Workspace>,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let callback = cx
+        .try_global::<GlobalOpenRecentWorkspaceCallback>()
+        .map(|callback| callback.0.clone());
+
+    if let Some(callback) = callback {
+        callback(request, workspace, window, cx)
+    } else {
+        false
+    }
+}
 
 #[derive(IntoElement)]
 struct SectionHeader {
@@ -310,24 +349,34 @@ impl WelcomePage {
         cx: &mut Context<Self>,
     ) {
         if let Some(recent_workspaces) = &self.recent_workspaces {
-            if let Some((_workspace_id, location, paths, _timestamp)) =
+            if let Some((workspace_id, location, paths, _timestamp)) =
                 recent_workspaces.get(action.index)
             {
-                let is_local = matches!(location, SerializedWorkspaceLocation::Local);
+                let request = RecentWorkspaceOpenRequest {
+                    workspace_id: *workspace_id,
+                    location: location.clone(),
+                    paths: paths.clone(),
+                };
+                if open_recent_workspace(request, self.workspace.clone(), window, cx) {
+                    return;
+                }
 
-                if is_local {
-                    let paths = paths.clone();
-                    let paths = paths.paths().to_vec();
-                    self.workspace
-                        .update(cx, |workspace, cx| {
-                            workspace
-                                .open_workspace_for_paths(OpenMode::Activate, paths, window, cx)
-                                .detach_and_log_err(cx);
-                        })
-                        .log_err();
-                } else {
-                    use zed_actions::OpenRecent;
-                    window.dispatch_action(OpenRecent::default().boxed_clone(), cx);
+                match location {
+                    SerializedWorkspaceLocation::Local => {
+                        let paths = paths.clone();
+                        let paths = paths.paths().to_vec();
+                        self.workspace
+                            .update(cx, |workspace, cx| {
+                                workspace
+                                    .open_workspace_for_paths(OpenMode::Activate, paths, window, cx)
+                                    .detach_and_log_err(cx);
+                            })
+                            .log_err();
+                    }
+                    SerializedWorkspaceLocation::Remote(_) => {
+                        use zed_actions::OpenRecent;
+                        window.dispatch_action(OpenRecent::default().boxed_clone(), cx);
+                    }
                 }
             }
         }
@@ -672,6 +721,114 @@ fn project_name(paths: &PathList) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    async fn test_remote_recent_project_uses_registered_opener(cx: &mut gpui::TestAppContext) {
+        use fs::FakeFs;
+        use remote::RemoteConnectionOptions;
+        use settings::SettingsStore;
+        use std::{cell::RefCell, path::PathBuf, rc::Rc};
+
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        let project = project::Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+
+        let opened = Rc::new(RefCell::new(None));
+        let opened_clone = opened.clone();
+        let remote_connection =
+            RemoteConnectionOptions::Mock(remote::MockConnectionOptions { id: 42 });
+        let project_path = PathBuf::from("/project");
+
+        cx.update(|window, cx| {
+            register_open_recent_workspace_callback(
+                Rc::new(move |request, _workspace, _window, _cx| {
+                    *opened_clone.borrow_mut() = Some(request);
+                    true
+                }),
+                cx,
+            );
+
+            let welcome = cx.new(|cx| WelcomePage::new(workspace.downgrade(), false, window, cx));
+            welcome.update(cx, |welcome, cx| {
+                let path_list_paths = [project_path.clone()];
+                welcome.recent_workspaces = Some(vec![(
+                    WorkspaceId(1),
+                    SerializedWorkspaceLocation::Remote(remote_connection.clone()),
+                    PathList::new(&path_list_paths),
+                    Utc::now(),
+                )]);
+                welcome.open_recent_project(&OpenRecentProject { index: 0 }, window, cx);
+            });
+        });
+
+        let opened = opened.borrow();
+        let request = opened
+            .as_ref()
+            .expect("remote recent project should use registered opener");
+        assert_eq!(request.workspace_id, WorkspaceId(1));
+        assert_eq!(
+            request.location,
+            SerializedWorkspaceLocation::Remote(remote_connection)
+        );
+        assert_eq!(request.paths.paths(), &[project_path]);
+    }
+
+    #[gpui::test]
+    async fn test_unhandled_remote_recent_project_falls_back_to_recent_projects(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use fs::FakeFs;
+        use remote::RemoteConnectionOptions;
+        use settings::SettingsStore;
+        use std::{cell::RefCell, path::PathBuf, rc::Rc};
+        use zed_actions::OpenRecent;
+
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        let project = project::Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+
+        let open_recent_dispatched = Rc::new(RefCell::new(false));
+        let open_recent_dispatched_clone = open_recent_dispatched.clone();
+        let remote_connection =
+            RemoteConnectionOptions::Mock(remote::MockConnectionOptions { id: 42 });
+        let project_path = PathBuf::from("/project");
+
+        cx.update(|window, cx| {
+            register_open_recent_workspace_callback(Rc::new(|_, _, _, _| false), cx);
+            cx.on_action(move |_: &OpenRecent, _cx| {
+                *open_recent_dispatched_clone.borrow_mut() = true;
+            });
+
+            let welcome = cx.new(|cx| WelcomePage::new(workspace.downgrade(), false, window, cx));
+            welcome.update(cx, |welcome, cx| {
+                let path_list_paths = [project_path.clone()];
+                welcome.recent_workspaces = Some(vec![(
+                    WorkspaceId(1),
+                    SerializedWorkspaceLocation::Remote(remote_connection.clone()),
+                    PathList::new(&path_list_paths),
+                    Utc::now(),
+                )]);
+                welcome.open_recent_project(&OpenRecentProject { index: 0 }, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(*open_recent_dispatched.borrow());
+    }
 
     #[test]
     fn test_project_name_empty() {

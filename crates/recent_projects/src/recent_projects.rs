@@ -7,6 +7,7 @@ mod ssh_config;
 
 use std::{
     path::{Path, PathBuf},
+    rc::Rc,
     sync::Arc,
 };
 
@@ -25,7 +26,7 @@ use disconnected_overlay::DisconnectedOverlay;
 use fuzzy_nucleo::{StringMatch, StringMatchCandidate, match_strings};
 use gpui::{
     Action, AnyElement, App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    Subscription, Task, WeakEntity, Window, actions, px,
+    Subscription, Task, WeakEntity, Window, WindowHandle, actions, px,
 };
 
 use picker::{
@@ -245,7 +246,57 @@ fn get_branch_for_worktree(
         })
 }
 
+fn open_remote_recent_project(
+    mut connection: RemoteConnectionOptions,
+    paths: Vec<PathBuf>,
+    workspace: &mut Workspace,
+    requesting_window: Option<WindowHandle<MultiWorkspace>>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let app_state = workspace.app_state().clone();
+    let open_options = OpenOptions {
+        requesting_window,
+        open_mode: OpenMode::Activate,
+        ..Default::default()
+    };
+
+    if let RemoteConnectionOptions::Ssh(connection) = &mut connection {
+        RemoteSettings::get_global(cx).fill_connection_options_from_settings(connection);
+    };
+
+    cx.spawn_in(window, async move |_, cx| {
+        open_remote_project(connection, paths, app_state, open_options, cx).await
+    })
+    .detach_and_prompt_err("Failed to open project", window, cx, |_, _, _| None);
+}
+
 pub fn init(cx: &mut App) {
+    workspace::welcome::register_open_recent_workspace_callback(
+        Rc::new(|request, workspace, window, cx| {
+            let Some(workspace) = workspace.upgrade() else {
+                return false;
+            };
+
+            workspace.update(cx, |workspace, cx| {
+                let SerializedWorkspaceLocation::Remote(connection) = request.location else {
+                    return false;
+                };
+
+                open_remote_recent_project(
+                    connection,
+                    request.paths.paths().to_vec(),
+                    workspace,
+                    window.window_handle().downcast::<MultiWorkspace>(),
+                    window,
+                    cx,
+                );
+                true
+            })
+        }),
+        cx,
+    );
+
     #[cfg(target_os = "windows")]
     cx.on_action(|open_wsl: &zed_actions::wsl_actions::OpenFolderInWsl, cx| {
         let create_new_window = open_wsl.create_new_window;
@@ -1202,37 +1253,20 @@ impl PickerDelegate for RecentProjectsDelegate {
                                     );
                             }
                         }
-                        SerializedWorkspaceLocation::Remote(mut connection) => {
-                            let app_state = workspace.app_state().clone();
+                        SerializedWorkspaceLocation::Remote(connection) => {
                             let replace_window = if replace_current_window {
                                 window.window_handle().downcast::<MultiWorkspace>()
                             } else {
                                 None
                             };
-                            let open_options = OpenOptions {
-                                requesting_window: replace_window,
-                                ..Default::default()
-                            };
-                            if let RemoteConnectionOptions::Ssh(connection) = &mut connection {
-                                RemoteSettings::get_global(cx)
-                                    .fill_connection_options_from_settings(connection);
-                            };
                             let paths = candidate_workspace_paths.paths().to_vec();
-                            cx.spawn_in(window, async move |_, cx| {
-                                open_remote_project(
-                                    connection.clone(),
-                                    paths,
-                                    app_state,
-                                    open_options,
-                                    cx,
-                                )
-                                .await
-                            })
-                            .detach_and_prompt_err(
-                                "Failed to open project",
+                            open_remote_recent_project(
+                                connection,
+                                paths,
+                                workspace,
+                                replace_window,
                                 window,
                                 cx,
-                                |_, _, _| None,
                             );
                         }
                     }
