@@ -3154,7 +3154,7 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
 }
 
 fn search_and_files_page() -> SettingsPage {
-    fn search_section() -> [SettingsPageItem; 9] {
+    fn search_section() -> [SettingsPageItem; 11] {
         [
             SettingsPageItem::SectionHeader("Search"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -3301,6 +3301,54 @@ fn search_and_files_page() -> SettingsPage {
                     },
                     write: |settings_content, value, _| {
                         settings_content.editor.seed_search_query_from_cursor = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Project Search Mode",
+                description: "Open project search in a tab or in the project search panel.",
+                field: Box::new(SettingField {
+                    json_path: Some("search.project_search_mode"),
+                    pick: |settings_content| {
+                        settings_content
+                            .editor
+                            .search
+                            .as_ref()?
+                            .project_search_mode
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .editor
+                            .search
+                            .get_or_insert_default()
+                            .project_search_mode = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Project Search Panel Dock",
+                description: "Choose which side hosts the project search panel.",
+                field: Box::new(SettingField {
+                    json_path: Some("search.project_search_panel_dock"),
+                    pick: |settings_content| {
+                        settings_content
+                            .editor
+                            .search
+                            .as_ref()?
+                            .project_search_panel_dock
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .editor
+                            .search
+                            .get_or_insert_default()
+                            .project_search_panel_dock = value;
                     },
                 }),
                 metadata: None,

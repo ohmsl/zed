@@ -698,6 +698,10 @@
     "regex": false,
     // Whether to center the cursor on each search match when navigating.
     "center_on_match": false,
+    // Where to open project search by default. Can be `tab` or `panel`.
+    "project_search_mode": "tab",
+    // Where to dock the project search panel in panel mode. Can be `left` or `right`.
+    "project_search_panel_dock": "right",
   },
   // When to populate a new search's query based on the text under the cursor.
   // This setting can take the following three values:

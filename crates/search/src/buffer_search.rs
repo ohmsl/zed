@@ -3647,6 +3647,7 @@ mod tests {
                 include_ignored: false,
                 regex: false,
                 center_on_match: false,
+                ..SearchSettings::default()
             },
             cx,
         );
@@ -3710,6 +3711,7 @@ mod tests {
                 include_ignored: false,
                 regex: false,
                 center_on_match: false,
+                ..SearchSettings::default()
             },
             cx,
         );
@@ -3748,6 +3750,7 @@ mod tests {
                 include_ignored: false,
                 regex: false,
                 center_on_match: false,
+                ..SearchSettings::default()
             },
             cx,
         );
@@ -3904,6 +3907,10 @@ mod tests {
                         include_ignored: Some(search_settings.include_ignored),
                         regex: Some(search_settings.regex),
                         center_on_match: Some(search_settings.center_on_match),
+                        project_search_mode: Some(search_settings.project_search_mode),
+                        project_search_panel_dock: Some(
+                            search_settings.project_search_panel_dock,
+                        ),
                     });
                 });
             });

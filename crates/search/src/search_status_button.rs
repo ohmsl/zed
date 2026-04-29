@@ -1,6 +1,6 @@
 use editor::EditorSettings;
 use gpui::FocusHandle;
-use settings::Settings as _;
+use settings::{ProjectSearchMode, Settings as _};
 use ui::{ButtonCommon, Clickable, Context, Render, Tooltip, Window, prelude::*};
 use workspace::{ItemHandle, StatusItemView};
 
@@ -22,7 +22,10 @@ impl Render for SearchButton {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl ui::IntoElement {
         let button = div();
 
-        if !EditorSettings::get_global(cx).search.button {
+        let search_settings = EditorSettings::get_global(cx).search;
+        if !search_settings.button
+            || search_settings.project_search_mode == ProjectSearchMode::Panel
+        {
             return button.hidden();
         }
 

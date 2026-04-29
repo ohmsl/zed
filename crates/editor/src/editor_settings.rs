@@ -5,10 +5,10 @@ use language::CursorShape;
 use project::project_settings::DiagnosticSeverity;
 pub use settings::{
     CodeLens, CompletionDetailAlignment, CurrentLineHighlight, DelayMs, DiffViewStyle, DisplayIn,
-    DocumentColorsRenderMode, DoubleClickInMultibuffer, GoToDefinitionFallback,
+    DockSide, DocumentColorsRenderMode, DoubleClickInMultibuffer, GoToDefinitionFallback,
     GoToDefinitionScrollStrategy, HideMouseMode, MinimapThumb, MinimapThumbBorder,
-    MultiCursorModifier, ScrollBeyondLastLine, ScrollbarDiagnostics, SeedQuerySetting, ShowMinimap,
-    SnippetSortOrder,
+    MultiCursorModifier, ProjectSearchMode, ScrollBeyondLastLine, ScrollbarDiagnostics,
+    SeedQuerySetting, ShowMinimap, SnippetSortOrder,
 };
 use settings::{RegisterSetting, RelativeLineNumbers, Settings};
 use ui::scrollbars::ShowScrollbar;
@@ -169,7 +169,7 @@ pub struct DragAndDropSelection {
 }
 
 /// Default options for buffer and project search items.
-#[derive(Copy, Clone, Default, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct SearchSettings {
     /// Whether to show the project search button in the status bar.
     pub button: bool,
@@ -183,6 +183,25 @@ pub struct SearchSettings {
     pub regex: bool,
     /// Whether to center the cursor on each search match when navigating.
     pub center_on_match: bool,
+    /// Where project search opens by default.
+    pub project_search_mode: ProjectSearchMode,
+    /// Which side to dock the project search panel when panel mode is enabled.
+    pub project_search_panel_dock: DockSide,
+}
+
+impl Default for SearchSettings {
+    fn default() -> Self {
+        Self {
+            button: true,
+            whole_word: false,
+            case_sensitive: false,
+            include_ignored: false,
+            regex: false,
+            center_on_match: false,
+            project_search_mode: ProjectSearchMode::Tab,
+            project_search_panel_dock: DockSide::Right,
+        }
+    }
 }
 
 impl EditorSettings {
@@ -283,6 +302,8 @@ impl Settings for EditorSettings {
                 include_ignored: search.include_ignored.unwrap(),
                 regex: search.regex.unwrap(),
                 center_on_match: search.center_on_match.unwrap(),
+                project_search_mode: search.project_search_mode.unwrap(),
+                project_search_panel_dock: search.project_search_panel_dock.unwrap(),
             },
             auto_signature_help: editor.auto_signature_help.unwrap(),
             show_signature_help_after_edits: editor.show_signature_help_after_edits.unwrap(),

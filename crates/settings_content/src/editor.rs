@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use settings_macros::{MergeFrom, with_fallible_options};
 
 use crate::{
-    DelayMs, DiagnosticSeverityContent, ShowScrollbar, serialize_f32_with_two_decimal_places,
+    DelayMs, DiagnosticSeverityContent, DockSide, ShowScrollbar,
+    serialize_f32_with_two_decimal_places,
 };
 
 #[with_fallible_options]
@@ -935,6 +936,31 @@ pub struct SearchSettingsContent {
     pub regex: Option<bool>,
     /// Whether to center the cursor on each search match when navigating.
     pub center_on_match: Option<bool>,
+    /// Where project search opens by default.
+    pub project_search_mode: Option<ProjectSearchMode>,
+    /// Which side to dock the project search panel when panel mode is enabled.
+    pub project_search_panel_dock: Option<DockSide>,
+}
+
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectSearchMode {
+    #[default]
+    Tab,
+    Panel,
 }
 
 #[with_fallible_options]
